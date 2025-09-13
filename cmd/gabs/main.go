@@ -7,6 +7,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -438,13 +439,18 @@ func promptString(prompt, defaultValue string) string {
 		fmt.Printf("%s: ", prompt)
 	}
 	
-	var input string
-	fmt.Scanln(&input)
-	
-	if input == "" {
-		return defaultValue
+	// Use bufio.Scanner to read the entire line, including spaces
+	scanner := bufio.NewScanner(os.Stdin)
+	if scanner.Scan() {
+		input := strings.TrimSpace(scanner.Text())
+		if input == "" {
+			return defaultValue
+		}
+		return input
 	}
-	return input
+	
+	// If scan failed or reached EOF, return default value
+	return defaultValue
 }
 
 func promptChoice(prompt, defaultValue string, choices []string) string {
@@ -457,8 +463,12 @@ func promptChoice(prompt, defaultValue string, choices []string) string {
 	}
 	fmt.Print(": ")
 	
+	// Use bufio.Scanner to read the entire line, including spaces
+	scanner := bufio.NewScanner(os.Stdin)
 	var input string
-	fmt.Scanln(&input)
+	if scanner.Scan() {
+		input = strings.TrimSpace(scanner.Text())
+	}
 	
 	if input == "" {
 		return defaultValue
