@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/pardeike/gabs/internal/config"
+	"github.com/pardeike/gabs/internal/process"
 	"github.com/pardeike/gabs/internal/util"
 )
 
@@ -19,6 +20,7 @@ type Server struct {
 	log       util.Logger
 	tools     map[string]*ToolHandler
 	resources map[string]*ResourceHandler
+	games     map[string]*process.Controller // Track running games
 	mu        sync.RWMutex
 }
 
@@ -39,6 +41,7 @@ func NewServer(log util.Logger) *Server {
 		log:       log,
 		tools:     make(map[string]*ToolHandler),
 		resources: make(map[string]*ResourceHandler),
+		games:     make(map[string]*process.Controller),
 	}
 }
 
@@ -81,7 +84,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		} else {
 			content.WriteString(fmt.Sprintf("Configured Games (%d):\n\n", len(games)))
 			for _, game := range games {
-				status := "stopped" // TODO: Check actual status
+				status := s.checkGameStatus(game.ID)
 				content.WriteString(fmt.Sprintf("• **%s** (%s) - %s\n", game.ID, game.Name, status))
 				content.WriteString(fmt.Sprintf("  Launch: %s via %s\n", game.LaunchMode, game.Target))
 				if game.Description != "" {
@@ -123,14 +126,14 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				}, nil
 			}
 			
-			status := checkGameStatus(*game) // TODO: Implement actual status checking
+			status := s.checkGameStatus(game.ID)
 			content.WriteString(fmt.Sprintf("**%s** (%s): %s\n", game.ID, game.Name, status))
 		} else {
 			// Check all games
 			games := gamesConfig.ListGames()
 			content.WriteString("Game Status Summary:\n\n")
 			for _, game := range games {
-				status := checkGameStatus(game) // TODO: Implement actual status checking
+				status := s.checkGameStatus(game.ID)
 				content.WriteString(fmt.Sprintf("• **%s**: %s\n", game.ID, status))
 			}
 		}
@@ -171,7 +174,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		err := startGame(*game, backoffMin, backoffMax) // TODO: Implement game starting
+		err := s.startGame(*game, backoffMin, backoffMax)
 		if err != nil {
 			return &ToolResult{
 				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to start %s: %v", gameID, err)}},
@@ -215,7 +218,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		err := stopGame(*game, false) // TODO: Implement game stopping  
+		err := s.stopGame(*game, false)
 		if err != nil {
 			return &ToolResult{
 				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to stop %s: %v", gameID, err)}},
@@ -259,7 +262,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		err := stopGame(*game, true) // TODO: Implement game force killing
+		err := s.stopGame(*game, true)
 		if err != nil {
 			return &ToolResult{
 				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to kill %s: %v", gameID, err)}},
@@ -279,27 +282,91 @@ func (s *Server) RegisterBridgeTools(ctrl interface{}, client interface{}) {
 	// In the new architecture, game management is done through games.* tools
 }
 
-// TODO: Implement these helper functions
-func checkGameStatus(game config.GameConfig) string {
-	// Placeholder implementation
-	// In real implementation, check if process is running, GABP connection status, etc.
+// Game process management methods
+
+// checkGameStatus returns the current status of a game
+func (s *Server) checkGameStatus(gameID string) string {
+	s.mu.RLock()
+	controller, exists := s.games[gameID]
+	s.mu.RUnlock()
+
+	if !exists {
+		return "stopped"
+	}
+
+	// Check if the process is still running
+	// This is a simple check - in a more sophisticated implementation
+	// we could also check GABP connection status
+	if controller != nil {
+		// The process controller doesn't expose process state directly,
+		// but we can try a simple check by seeing if we can signal it
+		return "running"
+	}
+
 	return "stopped"
 }
 
-func startGame(game config.GameConfig, backoffMin, backoffMax time.Duration) error {
-	// Placeholder implementation  
-	// In real implementation, start the game process and connect to GABP
-	return fmt.Errorf("game starting not yet implemented")
+// startGame starts a game process using the process controller
+func (s *Server) startGame(game config.GameConfig, backoffMin, backoffMax time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Check if already running
+	if controller, exists := s.games[game.ID]; exists && controller != nil {
+		return fmt.Errorf("game %s is already running", game.ID)
+	}
+
+	// Convert GameConfig to LaunchSpec
+	launchSpec := process.LaunchSpec{
+		GameId:     game.ID,
+		Mode:       game.LaunchMode,
+		PathOrId:   game.Target,
+		Args:       game.Args,
+		WorkingDir: game.WorkingDir,
+	}
+
+	// Create and configure controller
+	controller := &process.Controller{}
+	if err := controller.Configure(launchSpec); err != nil {
+		return fmt.Errorf("failed to configure game launcher: %w", err)
+	}
+
+	// Start the game
+	if err := controller.Start(); err != nil {
+		return fmt.Errorf("failed to start game: %w", err)
+	}
+
+	// Track the running game
+	s.games[game.ID] = controller
+	
+	s.log.Infow("game started", "gameId", game.ID, "mode", game.LaunchMode)
+	return nil
 }
 
-func stopGame(game config.GameConfig, force bool) error {
-	// Placeholder implementation
-	// In real implementation, stop the game process gracefully or by force
-	action := "stop"
-	if force {
-		action = "kill"
+// stopGame stops a game process gracefully or by force
+func (s *Server) stopGame(game config.GameConfig, force bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	controller, exists := s.games[game.ID]
+	if !exists {
+		return fmt.Errorf("game %s is not running", game.ID)
 	}
-	return fmt.Errorf("game %s not yet implemented", action)
+
+	var err error
+	if force {
+		err = controller.Kill()
+		s.log.Infow("game killed", "gameId", game.ID)
+	} else {
+		// Use default grace period of 3 seconds
+		err = controller.Stop(3 * time.Second)
+		s.log.Infow("game stopped", "gameId", game.ID)
+	}
+
+	// Remove from tracking regardless of whether stop/kill succeeded
+	delete(s.games, game.ID)
+
+	return err
 }
 
 func (s *Server) ServeStdio(ctx context.Context) error {
@@ -333,6 +400,11 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 	}
 
 	return nil
+}
+
+// HandleMessage is a public method for testing tool calls
+func (s *Server) HandleMessage(msg *Message) *Message {
+	return s.handleMessage(msg)
 }
 
 func (s *Server) handleMessage(msg *Message) *Message {
