@@ -85,8 +85,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			content.WriteString(fmt.Sprintf("Configured Games (%d):\n\n", len(games)))
 			for _, game := range games {
 				status := s.checkGameStatus(game.ID)
-				content.WriteString(fmt.Sprintf("• **%s** (%s) - %s\n", game.ID, game.Name, status))
-				content.WriteString(fmt.Sprintf("  Launch: %s via %s\n", game.LaunchMode, game.Target))
+				content.WriteString(fmt.Sprintf("• **%s** - %s (%s)\n", game.ID, game.Name, status))
+				content.WriteString(fmt.Sprintf("  Use gameId: '%s' (or target: '%s')\n", game.ID, game.Target))
+				content.WriteString(fmt.Sprintf("  Launch: %s\n", game.LaunchMode))
 				if game.Description != "" {
 					content.WriteString(fmt.Sprintf("  %s\n", game.Description))
 				}
@@ -102,26 +103,26 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 	// games.status tool
 	s.RegisterTool(Tool{
 		Name:        "games.status",
-		Description: "Check the status of one or more games",
+		Description: "Check the status of one or more games using game ID or launch target",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
-					"description": "Game ID to check status for (optional, checks all if not provided)",
+					"description": "Game ID or launch target to check (optional, checks all if not provided)",
 				},
 			},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
-		gameID, hasGameID := args["gameId"].(string)
+		gameIdOrTarget, hasGameID := args["gameId"].(string)
 		
 		var content strings.Builder
 		if hasGameID {
 			// Check specific game
-			game, exists := gamesConfig.GetGame(gameID)
+			game, exists := s.resolveGameId(gamesConfig, gameIdOrTarget)
 			if !exists {
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found", gameID)}},
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games.list to see available games.", gameIdOrTarget)}},
 					IsError: true,
 				}, nil
 			}
@@ -146,19 +147,19 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 	// games.start tool
 	s.RegisterTool(Tool{
 		Name:        "games.start",
-		Description: "Start a configured game",
+		Description: "Start a configured game using game ID or launch target (e.g., Steam App ID)",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
-					"description": "Game ID to start",
+					"description": "Game ID or launch target (Steam App ID, path, etc.)",
 				},
 			},
 			"required": []string{"gameId"},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
-		gameID, ok := args["gameId"].(string)
+		gameIdOrTarget, ok := args["gameId"].(string)
 		if !ok {
 			return &ToolResult{
 				Content: []Content{{Type: "text", Text: "gameId parameter is required"}},
@@ -166,10 +167,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		game, exists := gamesConfig.GetGame(gameID)
+		game, exists := s.resolveGameId(gamesConfig, gameIdOrTarget)
 		if !exists {
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found", gameID)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games.list to see available games.", gameIdOrTarget)}},
 				IsError: true,
 			}, nil
 		}
@@ -177,32 +178,32 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		err := s.startGame(*game, backoffMin, backoffMax)
 		if err != nil {
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to start %s: %v", gameID, err)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to start %s: %v", game.ID, err)}},
 				IsError: true,
 			}, nil
 		}
 
 		return &ToolResult{
-			Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' started successfully", gameID)}},
+			Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' (%s) started successfully", game.ID, game.Name)}},
 		}, nil
 	})
 
 	// games.stop tool
 	s.RegisterTool(Tool{
 		Name:        "games.stop",
-		Description: "Gracefully stop a running game",
+		Description: "Gracefully stop a running game using game ID or launch target",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
-					"description": "Game ID to stop",
+					"description": "Game ID or launch target to stop",
 				},
 			},
 			"required": []string{"gameId"},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
-		gameID, ok := args["gameId"].(string)
+		gameIdOrTarget, ok := args["gameId"].(string)
 		if !ok {
 			return &ToolResult{
 				Content: []Content{{Type: "text", Text: "gameId parameter is required"}},
@@ -210,10 +211,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		game, exists := gamesConfig.GetGame(gameID)
+		game, exists := s.resolveGameId(gamesConfig, gameIdOrTarget)
 		if !exists {
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found", gameID)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games.list to see available games.", gameIdOrTarget)}},
 				IsError: true,
 			}, nil
 		}
@@ -221,32 +222,32 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		err := s.stopGame(*game, false)
 		if err != nil {
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to stop %s: %v", gameID, err)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to stop %s: %v", game.ID, err)}},
 				IsError: true,
 			}, nil
 		}
 
 		return &ToolResult{
-			Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' stopped successfully", gameID)}},
+			Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' (%s) stopped successfully", game.ID, game.Name)}},
 		}, nil
 	})
 
 	// games.kill tool
 	s.RegisterTool(Tool{
 		Name:        "games.kill",
-		Description: "Force terminate a running game",
+		Description: "Force terminate a running game using game ID or launch target",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
-					"description": "Game ID to force terminate",
+					"description": "Game ID or launch target to force terminate",
 				},
 			},
 			"required": []string{"gameId"},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
-		gameID, ok := args["gameId"].(string)
+		gameIdOrTarget, ok := args["gameId"].(string)
 		if !ok {
 			return &ToolResult{
 				Content: []Content{{Type: "text", Text: "gameId parameter is required"}},
@@ -254,10 +255,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		game, exists := gamesConfig.GetGame(gameID)
+		game, exists := s.resolveGameId(gamesConfig, gameIdOrTarget)
 		if !exists {
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found", gameID)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games.list to see available games.", gameIdOrTarget)}},
 				IsError: true,
 			}, nil
 		}
@@ -265,13 +266,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		err := s.stopGame(*game, true)
 		if err != nil {
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to kill %s: %v", gameID, err)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to kill %s: %v", game.ID, err)}},
 				IsError: true,
 			}, nil
 		}
 
 		return &ToolResult{
-			Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' terminated successfully", gameID)}},
+			Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' (%s) terminated successfully", game.ID, game.Name)}},
 		}, nil
 	})
 }
@@ -283,6 +284,24 @@ func (s *Server) RegisterBridgeTools(ctrl interface{}, client interface{}) {
 }
 
 // Game process management methods
+
+// resolveGameId tries to find a game by ID or by target (for better UX)
+// Returns the actual game config and whether it was found
+func (s *Server) resolveGameId(gamesConfig *config.GamesConfig, gameIdOrTarget string) (*config.GameConfig, bool) {
+	// First try direct lookup by game ID
+	if game, exists := gamesConfig.GetGame(gameIdOrTarget); exists {
+		return game, true
+	}
+	
+	// If not found, try to find by target (Steam App ID, path, etc.)
+	for _, game := range gamesConfig.ListGames() {
+		if game.Target == gameIdOrTarget {
+			return &game, true
+		}
+	}
+	
+	return nil, false
+}
 
 // checkGameStatus returns the current status of a game
 func (s *Server) checkGameStatus(gameID string) string {
