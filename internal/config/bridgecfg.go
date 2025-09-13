@@ -15,12 +15,26 @@ type BridgeJSON struct {
 	Token   string `json:"token"`
 	GameId  string `json:"gameId"`
 	Agent   string `json:"agentName"`
+	Host    string `json:"host,omitempty"`    // Host address for GABP server (defaults to 127.0.0.1)
+	Mode    string `json:"mode,omitempty"`    // Connection mode: "local" (default) or "remote"  
 	// PROMPT: Optional extra fields for mod consumption.
 }
 
-// WriteBridgeJSON generates a random port and token, writes bridge.json atomically to the config dir
+// BridgeConfig contains configuration for GABP connection
+type BridgeConfig struct {
+	Host string // Host for GABP server connection (defaults to "127.0.0.1")
+	Mode string // Connection mode: "local" or "remote"
+}
+
+// WriteBridgeJSON generates a random port and token, writes bridge.json atomically to the config dir  
 // Returns (port, token, configPath, error)
 func WriteBridgeJSON(gameID, configDir string) (int, string, string, error) {
+	return WriteBridgeJSONWithConfig(gameID, configDir, BridgeConfig{})
+}
+
+// WriteBridgeJSONWithConfig generates bridge.json with custom configuration
+// Returns (port, token, configPath, error)
+func WriteBridgeJSONWithConfig(gameID, configDir string, config BridgeConfig) (int, string, string, error) {
 	// Generate random port (49152-65535 dynamic range)
 	port := 49152 + (randomInt() % (65535 - 49152 + 1))
 	
@@ -41,12 +55,24 @@ func WriteBridgeJSON(gameID, configDir string) (int, string, string, error) {
 		return 0, "", "", fmt.Errorf("failed to create config dir: %w", err)
 	}
 
+	// Set defaults for configuration
+	host := config.Host
+	if host == "" {
+		host = "127.0.0.1" // Default to localhost
+	}
+	mode := config.Mode
+	if mode == "" {
+		mode = "local" // Default to local mode
+	}
+
 	// Create bridge config
 	bridge := BridgeJSON{
 		Port:   port,
 		Token:  token,
 		GameId: gameID,
 		Agent:  "gabs-v0.1.0",
+		Host:   host,
+		Mode:   mode,
 	}
 
 	// Write atomically (temp file + rename)
@@ -68,6 +94,33 @@ func WriteBridgeJSON(gameID, configDir string) (int, string, string, error) {
 	}
 
 	return port, token, cfgPath, nil
+}
+
+// ReadBridgeJSON reads existing bridge.json and returns connection info
+// Returns (host, port, token, error) 
+func ReadBridgeJSON(gameID, configDir string) (string, int, string, error) {
+	cfgDir, err := getConfigDir(gameID, configDir)
+	if err != nil {
+		return "", 0, "", fmt.Errorf("failed to get config dir: %w", err)
+	}
+
+	cfgPath := filepath.Join(cfgDir, "bridge.json")
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return "", 0, "", fmt.Errorf("failed to read bridge.json: %w", err)
+	}
+
+	var bridge BridgeJSON
+	if err := json.Unmarshal(data, &bridge); err != nil {
+		return "", 0, "", fmt.Errorf("failed to parse bridge.json: %w", err)
+	}
+
+	host := bridge.Host
+	if host == "" {
+		host = "127.0.0.1" // Default to localhost for backward compatibility
+	}
+
+	return host, bridge.Port, bridge.Token, nil
 }
 
 // getConfigDir computes per-OS config directory

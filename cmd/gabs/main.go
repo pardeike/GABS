@@ -47,6 +47,10 @@ type options struct {
 	// Server transport
 	httpAddr string // if empty → stdio
 
+	// GABP connection config
+	gabpHost string // Host for GABP server connection (for remote scenarios)
+	gabpMode string // Connection mode: local|remote|connect
+
 	// Config + runtime
 	configDir  string
 	logLevel   string
@@ -93,6 +97,8 @@ func main() {
 		logLevel   = fs.String("log-level", "info", "Log level: trace|debug|info|warn|error")
 		backoff    = fs.String("reconnectBackoff", defaultBackoff, "Reconnect backoff window, e.g. '100ms..5s'")
 		grace      = fs.Duration("grace", 3*time.Second, "Graceful stop timeout before kill")
+		gabpHost   = fs.String("gabpHost", "", "GABP server host for remote connections (default: 127.0.0.1)")
+		gabpMode   = fs.String("gabpMode", "local", "GABP connection mode: local|remote|connect")
 	)
 
 	var argv multiFlag
@@ -122,6 +128,8 @@ func main() {
 		backoffMin: min,
 		backoffMax: max,
 		graceStop:  *grace,
+		gabpHost:   *gabpHost,
+		gabpMode:   *gabpMode,
 	}
 
 	// PROMPT: Initialize structured logger to stderr only; do not write to stdout if using stdio MCP.
@@ -184,13 +192,23 @@ Common flags (run/start/attach):
   --cwd <dir>                   Working dir for DirectPath/CustomCommand
   --http <addr>                 Run MCP as HTTP on address; if empty, use stdio
   --configDir <dir>             Override config dir for bridge.json
+  --gabpHost <host>             GABP server host for remote connections (default: 127.0.0.1)
+  --gabpMode <mode>             GABP connection mode: local|remote|connect (default: local)
   --reconnectBackoff <min..max> Reconnect backoff window (default %s)
   --log-level <lvl>             trace|debug|info|warn|error
   --grace <dur>                 Graceful stop timeout for stop/restart (default 3s)
 
+Connection Modes:
+  local                         GABS writes bridge.json, launches game, connects locally (default)
+  remote                        GABS writes bridge.json with remote host, launches game for remote access
+  connect                       GABS reads existing bridge.json created by game mod and connects to it
+
 Examples:
   gabs run --gameId rimworld --launch SteamAppId --target 294100
   gabs run --gameId rimworld --launch DirectPath --target "/Applications/RimWorld.app" --arg "-logfile" --arg "-"
+  gabs run --gameId minecraft --gabpMode remote --gabpHost 192.168.1.100 --launch DirectPath --target "/path/to/minecraft"
+  gabs attach --gameId minecraft --gabpHost 192.168.1.100
+  gabs run --gameId modded-game --gabpMode connect
 `, Version, defaultBackoff)
 }
 
@@ -203,38 +221,74 @@ func run(ctx context.Context, log util.Logger, opts options) int {
 		return 2
 	}
 
-	// PROMPT: Compute config path and write bridge.json atomically. Generate random port+token.
-	port, token, cfgPath, err := config.WriteBridgeJSON(opts.gameID, opts.configDir)
-	if err != nil {
-		log.Errorw("failed to write bridge.json", "error", err)
-		return 1
-	}
-	log.Debugw("bridge.json prepared", "path", cfgPath, "port", port)
+	var addr, token string
+	var port int
+	var err error
+	var ctrl *process.Controller // Declare controller for both modes
 
-	// PROMPT: Configure and start target application according to launch mode.
-	ctrl := &process.Controller{}
-	if err := ctrl.Configure(process.LaunchSpec{
-		GameId:     opts.gameID,
-		Mode:       opts.launchMode,
-		PathOrId:   opts.target,
-		Args:       opts.args,
-		WorkingDir: opts.cwd,
-	}); err != nil {
-		log.Errorw("failed to configure app", "error", err)
-		return 1
+	if opts.gabpMode == "connect" {
+		// Connect mode: read existing bridge.json created by mod
+		var host string
+		host, port, token, err = config.ReadBridgeJSON(opts.gameID, opts.configDir)
+		if err != nil {
+			log.Errorw("failed to read bridge.json", "error", err, "hint", "ensure game mod is running and has created bridge.json")
+			return 1
+		}
+		// Override host if specified via flag
+		if opts.gabpHost != "" {
+			host = opts.gabpHost
+		}
+		addr = fmt.Sprintf("%s:%d", host, port)
+		log.Infow("connecting to existing GABP server", "addr", addr)
+		// No process controller in connect mode
+		ctrl = nil
+	} else {
+		// Local/Remote mode: create bridge.json for mod to read
+		bridgeConfig := config.BridgeConfig{
+			Host: opts.gabpHost,
+			Mode: opts.gabpMode,
+		}
+		
+		var cfgPath string
+		port, token, cfgPath, err = config.WriteBridgeJSONWithConfig(opts.gameID, opts.configDir, bridgeConfig)
+		if err != nil {
+			log.Errorw("failed to write bridge.json", "error", err)
+			return 1
+		}
+		
+		host := opts.gabpHost
+		if host == "" {
+			host = "127.0.0.1"
+		}
+		addr = fmt.Sprintf("%s:%d", host, port)
+		log.Debugw("bridge.json prepared", "path", cfgPath, "port", port, "host", host, "mode", opts.gabpMode)
+
+		// Configure and start target application according to launch mode (only if not in connect mode)
+		ctrl = &process.Controller{}
+		if err := ctrl.Configure(process.LaunchSpec{
+			GameId:     opts.gameID,
+			Mode:       opts.launchMode,
+			PathOrId:   opts.target,
+			Args:       opts.args,
+			WorkingDir: opts.cwd,
+		}); err != nil {
+			log.Errorw("failed to configure app", "error", err)
+			return 1
+		}
+		if err := ctrl.Start(); err != nil {
+			log.Errorw("failed to start app", "error", err)
+			return 1
+		}
+		defer func() {
+			// PROMPT: Stop or leave running based on policy/env; default to keep running on HTTP, stop on stdio exit.
+			if ctrl != nil {
+				_ = ctrl
+			}
+		}()
 	}
-	if err := ctrl.Start(); err != nil {
-		log.Errorw("failed to start app", "error", err)
-		return 1
-	}
-	defer func() {
-		// PROMPT: Stop or leave running based on policy/env; default to keep running on HTTP, stop on stdio exit.
-		_ = ctrl
-	}()
 
 	// PROMPT: Connect to GABP server with reconnect/backoff and hello/welcome handshake.
 	client := gabp.NewClient(log)
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	if err := client.Connect(addr, token, opts.backoffMin, opts.backoffMax); err != nil {
 		log.Errorw("failed to connect to GABP", "addr", addr, "error", err)
 		return 1
@@ -285,13 +339,23 @@ func cmdStart(ctx context.Context, log util.Logger, opts options) int {
 		return 2
 	}
 
-	// Write bridge.json and launch the app
-	port, _, cfgPath, err := config.WriteBridgeJSON(opts.gameID, opts.configDir)
+	// Write bridge.json with configuration and launch the app
+	bridgeConfig := config.BridgeConfig{
+		Host: opts.gabpHost,
+		Mode: opts.gabpMode,
+	}
+	
+	port, _, cfgPath, err := config.WriteBridgeJSONWithConfig(opts.gameID, opts.configDir, bridgeConfig)
 	if err != nil {
 		log.Errorw("failed to write bridge.json", "error", err)
 		return 1
 	}
-	log.Infow("bridge.json written", "path", cfgPath, "port", port)
+	
+	host := opts.gabpHost
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	log.Infow("bridge.json written", "path", cfgPath, "port", port, "host", host, "mode", opts.gabpMode)
 
 	// Configure and start the process
 	ctrl := &process.Controller{}
@@ -335,9 +399,70 @@ func cmdRestart(ctx context.Context, log util.Logger, opts options) int {
 }
 
 func cmdAttach(ctx context.Context, log util.Logger, opts options) int {
-	// PROMPT: Skip launching. Assume mod started GABP and wrote bridge.json. Read it, connect, then run MCP like in run().
-	_ = log
-	return 0
+	if opts.gameID == "" {
+		fmt.Fprintln(os.Stderr, "--gameId is required")
+		return 2
+	}
+
+	// Read existing bridge.json created by mod  
+	host, port, token, err := config.ReadBridgeJSON(opts.gameID, opts.configDir)
+	if err != nil {
+		log.Errorw("failed to read bridge.json", "error", err, "hint", "ensure game mod is running and has created bridge.json")
+		return 1
+	}
+
+	// Override host if specified via flag
+	if opts.gabpHost != "" {
+		host = opts.gabpHost
+	}
+
+	addr := fmt.Sprintf("%s:%d", host, port)
+	log.Infow("attaching to existing GABP server", "addr", addr)
+
+	// Connect to GABP server
+	client := gabp.NewClient(log)
+	if err := client.Connect(addr, token, opts.backoffMin, opts.backoffMax); err != nil {
+		log.Errorw("failed to connect to GABP", "addr", addr, "error", err)
+		return 1
+	}
+
+	// Create MCP server and mirror
+	server := mcp.NewServer(log)
+	m := mirror.New(log, server, client)
+	
+	if err := m.SyncTools(); err != nil {
+		log.Errorw("tool sync failed", "error", err)
+		return 1
+	}
+	if err := m.ExposeResources(); err != nil {
+		log.Errorw("resource expose failed", "error", err)
+		return 1
+	}
+	
+	// Note: no process controller for attach mode
+	server.RegisterBridgeTools(nil, client)
+
+	// Start serving MCP
+	errCh := make(chan error, 1)
+	go func() {
+		if opts.httpAddr == "" {
+			errCh <- server.ServeStdio(ctx)
+		} else {
+			errCh <- server.ServeHTTP(ctx, opts.httpAddr)
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		log.Infow("shutdown signal received")
+		return 0
+	case err := <-errCh:
+		if err != nil {
+			log.Errorw("server exited with error", "error", err)
+			return 1
+		}
+		return 0
+	}
 }
 
 func cmdStatus(ctx context.Context, log util.Logger, opts options) int {

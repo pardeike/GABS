@@ -23,6 +23,8 @@ GABS is a universal bridge that connects AI tools to GABP compliant modification
 
 GABS implements the [GABP (Game Agent Bridge Protocol)](https://github.com/pardeike/GABP) - a standard way for AI tools to communicate with games through GABP compliant mods. Think of it as a translator that lets AI assistants "speak" to your game mods that have implemented the GABP protocol.
 
+**Key Architecture Insight:** In GABS, the **game mod acts as the GABP server** and **GABS acts as the client**. This design supports both local development and cloud-based AI scenarios where AI systems running in sandboxes can connect out to games running elsewhere.
+
 The server connects to mods in your game that support GABP. These can be:
 - **Central community mods** that search for and expose tools from all installed mods
 - **Individual mods** using a GABP framework to expose their own functionality  
@@ -31,6 +33,7 @@ The server connects to mods in your game that support GABP. These can be:
 
 ```
 Your AI Assistant ← → GABS ← → GABP Compliant Mod ← → Your Game
+                  MCP      GABP (mod=server)
 ```
 
 **Key Features:**
@@ -53,11 +56,14 @@ Choose your platform:
 ### 2. Basic Usage
 
 ```bash
-# Launch your game with GABS bridge
+# Launch your game with GABS bridge (local development)
 gabs run --gameId minecraft --launch DirectPath --target "/path/to/minecraft"
 
-# Or connect to already running game
-gabs attach --gameId minecraft
+# For cloud AI scenarios: configure for remote access
+gabs run --gameId minecraft --gabpMode remote --gabpHost 192.168.1.100 --launch DirectPath --target "/path/to/minecraft"
+
+# Connect to already running game (when mod manages its own GABP server)
+gabs attach --gameId minecraft --gabpHost your-game-server.com
 
 # Check if everything is working  
 gabs status --gameId minecraft
@@ -69,6 +75,34 @@ GABS acts as an MCP (Model Context Protocol) server, so it works automatically w
 - **Claude Desktop** (with MCP support)
 - **VS Code** (with MCP extensions)
 - **Custom AI tools** (using MCP protocol)
+
+## Connection Modes & Deployment Scenarios
+
+GABS supports flexible deployment patterns through different connection modes:
+
+### Local Development (Default)
+Perfect for development where AI and game run on the same machine:
+```bash
+gabs run --gameId rimworld --launch SteamAppId --target 294100
+```
+
+### Cloud AI + Remote Game
+For AI running in cloud/sandbox connecting to games on remote machines:
+```bash
+# On game machine: configure for remote access
+gabs run --gameId minecraft --gabpMode remote --gabpHost 192.168.1.100 --launch DirectPath --target "/path/to/minecraft"
+
+# AI connects from cloud
+gabs attach --gameId minecraft --gabpHost your-home-ip.ddns.net
+```
+
+### Advanced: Connect Mode
+When game mods manage their own GABP server lifecycle:
+```bash
+gabs run --gameId modded-game --gabpMode connect
+```
+
+See **[DEPLOYMENT.md](DEPLOYMENT.md)** for comprehensive deployment scenarios, security considerations, and troubleshooting.
 
 ## Supported Launch Modes
 
@@ -211,6 +245,12 @@ GABS is licensed under the MIT License. See [LICENSE](LICENSE) for details.
 The GABP protocol specification is licensed under CC BY 4.0.
 
 ## FAQ
+
+**Q: Should the mod or GABS act as the server?**  
+A: Game mods act as GABP servers, and GABS connects to them as a client. This design supports both local development and cloud-based AI scenarios where sandboxes can connect out to games.
+
+**Q: Can I run AI in the cloud and game locally?**  
+A: Yes! Use `--gabpMode remote` when starting GABS with the game, then connect from cloud AI using `gabs attach --gabpHost <your-ip>`. See [DEPLOYMENT.md](DEPLOYMENT.md) for setup details.
 
 **Q: Do I need to modify my existing mod to use GABS?**  
 A: Yes, your mod needs to implement the GABP protocol to communicate with GABS. This makes it "GABP compliant." But it's just a simple JSON API!
