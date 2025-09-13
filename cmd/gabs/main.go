@@ -215,7 +215,8 @@ func runServer(ctx context.Context, log util.Logger, opts options) int {
 
 func manageGames(ctx context.Context, log util.Logger, opts options, args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintf(os.Stderr, "games subcommand requires an action: list|add|remove|show\n")
+		fmt.Fprintf(os.Stderr, "Please specify what you'd like to do with games.\n\n")
+		showGamesUsage()
 		return 2
 	}
 
@@ -407,6 +408,21 @@ func showGame(log util.Logger, gameID string) int {
 }
 
 // === Helper Functions ===
+
+func showGamesUsage() {
+	fmt.Fprintf(os.Stderr, `Game Management Commands:
+  gabs games list               List all configured games
+  gabs games add <id>           Add a new game configuration (interactive)
+  gabs games remove <id>        Remove a game configuration
+  gabs games show <id>          Show details for a game
+
+Examples:
+  gabs games list               # See all your configured games
+  gabs games add minecraft      # Add a new game called 'minecraft'
+  gabs games show minecraft     # View configuration for 'minecraft'
+  gabs games remove minecraft   # Remove the 'minecraft' configuration
+`)
+}
 
 // isInteractive checks if the program is running in an interactive terminal
 func isInteractive() bool {
