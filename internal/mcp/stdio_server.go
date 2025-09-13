@@ -131,11 +131,6 @@ func (s *Server) ServeStdio(ctx context.Context) error {
 	return s.Serve(os.Stdin, os.Stdout)
 }
 
-func (s *Server) ServeHTTP(ctx context.Context, addr string) error {
-	// TODO: Implement HTTP transport
-	return fmt.Errorf("HTTP transport not implemented yet")
-}
-
 func (s *Server) Serve(r io.Reader, w io.Writer) error {
 	// Implement newline-delimited JSON-RPC over stdio per MCP stdio transport
 	reader := util.NewNewlineFrameReader(r)

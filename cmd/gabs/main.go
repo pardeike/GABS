@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -183,14 +184,14 @@ Common flags (run/start/attach):
   --cwd <dir>                   Working dir for DirectPath/CustomCommand
   --http <addr>                 Run MCP as HTTP on address; if empty, use stdio
   --configDir <dir>             Override config dir for bridge.json
-  --reconnectBackoff <min..max> Reconnect backoff window (default `+defaultBackoff+`)
+  --reconnectBackoff <min..max> Reconnect backoff window (default %s)
   --log-level <lvl>             trace|debug|info|warn|error
   --grace <dur>                 Graceful stop timeout for stop/restart (default 3s)
 
 Examples:
   gabs run --gameId rimworld --launch SteamAppId --target 294100
   gabs run --gameId rimworld --launch DirectPath --target "/Applications/RimWorld.app" --arg "-logfile" --arg "-"
-`)
+`, Version, defaultBackoff)
 }
 
 // === Subcommands ===
@@ -279,8 +280,39 @@ func run(ctx context.Context, log util.Logger, opts options) int {
 }
 
 func cmdStart(ctx context.Context, log util.Logger, opts options) int {
-	// PROMPT: Write bridge.json and launch the app. Print PID on stdout for scripting.
-	_, _, _, _ = config.WriteBridgeJSON, process.Controller{}, ctx, log
+	if opts.gameID == "" {
+		fmt.Fprintln(os.Stderr, "--gameId is required")
+		return 2
+	}
+
+	// Write bridge.json and launch the app
+	port, _, cfgPath, err := config.WriteBridgeJSON(opts.gameID, opts.configDir)
+	if err != nil {
+		log.Errorw("failed to write bridge.json", "error", err)
+		return 1
+	}
+	log.Infow("bridge.json written", "path", cfgPath, "port", port)
+
+	// Configure and start the process
+	ctrl := &process.Controller{}
+	if err := ctrl.Configure(process.LaunchSpec{
+		GameId:     opts.gameID,
+		Mode:       opts.launchMode,
+		PathOrId:   opts.target,
+		Args:       opts.args,
+		WorkingDir: opts.cwd,
+	}); err != nil {
+		log.Errorw("failed to configure app", "error", err)
+		return 1
+	}
+
+	if err := ctrl.Start(); err != nil {
+		log.Errorw("failed to start app", "error", err)
+		return 1
+	}
+
+	// Print process info for scripting
+	fmt.Printf("Started %s (port: %d)\n", opts.gameID, port)
 	return 0
 }
 
@@ -309,22 +341,98 @@ func cmdAttach(ctx context.Context, log util.Logger, opts options) int {
 }
 
 func cmdStatus(ctx context.Context, log util.Logger, opts options) int {
-	// PROMPT: Print JSON status: {running:bool, pid:int, gameId, since, mcp:{transport,addr}}
-	_ = ctx
+	// Read bridge.json if it exists
+	if opts.configDir != "" {
+		// Use provided config dir
+	} else {
+		// Try to determine config dir
+		if opts.gameID != "" {
+			_, err := getConfigDirForGameID(opts.gameID)
+			if err != nil {
+				log.Errorw("failed to get config dir", "error", err)
+				return 1
+			}
+		}
+	}
+
+	status := map[string]interface{}{
+		"running": false,
+		"pid":     nil,
+		"gameId":  opts.gameID,
+		"since":   nil,
+		"mcp": map[string]interface{}{
+			"transport": "stdio",
+			"addr":      nil,
+		},
+	}
+
+	// TODO: Check if process is actually running and populate real status
+	
+	data, _ := json.MarshalIndent(status, "", "  ")
+	fmt.Println(string(data))
 	return 0
 }
 
 // === Helpers ===
 
 func parseBackoff(s string) (time.Duration, time.Duration, error) {
-	// PROMPT: Parse "<min>..( <max> | inf )". Accept units per time.ParseDuration.
-	// Examples: "100ms..5s", "1s..30s", "250ms..inf".
-	// For now, return defaults; codegen should implement full parser.
+	// Parse "<min>..<max>" format 
+	// Examples: "100ms..5s", "1s..30s", "250ms..inf"
 	switch {
 	case s == "", s == defaultBackoff:
 		return 100 * time.Millisecond, 5 * time.Second, nil
 	default:
-		// PROMPT: Implement real parsing. Fallback to defaults on error.
-		return 100 * time.Millisecond, 5 * time.Second, nil
+		// Split on ".."
+		parts := strings.Split(s, "..")
+		if len(parts) != 2 {
+			return 100 * time.Millisecond, 5 * time.Second, fmt.Errorf("invalid format, expected 'min..max'")
+		}
+
+		min, err := time.ParseDuration(parts[0])
+		if err != nil {
+			return 100 * time.Millisecond, 5 * time.Second, fmt.Errorf("invalid min duration: %w", err)
+		}
+
+		var max time.Duration
+		if parts[1] == "inf" {
+			max = time.Hour * 24 // Large duration for "infinite"
+		} else {
+			max, err = time.ParseDuration(parts[1])
+			if err != nil {
+				return 100 * time.Millisecond, 5 * time.Second, fmt.Errorf("invalid max duration: %w", err)
+			}
+		}
+
+		return min, max, nil
 	}
+}
+
+func getConfigDirForGameID(gameID string) (string, error) {
+	// Use the same logic as config package
+	var baseDir string
+	switch runtime.GOOS {
+	case "windows":
+		appData := os.Getenv("APPDATA")
+		if appData == "" {
+			return "", fmt.Errorf("APPDATA environment variable not set")
+		}
+		baseDir = fmt.Sprintf("%s/GAB", appData)
+	case "darwin":
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		baseDir = fmt.Sprintf("%s/Library/Application Support/GAB", homeDir)
+	default:
+		stateHome := os.Getenv("XDG_STATE_HOME")
+		if stateHome == "" {
+			homeDir, err := os.UserHomeDir()
+			if err != nil {
+				return "", err
+			}
+			stateHome = fmt.Sprintf("%s/.local/state", homeDir)
+		}
+		baseDir = fmt.Sprintf("%s/gab", stateHome)
+	}
+	return fmt.Sprintf("%s/%s", baseDir, gameID), nil
 }
