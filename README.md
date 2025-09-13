@@ -28,9 +28,9 @@ GABS implements the [GABP (Game Agent Bridge Protocol)](https://github.com/parde
 
 ```
 Your AI Assistant ← MCP Tools → GABS ← GABP → Game Mod ← → Your Game
-                    games.start           (mod=server)
-                    games.stop
-                    games.list
+                    games_start           (mod=server)
+                    games_stop
+                    games_list
 ```
 
 **Key Features:**
@@ -81,11 +81,11 @@ gabs server --http localhost:8080
 
 Once the server is running, AI can control your games through these MCP tools:
 
-- **`games.list`** - List all configured games and their current status
-- **`games.start`** - Start a game: `{"gameId": "minecraft"}`
-- **`games.stop`** - Stop a game gracefully: `{"gameId": "minecraft"}`  
-- **`games.kill`** - Force terminate: `{"gameId": "minecraft"}`
-- **`games.status`** - Check status: `{"gameId": "minecraft"}` or all games
+- **`games_list`** - List all configured games and their current status
+- **`games_start`** - Start a game: `{"gameId": "minecraft"}`
+- **`games_stop`** - Stop a game gracefully: `{"gameId": "minecraft"}`  
+- **`games_kill`** - Force terminate: `{"gameId": "minecraft"}`
+- **`games_status`** - Check status: `{"gameId": "minecraft"}` or all games
 
 **Key advantage**: You can use either the game ID (`"rimworld"`) or launch target (`"294100"` for Steam App ID) interchangeably.
 
@@ -178,11 +178,11 @@ import mcp_client
 client = mcp_client.connect_stdio(["/path/to/gabs", "server"])
 
 # List games
-games = client.call_tool("games.list", {})
+games = client.call_tool("games_list", {})
 print(games)
 
 # Start a game
-result = client.call_tool("games.start", {"gameId": "minecraft"})
+result = client.call_tool("games_start", {"gameId": "minecraft"})
 ```
 
 ## Deployment Scenarios
@@ -231,7 +231,7 @@ gabs games add minecraft-survival
 gabs games add minecraft-creative  
 gabs games add rimworld-colony1
 gabs server
-# AI can control all servers through games.start/stop/status tools
+# AI can control all servers through games_start/games_stop/games_status tools
 ```
 
 ## For Mod Developers
@@ -289,8 +289,8 @@ gabs server
 
 AI can then manage them separately through MCP tools:
 ```json
-{"method": "tools/call", "params": {"name": "games.start", "arguments": {"gameId": "minecraft-server1"}}}
-{"method": "tools/call", "params": {"name": "games.start", "arguments": {"gameId": "minecraft-server2"}}}
+{"method": "tools/call", "params": {"name": "games_start", "arguments": {"gameId": "minecraft-server1"}}}
+{"method": "tools/call", "params": {"name": "games_start", "arguments": {"gameId": "minecraft-server2"}}}
 ```
 
 ### Custom Launch Modes
@@ -311,7 +311,7 @@ gabs server --http localhost:8080
 # Use standard HTTP MCP protocol
 curl -X POST http://localhost:8080/mcp \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "games.list", "arguments": {}}}'
+  -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "games_list", "arguments": {}}}'
 ```
 
 ## Build from Source
@@ -347,7 +347,7 @@ The GABP protocol specification is licensed under CC BY 4.0.
 A: GABS uses a configuration-first approach where you define games once through `gabs games add`, then control them naturally via AI using MCP tools. No complex CLI commands during operation - just `gabs server` and let AI handle the rest.
 
 **Q: How do I control games?**  
-A: After configuring games with `gabs games add` and starting `gabs server`, AI uses MCP tools like `games.start {"gameId": "minecraft"}`, `games.stop {"gameId": "rimworld"}`, etc. No manual CLI commands needed during gameplay.
+A: After configuring games with `gabs games add` and starting `gabs server`, AI uses MCP tools like `games_start {"gameId": "minecraft"}`, `games_stop {"gameId": "rimworld"}`, etc. No manual CLI commands needed during gameplay.
 
 **Q: Can I use Steam App IDs directly?**  
 A: Yes! You can use either the game ID you configured (`"rimworld"`) or the launch target (`"294100"` for Steam App ID) interchangeably in MCP tools.

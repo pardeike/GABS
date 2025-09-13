@@ -67,9 +67,9 @@ func (s *Server) RegisterResource(resource Resource, handler func() ([]Content, 
 
 // RegisterGameManagementTools registers the game management tools for the new architecture
 func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration) {
-	// games.list tool
+	// games_list tool
 	s.RegisterTool(Tool{
-		Name:        "games.list",
+		Name:        "games_list",
 		Description: "List all configured games and their current status",
 		InputSchema: map[string]interface{}{
 			"type":       "object",
@@ -100,9 +100,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}, nil
 	})
 
-	// games.status tool
+	// games_status tool
 	s.RegisterTool(Tool{
-		Name:        "games.status",
+		Name:        "games_status",
 		Description: "Check the status of one or more games using game ID or launch target",
 		InputSchema: map[string]interface{}{
 			"type": "object",
@@ -144,9 +144,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}, nil
 	})
 
-	// games.start tool
+	// games_start tool
 	s.RegisterTool(Tool{
-		Name:        "games.start",
+		Name:        "games_start",
 		Description: "Start a configured game using game ID or launch target (e.g., Steam App ID)",
 		InputSchema: map[string]interface{}{
 			"type": "object",
@@ -188,9 +188,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}, nil
 	})
 
-	// games.stop tool
+	// games_stop tool
 	s.RegisterTool(Tool{
-		Name:        "games.stop",
+		Name:        "games_stop",
 		Description: "Gracefully stop a running game using game ID or launch target",
 		InputSchema: map[string]interface{}{
 			"type": "object",
@@ -232,9 +232,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}, nil
 	})
 
-	// games.kill tool
+	// games_kill tool
 	s.RegisterTool(Tool{
-		Name:        "games.kill",
+		Name:        "games_kill",
 		Description: "Force terminate a running game using game ID or launch target",
 		InputSchema: map[string]interface{}{
 			"type": "object",
@@ -276,9 +276,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}, nil
 	})
 
-	// games.tools tool - List tools available for specific games
+	// games_tools tool - List tools available for specific games
 	s.RegisterTool(Tool{
-		Name:        "games.tools", 
+		Name:        "games_tools", 
 		Description: "List game-specific tools available from running games with GABP connections",
 		InputSchema: map[string]interface{}{
 			"type": "object",
@@ -342,7 +342,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				content.WriteString("Start games with GABP-compliant mods to see their tools.\n")
 			}
 			
-			content.WriteString("\nNote: Tools are prefixed with game ID (e.g., 'minecraft.inventory/get') to avoid conflicts between games.\n")
+			content.WriteString("\nNote: Tools are prefixed with game ID (e.g., 'minecraft_inventory_get') to avoid conflicts between games.\n")
 		}
 		
 		return &ToolResult{
@@ -383,7 +383,7 @@ func (s *Server) getGameSpecificTools(gameID string) []Tool {
 	defer s.mu.RUnlock()
 	
 	var gameTools []Tool
-	prefix := gameID + "."
+	prefix := gameID + "_"
 	
 	for toolName, handler := range s.tools {
 		if strings.HasPrefix(toolName, prefix) {

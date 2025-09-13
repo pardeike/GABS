@@ -58,8 +58,8 @@ if err != nil {
 
 Both of these work identically:
 ```json
-{"method": "tools/call", "params": {"name": "games.start", "arguments": {"gameId": "rimworld"}}}
-{"method": "tools/call", "params": {"name": "games.start", "arguments": {"gameId": "294100"}}}
+{"method": "tools/call", "params": {"name": "games_start", "arguments": {"gameId": "rimworld"}}}
+{"method": "tools/call", "params": {"name": "games_start", "arguments": {"gameId": "294100"}}}
 ```
 
 ### 4. Improved Application State Management
@@ -77,15 +77,15 @@ The actual GABS implementation uses a **configuration-first approach** that is m
 ### Current Workflow:
 1. **Configure games once**: `gabs games add minecraft` (interactive setup)
 2. **Start MCP server**: `gabs server` 
-3. **AI controls games**: Using MCP tools like `games.start {"gameId": "minecraft"}`
+3. **AI controls games**: Using MCP tools like `games_start {"gameId": "minecraft"}`
 
 ### MCP Tools Available:
-- `games.list` - List configured games and their status
-- `games.start` - Start a game (auto-creates GABP bridge)
-- `games.stop` - Stop a game gracefully  
-- `games.kill` - Force terminate a game
-- `games.status` - Check detailed game status
-- `games.tools` - List GABP tools from connected game mods
+- `games_list` - List configured games and their status
+- `games_start` - Start a game (auto-creates GABP bridge)
+- `games_stop` - Stop a game gracefully  
+- `games_kill` - Force terminate a game
+- `games_status` - Check detailed game status
+- `games_tools` - List GABP tools from connected game mods
 
 ### Key Advantages:
 - **Separation of concerns**: Configuration (CLI) vs Control (MCP)
