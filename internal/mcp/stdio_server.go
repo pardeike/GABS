@@ -84,10 +84,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		} else {
 			content.WriteString(fmt.Sprintf("Configured Games (%d):\n\n", len(games)))
 			for _, game := range games {
-				status := s.checkGameStatus(game.ID)
-				content.WriteString(fmt.Sprintf("• **%s** - %s (%s)\n", game.ID, game.Name, status))
+				statusDesc := s.getStatusDescription(game.ID, &game)
+				content.WriteString(fmt.Sprintf("• **%s** - %s (%s)\n", game.ID, game.Name, statusDesc))
 				content.WriteString(fmt.Sprintf("  Use gameId: '%s' (or target: '%s')\n", game.ID, game.Target))
 				content.WriteString(fmt.Sprintf("  Launch: %s\n", game.LaunchMode))
+				if game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId" {
+					content.WriteString(fmt.Sprintf("  Note: GABS can start but cannot directly stop %s games\n", game.LaunchMode))
+				}
 				if game.Description != "" {
 					content.WriteString(fmt.Sprintf("  %s\n", game.Description))
 				}
@@ -122,20 +125,28 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			game, exists := s.resolveGameId(gamesConfig, gameIdOrTarget)
 			if !exists {
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games.list to see available games.", gameIdOrTarget)}},
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIdOrTarget)}},
 					IsError: true,
 				}, nil
 			}
 			
-			status := s.checkGameStatus(game.ID)
-			content.WriteString(fmt.Sprintf("**%s** (%s): %s\n", game.ID, game.Name, status))
+			statusDesc := s.getStatusDescription(game.ID, game)
+			content.WriteString(fmt.Sprintf("**%s** (%s): %s\n", game.ID, game.Name, statusDesc))
+			
+			// Add helpful info for launcher games
+			if game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId" {
+				status := s.checkGameStatus(game.ID)
+				if status == "launcher-triggered" {
+					content.WriteString(fmt.Sprintf("\nNote: %s game was launched, but GABS cannot track whether it's still running.\nCheck Steam/Epic or your system processes to verify the actual game status.\n", game.LaunchMode))
+				}
+			}
 		} else {
 			// Check all games
 			games := gamesConfig.ListGames()
 			content.WriteString("Game Status Summary:\n\n")
 			for _, game := range games {
-				status := s.checkGameStatus(game.ID)
-				content.WriteString(fmt.Sprintf("• **%s**: %s\n", game.ID, status))
+				statusDesc := s.getStatusDescription(game.ID, &game)
+				content.WriteString(fmt.Sprintf("• **%s**: %s\n", game.ID, statusDesc))
 			}
 		}
 		
@@ -214,13 +225,23 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		game, exists := s.resolveGameId(gamesConfig, gameIdOrTarget)
 		if !exists {
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games.list to see available games.", gameIdOrTarget)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIdOrTarget)}},
 				IsError: true,
 			}, nil
 		}
 
 		err := s.stopGame(*game, false)
 		if err != nil {
+			// Check if this is a launcher-specific limitation
+			if strings.Contains(err.Error(), "launcher process stopped") || 
+			   strings.Contains(err.Error(), "may still be running independently") {
+				// This is expected behavior for Steam/Epic games - not a failure
+				return &ToolResult{
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("⚠️ %s\n\nNote: For Steam/Epic games, GABS can only stop the launcher process, not the actual game. To fully stop the game, use Steam/Epic's interface or the game's own quit option.", err.Error())}},
+					IsError: false,
+				}, nil
+			}
+			
 			return &ToolResult{
 				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to stop %s: %v", game.ID, err)}},
 				IsError: true,
@@ -258,13 +279,23 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		game, exists := s.resolveGameId(gamesConfig, gameIdOrTarget)
 		if !exists {
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games.list to see available games.", gameIdOrTarget)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIdOrTarget)}},
 				IsError: true,
 			}, nil
 		}
 
 		err := s.stopGame(*game, true)
 		if err != nil {
+			// Check if this is a launcher-specific limitation
+			if strings.Contains(err.Error(), "launcher process stopped") || 
+			   strings.Contains(err.Error(), "may still be running independently") {
+				// This is expected behavior for Steam/Epic games - not a failure
+				return &ToolResult{
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("⚠️ %s\n\nNote: For Steam/Epic games, GABS can only kill the launcher process, not the actual game. To fully terminate the game, use Steam/Epic's interface or the game's own quit option.", err.Error())}},
+					IsError: false,
+				}, nil
+			}
+			
 			return &ToolResult{
 				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to kill %s: %v", game.ID, err)}},
 				IsError: true,
@@ -395,6 +426,24 @@ func (s *Server) getGameSpecificTools(gameID string) []Tool {
 }
 
 // checkGameStatus returns the current status of a game
+// getStatusDescription provides a user-friendly description of the game status
+func (s *Server) getStatusDescription(gameID string, gameConfig *config.GameConfig) string {
+	status := s.checkGameStatus(gameID)
+	
+	switch status {
+	case "running":
+		return "running (GABS controls the process)"
+	case "stopped":
+		return "stopped"
+	case "launcher-running":
+		return fmt.Sprintf("launcher active (game may be starting via %s)", gameConfig.LaunchMode)
+	case "launcher-triggered":
+		return fmt.Sprintf("launched via %s (GABS cannot track the game process)", gameConfig.LaunchMode)
+	default:
+		return status
+	}
+}
+
 func (s *Server) checkGameStatus(gameID string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -407,11 +456,16 @@ func (s *Server) checkGameStatus(gameID string) string {
 	launchMode := controller.GetLaunchMode()
 	
 	// For Steam/Epic launcher games, we can't easily track the actual game process
-	// So we use a different status model
+	// So we use a different status model with clearer messaging
 	if launchMode == "SteamAppId" || launchMode == "EpicAppId" {
-		// For launcher-based games, assume they're "launched" (not "running")
-		// because we don't track the actual game process
-		return "launched" // Special status indicating we triggered the launcher
+		// For launcher-based games, we only know if we triggered the launcher
+		// The actual game process runs independently
+		if controller.IsRunning() {
+			return "launcher-running" // Launcher process is still active
+		} else {
+			// Launcher has exited - this is normal, but we don't know about the game
+			return "launcher-triggered" // We started the launcher, but can't track the game
+		}
 	}
 
 	// For direct processes, check if the process is actually running
@@ -493,14 +547,37 @@ func (s *Server) stopGame(game config.GameConfig, force bool) error {
 	controller, exists := s.games[game.ID]
 	if !exists {
 		s.mu.Unlock()
-		return fmt.Errorf("game %s is not running", game.ID)
+		return fmt.Errorf("game %s is not running (no process tracked)", game.ID)
 	}
 
+	launchMode := controller.GetLaunchMode()
+	
 	// Remove from tracking immediately to prevent double-stops
 	delete(s.games, game.ID)
 	s.mu.Unlock()
 
-	// Stop the process
+	// Handle different launch modes differently
+	if launchMode == "SteamAppId" || launchMode == "EpicAppId" {
+		// For Steam/Epic games, we can only stop the launcher process
+		// The actual game runs independently and GABS cannot control it directly
+		var err error
+		if force {
+			err = controller.Kill()
+		} else {
+			err = controller.Stop(3 * time.Second)
+		}
+		
+		if err != nil {
+			s.log.Infow("launcher process stop failed (may have already exited)", "gameId", game.ID, "mode", launchMode, "error", err)
+		} else {
+			s.log.Infow("launcher process stopped", "gameId", game.ID, "mode", launchMode, "pid", controller.GetPID())
+		}
+		
+		// Return a specific message for launcher-based games
+		return fmt.Errorf("launcher process stopped, but actual %s game may still be running independently. GABS cannot directly control %s-launched games. Please stop the game through %s or the game's own interface", launchMode, launchMode, launchMode)
+	}
+
+	// For direct processes, stop normally
 	var err error
 	if force {
 		err = controller.Kill()
