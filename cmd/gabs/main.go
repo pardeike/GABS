@@ -1,15 +1,13 @@
 // cmd/gabs/main.go
 // Go 1.22+
 //
-// PROMPT: Set module path to your repo. Example: module github.com/pardeike/gabs
-// PROMPT: This file wires CLI → process controller → GABP client → MCP server.
-// PROMPT: Leave all TODOs for codegen; keep real logic minimal here.
+// GABS - Game Agent Bridge Server
+// Simplified architecture: Configuration-first approach with MCP-native game management
 
 package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -19,12 +17,8 @@ import (
 	"syscall"
 	"time"
 
-	// PROMPT: Replace with your module path.
 	"github.com/pardeike/gabs/internal/config"
-	"github.com/pardeike/gabs/internal/gabp"
 	"github.com/pardeike/gabs/internal/mcp"
-	"github.com/pardeike/gabs/internal/mirror"
-	"github.com/pardeike/gabs/internal/process"
 	"github.com/pardeike/gabs/internal/util"
 )
 
@@ -38,18 +32,9 @@ const defaultBackoff = "100ms..5s"
 
 type options struct {
 	subcmd     string
-	gameID     string
-	launchMode string // DirectPath|SteamAppId|EpicAppId|CustomCommand
-	target     string // path or id
-	args       []string
-	cwd        string
-
+	
 	// Server transport
 	httpAddr string // if empty → stdio
-
-	// GABP connection config
-	gabpHost string // Host for GABP server connection (for remote scenarios)
-	gabpMode string // Connection mode: local|remote|connect
 
 	// Config + runtime
 	configDir  string
@@ -60,14 +45,6 @@ type options struct {
 
 	// Policy
 	graceStop time.Duration
-}
-
-type multiFlag []string
-
-func (m *multiFlag) String() string { return strings.Join(*m, " ") }
-func (m *multiFlag) Set(v string) error {
-	*m = append(*m, v)
-	return nil
 }
 
 func main() {
@@ -88,21 +65,12 @@ func main() {
 	fs.SetOutput(os.Stderr)
 
 	var (
-		gameID     = fs.String("gameId", "", "Game/application identifier (e.g. 'rimworld')")
-		launchMode = fs.String("launch", "DirectPath", "Launch mode: DirectPath|SteamAppId|EpicAppId|CustomCommand")
-		target     = fs.String("target", "", "Path or ID depending on launch mode")
-		cwd        = fs.String("cwd", "", "Working directory for DirectPath/CustomCommand")
-		httpAddr   = fs.String("http", "", "Run MCP as Streamable HTTP on addr (default stdio if empty)")
-		configDir  = fs.String("configDir", "", "Override GAB config directory")
+		httpAddr   = fs.String("http", "", "Run MCP as HTTP on addr (default stdio if empty)")
+		configDir  = fs.String("configDir", "", "Override GABS config directory")
 		logLevel   = fs.String("log-level", "info", "Log level: trace|debug|info|warn|error")
 		backoff    = fs.String("reconnectBackoff", defaultBackoff, "Reconnect backoff window, e.g. '100ms..5s'")
 		grace      = fs.Duration("grace", 3*time.Second, "Graceful stop timeout before kill")
-		gabpHost   = fs.String("gabpHost", "", "GABP server host for remote connections (default: 127.0.0.1)")
-		gabpMode   = fs.String("gabpMode", "local", "GABP connection mode: local|remote|connect")
 	)
-
-	var argv multiFlag
-	fs.Var(&argv, "arg", "Repeatable arg for DirectPath/CustomCommand (can be specified multiple times)")
 
 	if err := fs.Parse(os.Args[2:]); err != nil {
 		os.Exit(2)
@@ -116,11 +84,6 @@ func main() {
 
 	opts := options{
 		subcmd:     subcmd,
-		gameID:     *gameID,
-		launchMode: *launchMode,
-		target:     *target,
-		args:       argv,
-		cwd:        *cwd,
 		httpAddr:   *httpAddr,
 		configDir:  *configDir,
 		logLevel:   *logLevel,
@@ -128,11 +91,9 @@ func main() {
 		backoffMin: min,
 		backoffMax: max,
 		graceStop:  *grace,
-		gabpHost:   *gabpHost,
-		gabpMode:   *gabpMode,
 	}
 
-	// PROMPT: Initialize structured logger to stderr only; do not write to stdout if using stdio MCP.
+	// Initialize structured logger to stderr only
 	log := util.NewLogger(opts.logLevel)
 	log.Infow("starting gabs", "version", Version, "commit", Commit, "built", BuildDate, "subcmd", subcmd)
 
@@ -142,20 +103,10 @@ func main() {
 
 	var exitCode int
 	switch subcmd {
-	case "run":
-		exitCode = run(ctx, log, opts)
-	case "start":
-		exitCode = cmdStart(ctx, log, opts)
-	case "stop":
-		exitCode = cmdStop(ctx, log, opts)
-	case "kill":
-		exitCode = cmdKill(ctx, log, opts)
-	case "restart":
-		exitCode = cmdRestart(ctx, log, opts)
-	case "attach":
-		exitCode = cmdAttach(ctx, log, opts)
-	case "status":
-		exitCode = cmdStatus(ctx, log, opts)
+	case "server":
+		exitCode = runServer(ctx, log, opts)
+	case "games":
+		exitCode = manageGames(ctx, log, opts, fs.Args())
 	case "version":
 		fmt.Printf("%s %s (%s)\n", "gabs", Version, Commit)
 		return
@@ -171,283 +122,78 @@ func main() {
 func usage() {
 	fmt.Fprintf(os.Stderr, `gabs %s
 
+GABS - Game Agent Bridge Server
+Configuration-first approach with MCP-native game management
+
 Usage:
   gabs <subcommand> [flags]
 
 Subcommands:
-  run        Start MCP server, launch/attach app, mirror GABP tools/resources/events
-  start      Launch target app only and write bridge.json
-  stop       Gracefully stop target app
-  kill       Force terminate target app
-  restart    Restart target app
-  attach     Attach to already running app and run MCP server
-  status     Print target app status
-  version    Print version
+  server     Start the GABS MCP server
+  games      Manage game configurations
+  version    Print version information
 
-Common flags (run/start/attach):
-  --gameId <id>                 Game/application identifier (e.g. rimworld)
-  --launch <mode>               DirectPath|SteamAppId|EpicAppId|CustomCommand (default DirectPath)
-  --target <pathOrId>           Path or ID depending on launch mode
-  --arg <value>                 Repeatable, forwarded to target (DirectPath/CustomCommand)
-  --cwd <dir>                   Working dir for DirectPath/CustomCommand
+Server flags:
   --http <addr>                 Run MCP as HTTP on address; if empty, use stdio
-  --configDir <dir>             Override config dir for bridge.json
-  --gabpHost <host>             GABP server host for remote connections (default: 127.0.0.1)
-  --gabpMode <mode>             GABP connection mode: local|remote|connect (default: local)
+  --configDir <dir>             Override GABS config directory  
   --reconnectBackoff <min..max> Reconnect backoff window (default %s)
   --log-level <lvl>             trace|debug|info|warn|error
-  --grace <dur>                 Graceful stop timeout for stop/restart (default 3s)
+  --grace <dur>                 Graceful stop timeout (default 3s)
 
-Connection Modes:
-  local                         GABS writes bridge.json, launches game, connects locally (default)
-  remote                        GABS writes bridge.json with remote host, launches game for remote access
-  connect                       GABS reads existing bridge.json created by game mod and connects to it
+Game management:
+  gabs games list               List all configured games
+  gabs games add <id>           Add a new game configuration (interactive)
+  gabs games remove <id>        Remove a game configuration
+  gabs games show <id>          Show details for a game
 
 Examples:
-  gabs run --gameId rimworld --launch SteamAppId --target 294100
-  gabs run --gameId rimworld --launch DirectPath --target "/Applications/RimWorld.app" --arg "-logfile" --arg "-"
-  gabs run --gameId minecraft --gabpMode remote --gabpHost 192.168.1.100 --launch DirectPath --target "/path/to/minecraft"
-  gabs attach --gameId minecraft --gabpHost 192.168.1.100
-  gabs run --gameId modded-game --gabpMode connect
+  # Start GABS MCP server (stdio)
+  gabs server
+  
+  # Start GABS MCP server (HTTP)  
+  gabs server --http localhost:8080
+  
+  # Add a new game configuration
+  gabs games add minecraft
+  
+  # List configured games
+  gabs games list
+
+Once the server is running, use MCP tools to manage games:
+  games.list        List all configured games and their status
+  games.status      Check status of specific games
+  games.start       Start a game
+  games.stop        Gracefully stop a game  
+  games.kill        Force terminate a game
 `, Version, defaultBackoff)
 }
 
-// === Subcommands ===
+// === Server Command ===
 
-func run(ctx context.Context, log util.Logger, opts options) int {
-	// PROMPT: Validate inputs; ensure gameId present. For Steam/Epic, target must be set.
-	if opts.gameID == "" {
-		fmt.Fprintln(os.Stderr, "--gameId is required")
-		return 2
-	}
-
-	var addr, token string
-	var port int
-	var err error
-	var ctrl *process.Controller // Declare controller for both modes
-
-	if opts.gabpMode == "connect" {
-		// Connect mode: read existing bridge.json created by mod
-		var host string
-		host, port, token, err = config.ReadBridgeJSON(opts.gameID, opts.configDir)
-		if err != nil {
-			log.Errorw("failed to read bridge.json", "error", err, "hint", "ensure game mod is running and has created bridge.json")
-			return 1
-		}
-		// Override host if specified via flag
-		if opts.gabpHost != "" {
-			host = opts.gabpHost
-		}
-		addr = fmt.Sprintf("%s:%d", host, port)
-		log.Infow("connecting to existing GABP server", "addr", addr)
-		// No process controller in connect mode
-		ctrl = nil
-	} else {
-		// Local/Remote mode: create bridge.json for mod to read
-		bridgeConfig := config.BridgeConfig{
-			Host: opts.gabpHost,
-			Mode: opts.gabpMode,
-		}
-		
-		var cfgPath string
-		port, token, cfgPath, err = config.WriteBridgeJSONWithConfig(opts.gameID, opts.configDir, bridgeConfig)
-		if err != nil {
-			log.Errorw("failed to write bridge.json", "error", err)
-			return 1
-		}
-		
-		host := opts.gabpHost
-		if host == "" {
-			host = "127.0.0.1"
-		}
-		addr = fmt.Sprintf("%s:%d", host, port)
-		log.Debugw("bridge.json prepared", "path", cfgPath, "port", port, "host", host, "mode", opts.gabpMode)
-
-		// Configure and start target application according to launch mode (only if not in connect mode)
-		ctrl = &process.Controller{}
-		if err := ctrl.Configure(process.LaunchSpec{
-			GameId:     opts.gameID,
-			Mode:       opts.launchMode,
-			PathOrId:   opts.target,
-			Args:       opts.args,
-			WorkingDir: opts.cwd,
-		}); err != nil {
-			log.Errorw("failed to configure app", "error", err)
-			return 1
-		}
-		if err := ctrl.Start(); err != nil {
-			log.Errorw("failed to start app", "error", err)
-			return 1
-		}
-		defer func() {
-			// PROMPT: Stop or leave running based on policy/env; default to keep running on HTTP, stop on stdio exit.
-			if ctrl != nil {
-				_ = ctrl
-			}
-		}()
-	}
-
-	// PROMPT: Connect to GABP server with reconnect/backoff and hello/welcome handshake.
-	client := gabp.NewClient(log)
-	if err := client.Connect(addr, token, opts.backoffMin, opts.backoffMax); err != nil {
-		log.Errorw("failed to connect to GABP", "addr", addr, "error", err)
+func runServer(ctx context.Context, log util.Logger, opts options) int {
+	// Load games configuration
+	gamesConfig, err := config.LoadGamesConfig()
+	if err != nil {
+		log.Errorw("failed to load games config", "error", err)
 		return 1
 	}
 
-	// PROMPT: Create MCP server (stdio or HTTP). Register bridge.* tools (start/stop/kill/restart, attach, tools.refresh).
+	log.Infow("loaded games configuration", "gameCount", len(gamesConfig.Games))
+
+	// Create MCP server with game management tools
 	server := mcp.NewServer(log)
+	
+	// Register game management tools
+	server.RegisterGameManagementTools(gamesConfig, opts.backoffMin, opts.backoffMax)
 
-	// PROMPT: Build mirror that maps GABP tools/resources/events into MCP surface. Support hot-refresh via tools.changed event.
-	m := mirror.New(log, server, client)
-	if err := m.SyncTools(); err != nil {
-		log.Errorw("tool sync failed", "error", err)
-		return 1
-	}
-	if err := m.ExposeResources(); err != nil {
-		log.Errorw("resource expose failed", "error", err)
-		return 1
-	}
-	server.RegisterBridgeTools(ctrl, client)
-
-	// PROMPT: Start serving MCP according to transport. For stdio, ensure no non-protocol writes to stdout.
+	// Start serving MCP according to transport
 	errCh := make(chan error, 1)
 	go func() {
 		if opts.httpAddr == "" {
+			log.Infow("starting MCP server", "transport", "stdio")
 			errCh <- server.ServeStdio(ctx)
 		} else {
-			errCh <- server.ServeHTTP(ctx, opts.httpAddr)
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		log.Infow("shutdown signal received")
-		// PROMPT: Gracefully stop MCP server and app process if policy dictates.
-		return 0
-	case err := <-errCh:
-		if err != nil {
-			log.Errorw("server exited with error", "error", err)
-			return 1
-		}
-		return 0
-	}
-}
-
-func cmdStart(ctx context.Context, log util.Logger, opts options) int {
-	if opts.gameID == "" {
-		fmt.Fprintln(os.Stderr, "--gameId is required")
-		return 2
-	}
-
-	// Write bridge.json with configuration and launch the app
-	bridgeConfig := config.BridgeConfig{
-		Host: opts.gabpHost,
-		Mode: opts.gabpMode,
-	}
-	
-	port, _, cfgPath, err := config.WriteBridgeJSONWithConfig(opts.gameID, opts.configDir, bridgeConfig)
-	if err != nil {
-		log.Errorw("failed to write bridge.json", "error", err)
-		return 1
-	}
-	
-	host := opts.gabpHost
-	if host == "" {
-		host = "127.0.0.1"
-	}
-	log.Infow("bridge.json written", "path", cfgPath, "port", port, "host", host, "mode", opts.gabpMode)
-
-	// Configure and start the process
-	ctrl := &process.Controller{}
-	if err := ctrl.Configure(process.LaunchSpec{
-		GameId:     opts.gameID,
-		Mode:       opts.launchMode,
-		PathOrId:   opts.target,
-		Args:       opts.args,
-		WorkingDir: opts.cwd,
-	}); err != nil {
-		log.Errorw("failed to configure app", "error", err)
-		return 1
-	}
-
-	if err := ctrl.Start(); err != nil {
-		log.Errorw("failed to start app", "error", err)
-		return 1
-	}
-
-	// Print process info for scripting
-	fmt.Printf("Started %s (port: %d)\n", opts.gameID, port)
-	return 0
-}
-
-func cmdStop(ctx context.Context, log util.Logger, opts options) int {
-	// PROMPT: Locate running app (PID file or process lookup) and attempt graceful stop with opts.graceStop.
-	_ = ctx
-	return 0
-}
-
-func cmdKill(ctx context.Context, log util.Logger, opts options) int {
-	// PROMPT: Locate running app and force terminate immediately.
-	_ = log
-	return 0
-}
-
-func cmdRestart(ctx context.Context, log util.Logger, opts options) int {
-	// PROMPT: Stop then Start preserving launchId and bridge.json.
-	_ = opts
-	return 0
-}
-
-func cmdAttach(ctx context.Context, log util.Logger, opts options) int {
-	if opts.gameID == "" {
-		fmt.Fprintln(os.Stderr, "--gameId is required")
-		return 2
-	}
-
-	// Read existing bridge.json created by mod  
-	host, port, token, err := config.ReadBridgeJSON(opts.gameID, opts.configDir)
-	if err != nil {
-		log.Errorw("failed to read bridge.json", "error", err, "hint", "ensure game mod is running and has created bridge.json")
-		return 1
-	}
-
-	// Override host if specified via flag
-	if opts.gabpHost != "" {
-		host = opts.gabpHost
-	}
-
-	addr := fmt.Sprintf("%s:%d", host, port)
-	log.Infow("attaching to existing GABP server", "addr", addr)
-
-	// Connect to GABP server
-	client := gabp.NewClient(log)
-	if err := client.Connect(addr, token, opts.backoffMin, opts.backoffMax); err != nil {
-		log.Errorw("failed to connect to GABP", "addr", addr, "error", err)
-		return 1
-	}
-
-	// Create MCP server and mirror
-	server := mcp.NewServer(log)
-	m := mirror.New(log, server, client)
-	
-	if err := m.SyncTools(); err != nil {
-		log.Errorw("tool sync failed", "error", err)
-		return 1
-	}
-	if err := m.ExposeResources(); err != nil {
-		log.Errorw("resource expose failed", "error", err)
-		return 1
-	}
-	
-	// Note: no process controller for attach mode
-	server.RegisterBridgeTools(nil, client)
-
-	// Start serving MCP
-	errCh := make(chan error, 1)
-	go func() {
-		if opts.httpAddr == "" {
-			errCh <- server.ServeStdio(ctx)
-		} else {
+			log.Infow("starting MCP server", "transport", "http", "addr", opts.httpAddr)
 			errCh <- server.ServeHTTP(ctx, opts.httpAddr)
 		}
 	}()
@@ -465,40 +211,253 @@ func cmdAttach(ctx context.Context, log util.Logger, opts options) int {
 	}
 }
 
-func cmdStatus(ctx context.Context, log util.Logger, opts options) int {
-	// Read bridge.json if it exists
-	if opts.configDir != "" {
-		// Use provided config dir
-	} else {
-		// Try to determine config dir
-		if opts.gameID != "" {
-			_, err := getConfigDirForGameID(opts.gameID)
-			if err != nil {
-				log.Errorw("failed to get config dir", "error", err)
-				return 1
-			}
+// === Games Configuration Management ===
+
+func manageGames(ctx context.Context, log util.Logger, opts options, args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintf(os.Stderr, "games subcommand requires an action: list|add|remove|show\n")
+		return 2
+	}
+
+	action := args[0]
+
+	switch action {
+	case "list":
+		return listGames(log)
+	case "add":
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "games add requires a game ID\n")
+			return 2
+		}
+		return addGame(log, args[1])
+	case "remove":
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "games remove requires a game ID\n")
+			return 2
+		}
+		return removeGame(log, args[1])
+	case "show":
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "games show requires a game ID\n")
+			return 2
+		}
+		return showGame(log, args[1])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown games action: %s\n", action)
+		return 2
+	}
+}
+
+func listGames(log util.Logger) int {
+	gamesConfig, err := config.LoadGamesConfig()
+	if err != nil {
+		log.Errorw("failed to load games config", "error", err)
+		return 1
+	}
+
+	games := gamesConfig.ListGames()
+	if len(games) == 0 {
+		fmt.Println("No games configured. Use 'gabs games add <id>' to add games.")
+		return 0
+	}
+
+	fmt.Printf("Configured Games (%d):\n", len(games))
+	for _, game := range games {
+		fmt.Printf("  %s - %s (%s via %s)\n", 
+			game.ID, game.Name, game.LaunchMode, game.Target)
+		if game.Description != "" {
+			fmt.Printf("    %s\n", game.Description)
 		}
 	}
-
-	status := map[string]interface{}{
-		"running": false,
-		"pid":     nil,
-		"gameId":  opts.gameID,
-		"since":   nil,
-		"mcp": map[string]interface{}{
-			"transport": "stdio",
-			"addr":      nil,
-		},
-	}
-
-	// TODO: Check if process is actually running and populate real status
-	
-	data, _ := json.MarshalIndent(status, "", "  ")
-	fmt.Println(string(data))
 	return 0
 }
 
-// === Helpers ===
+func addGame(log util.Logger, gameID string) int {
+	gamesConfig, err := config.LoadGamesConfig()
+	if err != nil {
+		log.Errorw("failed to load games config", "error", err)
+		return 1
+	}
+
+	// Check if game already exists
+	if _, exists := gamesConfig.GetGame(gameID); exists {
+		fmt.Printf("Game '%s' already exists. Use 'gabs games show %s' to view it.\n", gameID, gameID)
+		return 1
+	}
+
+	// For automated environments, provide a minimal config
+	if !isInteractive() {
+		game := config.GameConfig{
+			ID:         gameID,
+			Name:       gameID,
+			LaunchMode: "DirectPath",
+			Target:     "",
+		}
+		gamesConfig.AddGame(game)
+		
+		if err := config.SaveGamesConfig(gamesConfig); err != nil {
+			log.Errorw("failed to save games config", "error", err)
+			return 1
+		}
+
+		fmt.Printf("Game '%s' added with minimal configuration. Edit with 'gabs games edit %s' or manually.\n", gameID, gameID)
+		return 0
+	}
+
+	// Interactive game configuration
+	fmt.Printf("Adding game configuration for '%s':\n", gameID)
+	game := config.GameConfig{
+		ID:       gameID,
+		Name:     promptString("Game Name", gameID),
+		LaunchMode: promptChoice("Launch Mode", "DirectPath", []string{"DirectPath", "SteamAppId", "EpicAppId", "CustomCommand"}),
+	}
+
+	game.Target = promptString("Target (path/id)", "")
+	
+	if game.LaunchMode == "DirectPath" || game.LaunchMode == "CustomCommand" {
+		workingDir := promptString("Working Directory (optional)", "")
+		if workingDir != "" {
+			game.WorkingDir = workingDir
+		}
+	}
+
+	gabpMode := promptChoice("GABP Mode", "local", []string{"local", "remote", "connect"})
+	if gabpMode != "" {
+		game.GabpMode = gabpMode
+	}
+
+	if gabpMode == "remote" {
+		gabpHost := promptString("GABP Host (for remote access)", "127.0.0.1")
+		if gabpHost != "" {
+			game.GabpHost = gabpHost
+		}
+	}
+
+	description := promptString("Description (optional)", "")
+	if description != "" {
+		game.Description = description
+	}
+
+	gamesConfig.AddGame(game)
+	
+	if err := config.SaveGamesConfig(gamesConfig); err != nil {
+		log.Errorw("failed to save games config", "error", err)
+		return 1
+	}
+
+	fmt.Printf("Game '%s' added successfully.\n", gameID)
+	return 0
+}
+
+func removeGame(log util.Logger, gameID string) int {
+	gamesConfig, err := config.LoadGamesConfig()
+	if err != nil {
+		log.Errorw("failed to load games config", "error", err)
+		return 1
+	}
+
+	if !gamesConfig.RemoveGame(gameID) {
+		fmt.Printf("Game '%s' not found.\n", gameID)
+		return 1
+	}
+
+	if err := config.SaveGamesConfig(gamesConfig); err != nil {
+		log.Errorw("failed to save games config", "error", err)
+		return 1
+	}
+
+	fmt.Printf("Game '%s' removed successfully.\n", gameID)
+	return 0
+}
+
+func showGame(log util.Logger, gameID string) int {
+	gamesConfig, err := config.LoadGamesConfig()
+	if err != nil {
+		log.Errorw("failed to load games config", "error", err)
+		return 1
+	}
+
+	game, exists := gamesConfig.GetGame(gameID)
+	if !exists {
+		fmt.Printf("Game '%s' not found.\n", gameID)
+		return 1
+	}
+
+	fmt.Printf("Game Configuration: %s\n", game.ID)
+	fmt.Printf("  Name: %s\n", game.Name)
+	fmt.Printf("  Launch Mode: %s\n", game.LaunchMode)
+	fmt.Printf("  Target: %s\n", game.Target)
+	if game.WorkingDir != "" {
+		fmt.Printf("  Working Directory: %s\n", game.WorkingDir)
+	}
+	if len(game.Args) > 0 {
+		fmt.Printf("  Arguments: %s\n", strings.Join(game.Args, " "))
+	}
+	if game.GabpMode != "" {
+		fmt.Printf("  GABP Mode: %s\n", game.GabpMode)
+	}
+	if game.GabpHost != "" {
+		fmt.Printf("  GABP Host: %s\n", game.GabpHost)
+	}
+	if game.Description != "" {
+		fmt.Printf("  Description: %s\n", game.Description)
+	}
+
+	return 0
+}
+
+// === Helper Functions ===
+
+// isInteractive checks if the program is running in an interactive terminal
+func isInteractive() bool {
+	// Check if stdin is a terminal
+	fileInfo, _ := os.Stdin.Stat()
+	return (fileInfo.Mode() & os.ModeCharDevice) != 0
+}
+
+func promptString(prompt, defaultValue string) string {
+	if defaultValue != "" {
+		fmt.Printf("%s [%s]: ", prompt, defaultValue)
+	} else {
+		fmt.Printf("%s: ", prompt)
+	}
+	
+	var input string
+	fmt.Scanln(&input)
+	
+	if input == "" {
+		return defaultValue
+	}
+	return input
+}
+
+func promptChoice(prompt, defaultValue string, choices []string) string {
+	fmt.Printf("%s ", prompt)
+	if len(choices) > 0 {
+		fmt.Printf("(%s)", strings.Join(choices, "|"))
+	}
+	if defaultValue != "" {
+		fmt.Printf(" [%s]", defaultValue)
+	}
+	fmt.Print(": ")
+	
+	var input string
+	fmt.Scanln(&input)
+	
+	if input == "" {
+		return defaultValue
+	}
+	
+	// Validate choice
+	for _, choice := range choices {
+		if input == choice {
+			return input
+		}
+	}
+	
+	fmt.Printf("Invalid choice. Please select one of: %s\n", strings.Join(choices, ", "))
+	return promptChoice(prompt, defaultValue, choices)
+}
 
 func parseBackoff(s string) (time.Duration, time.Duration, error) {
 	// Parse "<min>..<max>" format 
@@ -532,32 +491,4 @@ func parseBackoff(s string) (time.Duration, time.Duration, error) {
 	}
 }
 
-func getConfigDirForGameID(gameID string) (string, error) {
-	// Use the same logic as config package
-	var baseDir string
-	switch runtime.GOOS {
-	case "windows":
-		appData := os.Getenv("APPDATA")
-		if appData == "" {
-			return "", fmt.Errorf("APPDATA environment variable not set")
-		}
-		baseDir = fmt.Sprintf("%s/GAB", appData)
-	case "darwin":
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		baseDir = fmt.Sprintf("%s/Library/Application Support/GAB", homeDir)
-	default:
-		stateHome := os.Getenv("XDG_STATE_HOME")
-		if stateHome == "" {
-			homeDir, err := os.UserHomeDir()
-			if err != nil {
-				return "", err
-			}
-			stateHome = fmt.Sprintf("%s/.local/state", homeDir)
-		}
-		baseDir = fmt.Sprintf("%s/gab", stateHome)
-	}
-	return fmt.Sprintf("%s/%s", baseDir, gameID), nil
-}
+
