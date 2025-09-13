@@ -54,13 +54,18 @@ Choose your platform:
 ### 2. Configure Your Games
 
 ```bash
-# Add your games to the configuration
+# Add your games to the configuration (interactive setup)
 gabs games add minecraft
 gabs games add rimworld
 
 # View configured games
 gabs games list
 ```
+
+Each game configuration includes:
+- **Launch method**: Direct executable, Steam App ID, Epic Game ID, or custom command
+- **GABP settings**: How GABS connects to your game mods (local/remote/connect modes)
+- **Working directories and arguments** as needed
 
 ### 3. Start the MCP Server
 
@@ -74,20 +79,22 @@ gabs server --http localhost:8080
 
 ### 4. AI Control via MCP Tools
 
-Once the server is running, AI can use these MCP tools:
+Once the server is running, AI can control your games through these MCP tools:
 
-- **`games.list`** - List all configured games and their status
+- **`games.list`** - List all configured games and their current status
 - **`games.start`** - Start a game: `{"gameId": "minecraft"}`
-- **`games.stop`** - Stop a game gracefully: `{"gameId": "minecraft"}`
+- **`games.stop`** - Stop a game gracefully: `{"gameId": "minecraft"}`  
 - **`games.kill`** - Force terminate: `{"gameId": "minecraft"}`
 - **`games.status`** - Check status: `{"gameId": "minecraft"}` or all games
+
+**Key advantage**: You can use either the game ID (`"rimworld"`) or launch target (`"294100"` for Steam App ID) interchangeably.
 
 ## Configuration Management
 
 ### Adding Games
 
 ```bash
-# Interactive configuration
+# Interactive configuration - recommended
 gabs games add minecraft
 
 # View game details
@@ -95,7 +102,18 @@ gabs games show minecraft
 
 # Remove a game
 gabs games remove minecraft
+
+# List all configured games
+gabs games list
 ```
+
+The `add` command will interactively prompt you for:
+- **Game name**: Display name for the game
+- **Launch mode**: How to launch (DirectPath, SteamAppId, EpicAppId, CustomCommand) 
+- **Target**: Path to executable, Steam App ID, etc.
+- **Working directory**: (optional) Where the game should run
+- **GABP mode**: How GABS connects to game mods (local/remote/connect)
+- **GABP host**: (for remote mode) What host game mods should listen on
 
 ### Configuration File
 
@@ -172,22 +190,39 @@ result = client.call_tool("games.start", {"gameId": "minecraft"})
 ### Local Development
 Perfect for development where AI and games run on the same machine:
 ```bash
+# Configure your game once
 gabs games add mygame
+# Start the MCP server
 gabs server
-# AI connects and controls games locally
+# AI connects and controls games through MCP tools
 ```
 
 ### Cloud AI + Remote Games
-For AI running in cloud connecting to games on remote machines, configure games with remote GABP settings:
+For AI running in cloud connecting to games on remote machines:
 
-```json
-{
-  "id": "minecraft",
-  "name": "Remote Minecraft",
-  "gabpMode": "remote", 
-  "gabpHost": "192.168.1.100"
-}
-```
+1. **On your game machine**, configure for remote access:
+   ```bash
+   # Add game with remote GABP mode
+   gabs games add minecraft
+   # When prompted, set GABP mode to "remote" and host to your machine's IP
+   ```
+
+2. **Start GABS server** on the game machine:
+   ```bash
+   gabs server --http :8080  # HTTP mode for remote access
+   ```
+
+3. **Configure your AI** to connect to the remote GABS server:
+   ```json
+   {
+     "mcpServers": {
+       "remote-gabs": {
+         "command": "curl",
+         "args": ["-X", "POST", "http://your-game-machine:8080/mcp", ...]
+       }
+     }
+   }
+   ```
 
 ### Game Server Management
 Use GABS to let AI manage multiple game servers:
@@ -195,10 +230,9 @@ Use GABS to let AI manage multiple game servers:
 gabs games add minecraft-survival
 gabs games add minecraft-creative  
 gabs games add rimworld-colony1
-gabs server --http :8080
+gabs server
+# AI can control all servers through games.start/stop/status tools
 ```
-
-AI can then manage all servers through a single interface.
 
 ## For Mod Developers
 
@@ -249,19 +283,23 @@ public class GABPMod : Mod {
 # Configure multiple instances of the same game
 gabs games add minecraft-server1
 gabs games add minecraft-server2
+# Start GABS server
+gabs server
+```
 
-# AI can manage them separately
-games.start {"gameId": "minecraft-server1"}
-games.start {"gameId": "minecraft-server2"}
+AI can then manage them separately through MCP tools:
+```json
+{"method": "tools/call", "params": {"name": "games.start", "arguments": {"gameId": "minecraft-server1"}}}
+{"method": "tools/call", "params": {"name": "games.start", "arguments": {"gameId": "minecraft-server2"}}}
 ```
 
 ### Custom Launch Modes
 
-GABS supports multiple ways to launch games:
+GABS supports multiple ways to launch games through the configuration:
 
-- **DirectPath**: Direct executable path
-- **SteamAppId**: Launch via Steam App ID  
-- **EpicAppId**: Launch via Epic Games Store
+- **DirectPath**: Direct executable path (`/path/to/game.exe`)
+- **SteamAppId**: Launch via Steam App ID (`294100` for RimWorld)
+- **EpicAppId**: Launch via Epic Games Store  
 - **CustomCommand**: Custom launch command with arguments
 
 ### HTTP Mode for Web Integration
@@ -305,20 +343,23 @@ The GABP protocol specification is licensed under CC BY 4.0.
 
 ## FAQ
 
-**Q: How is this different from the old CLI-heavy approach?**  
-A: The new architecture separates concerns: CLI manages configuration, MCP tools manage game lifecycle. Instead of `gabs run --gameId minecraft --launch DirectPath --target /path`, you configure once with `gabs games add minecraft` and then AI uses `games.start {"gameId": "minecraft"}`.
+**Q: How is this different from other game automation tools?**  
+A: GABS uses a configuration-first approach where you define games once through `gabs games add`, then control them naturally via AI using MCP tools. No complex CLI commands during operation - just `gabs server` and let AI handle the rest.
 
-**Q: Can I migrate from the old CLI commands?**  
-A: Yes! The old bridge.json files are still supported. The new system reads them for backward compatibility while providing the cleaner configuration-first approach.
+**Q: How do I control games?**  
+A: After configuring games with `gabs games add` and starting `gabs server`, AI uses MCP tools like `games.start {"gameId": "minecraft"}`, `games.stop {"gameId": "rimworld"}`, etc. No manual CLI commands needed during gameplay.
+
+**Q: Can I use Steam App IDs directly?**  
+A: Yes! You can use either the game ID you configured (`"rimworld"`) or the launch target (`"294100"` for Steam App ID) interchangeably in MCP tools.
 
 **Q: Can multiple AI tools control games simultaneously?**  
-A: Currently, one AI tool per GABS instance. Run multiple GABS instances for multiple AI connections, or coordinate through the AI tools themselves.
+A: Currently, one AI tool per GABS instance. Run multiple GABS instances (different config directories) for multiple AI connections, or coordinate through the AI tools themselves.
 
 **Q: Does this work with multiplayer games?**  
-A: GABS connects to your local mod instance. Multiplayer compatibility depends on your mod's design.
+A: GABS connects to your local game mod instance. Multiplayer compatibility depends on your mod's design.
 
 **Q: Is this secure?**  
-A: GABS only accepts local connections by default and uses token authentication. Your games never expose ports directly to the internet unless you explicitly configure remote access.
+A: GABS only accepts local connections by default and uses token authentication between GABS and game mods. Games never expose ports directly to the internet unless you explicitly configure remote access.
 
 **Q: What games are supported?**  
 A: Any game where you can add GABP compliant mods! Popular targets include Unity games, Java games (Minecraft), and games that support C#/Harmony modding.

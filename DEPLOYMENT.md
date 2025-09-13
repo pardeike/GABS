@@ -1,91 +1,78 @@
 # GABS Deployment Guide
 
-This guide explains different deployment scenarios for GABS and how to configure connections between GABS, game mods, and AI systems.
+This guide explains how to deploy GABS in different scenarios, from local development to cloud-based AI systems.
 
 ## Architecture Overview
 
-GABS uses the **Game Agent Bridge Protocol (GABP)** to communicate with game modifications. The architecture supports flexible deployment patterns to accommodate different use cases:
+GABS uses a **configuration-first approach** where games are configured once, then controlled through MCP tools:
 
 ```
 AI Agent ← MCP → GABS ← GABP → Game Mod ← Game API → Game
 ```
 
-**Key Insight:** In GABP, the **game mod acts as the server** and **GABS acts as the client**. This design supports both local development and cloud-based AI scenarios.
+**Key Components:**
+- **AI Agent**: Your AI assistant (Claude, ChatGPT, custom tools)
+- **MCP**: Model Context Protocol for AI-tool communication
+- **GABS**: Game Agent Bridge Server (this project)
+- **GABP**: Game Agent Bridge Protocol (JSON-RPC style messaging)
+- **Game Mod**: GABP compliant modification in your game
 
-## Connection Modes
+## Basic Deployment Flow
 
-GABS supports three connection modes via the `--gabpMode` flag:
-
-### 1. Local Mode (Default)
-
-**Use Case:** Local development, AI and game running on the same machine.
-
-**How it works:**
-1. GABS writes `bridge.json` with localhost configuration
-2. GABS launches the game process
-3. Game mod reads `bridge.json` and creates GABP server on `127.0.0.1:port`
-4. GABS connects to the mod's local server
-5. AI connects to GABS via MCP
-
+### 1. Configure Games
 ```bash
-# Default local mode
-gabs run --gameId minecraft --launch DirectPath --target "/path/to/minecraft"
+# Interactive game configuration (do this once per game)
+gabs games add minecraft
+gabs games add rimworld
 
-# Explicit local mode
-gabs run --gameId minecraft --gabpMode local --launch DirectPath --target "/path/to/minecraft"
+# Verify configuration
+gabs games list
 ```
 
-**Network Flow:**
-```
-AI → GABS(127.0.0.1) → Game Mod(127.0.0.1:random_port) → Game
-```
-
-### 2. Remote Mode
-
-**Use Case:** Cloud-based AI connecting to games running on a remote machine (home computer, dedicated server).
-
-**How it works:**
-1. GABS writes `bridge.json` with remote host configuration
-2. GABS launches the game process (if running on the same machine as the game)
-3. Game mod reads `bridge.json` and creates GABP server on `<remote_host>:port`
-4. GABS connects to the mod's remote server
-5. AI (running in cloud/sandbox) connects to GABS via MCP
-
+### 2. Start GABS Server
 ```bash
-# GABS running on same machine as game, configured for remote AI access
-gabs run --gameId minecraft --gabpMode remote --gabpHost 192.168.1.100 --launch DirectPath --target "/path/to/minecraft"
+# For AI assistants using stdio (Claude Desktop, etc.)
+gabs server
 
-# GABS running in cloud, connecting to remote game
-gabs run --gameId minecraft --gabpMode remote --gabpHost your-home-ip.ddns.net --gabpHost your-home-ip.ddns.net
+# For web-based AI or HTTP integration
+gabs server --http localhost:8080
 ```
 
-**Network Flow:**
-```
-AI(cloud) → GABS(cloud) → Game Mod(home_ip:port) → Game(home)
-```
+### 3. AI Control
+AI uses MCP tools to control games:
+- `games.start {"gameId": "minecraft"}` - Start game and create GABP bridge
+- `games.status {"gameId": "minecraft"}` - Check game status
+- `games.stop {"gameId": "minecraft"}` - Stop game gracefully
 
-### 3. Connect Mode
+## Configuration Modes
 
-**Use Case:** Advanced scenarios where the game mod manages its own GABP server lifecycle.
+When adding games with `gabs games add`, you can configure different connection patterns:
 
-**How it works:**
-1. Game mod starts and creates its own `bridge.json` 
-2. GABS reads existing `bridge.json` to get connection details
-3. GABS connects to the pre-existing GABP server
-4. No game process management by GABS
+### Local Mode (Default)
+**Use Case:** AI and game on the same machine
 
-```bash
-# Connect to existing GABP server managed by mod
-gabs run --gameId modded-game --gabpMode connect
+During game configuration:
+- **GABP Mode**: `local`
+- **GABP Host**: `127.0.0.1` (default)
 
-# Connect with host override
-gabs attach --gameId minecraft --gabpHost 192.168.1.100
-```
+Game mods will create GABP servers on localhost only.
 
-**Network Flow:**
-```
-AI → GABS → Game Mod(self-managed) → Game
-```
+### Remote Mode  
+**Use Case:** AI in cloud, game on remote machine
+
+During game configuration:
+- **GABP Mode**: `remote`
+- **GABP Host**: Your machine's IP address (e.g., `192.168.1.100`)
+
+Game mods will create GABP servers accessible from other machines.
+
+### Connect Mode
+**Use Case:** Game mod manages its own GABP server
+
+During game configuration:
+- **GABP Mode**: `connect`
+
+GABS will look for existing bridge configuration instead of creating one.
 
 ## Common Deployment Scenarios
 
@@ -94,88 +81,90 @@ AI → GABS → Game Mod(self-managed) → Game
 **Setup:** AI assistant, GABS, and game all on developer's machine.
 
 ```bash
-gabs run --gameId rimworld --launch SteamAppId --target 294100
+# Configure game once
+gabs games add rimworld
+# When prompted, accept defaults (local mode)
+
+# Start GABS server
+gabs server
+
+# AI can now control the game through MCP tools
 ```
 
 **Benefits:**
-- Simple setup
-- No network configuration required
-- Fast, low-latency communication
+- Simple setup, no network configuration
+- Fast, low-latency communication  
+- Perfect for development and testing
 
 ### Scenario 2: Cloud AI + Home Gaming
 
 **Setup:** AI running in Claude Desktop/cloud, game on home computer.
 
 **On home computer:**
-```bash
-# Configure game to accept connections from external GABS
-gabs run --gameId minecraft --gabpMode remote --gabpHost 192.168.1.100 --launch DirectPath --target "/path/to/minecraft"
-```
+1. Configure game for remote access:
+   ```bash
+   gabs games add minecraft
+   # When prompted:
+   # - GABP Mode: remote
+   # - GABP Host: 192.168.1.100 (your home machine's LAN IP)
+   ```
 
-**Network requirements:**
-- Port forwarding on home router for the GABP port
-- Firewall rules to allow incoming connections
-- Static IP or DDNS for reliable access
+2. Start GABS server:
+   ```bash
+   gabs server --http 0.0.0.0:8080
+   ```
 
-**In Claude Desktop MCP config:**
-```json
-{
-  "mcpServers": {
-    "gabs-minecraft": {
-      "command": "gabs",
-      "args": ["attach", "--gameId", "minecraft", "--gabpHost", "your-home-ip.ddns.net"]
-    }
-  }
-}
-```
+3. Configure port forwarding on router for port 8080
+
+**On cloud AI side:**
+Configure AI to connect to your home GABS server via HTTP.
 
 **Benefits:**
 - Powerful cloud AI capabilities
-- Game runs on dedicated hardware
-- AI can access game even when not at home computer
+- Game runs on your gaming hardware
+- AI can access games remotely
 
 **Considerations:**
-- Security: Use strong tokens, consider VPN
-- Latency: Network delay affects responsiveness
+- Security: Use firewall rules, consider VPN
+- Latency: Network delay affects responsiveness  
 - Reliability: Depends on home internet connection
 
-### Scenario 3: Cloud Gaming + Cloud AI
+### Scenario 3: Professional Cloud Gaming
 
 **Setup:** Both game and AI running in cloud infrastructure.
 
 ```bash
 # On cloud gaming instance
-gabs run --gameId game --gabpMode remote --gabpHost <cloud_internal_ip> --launch DirectPath --target "/path/to/game"
+gabs games add game
+# Configure with remote mode, internal cloud IP
 
-# GABS connecting from AI instance  
-gabs attach --gameId game --gabpHost <cloud_internal_ip>
+# Start GABS server
+gabs server --http 0.0.0.0:8080
+
+# AI connects to cloud GABS instance
 ```
 
 **Benefits:**
 - High performance, low latency
-- Professional infrastructure
+- Professional infrastructure reliability
 - Scalable to multiple games/AI instances
 
-### Scenario 4: Sandbox AI Development
+### Scenario 4: Multiple Game Server Management
 
-**Setup:** AI development in restricted sandbox, game running locally.
-
-**Challenge:** Sandboxes typically cannot accept incoming connections.
-
-**Solution:** Use outbound-only connection from sandbox:
+**Setup:** GABS managing multiple game servers for AI.
 
 ```bash
-# On local machine: start game and wait for connections
-gabs run --gameId testgame --gabpMode remote --gabpHost 0.0.0.0 --launch DirectPath --target "/path/to/game"
+# Configure multiple games
+gabs games add minecraft-survival
+gabs games add minecraft-creative
+gabs games add rimworld-colony1
+gabs games add terraria-world1
 
-# In sandbox: connect outbound to local machine
-gabs attach --gameId testgame --gabpHost <local_machine_ip>
+# Start GABS
+gabs server --http :8080
+
+# AI can manage all servers through single interface
 ```
-
-**Benefits:**
-- Works within sandbox security constraints
-- AI can still control local games
-- No incoming firewall rules needed for sandbox
 
 ## Security Considerations
 
