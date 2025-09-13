@@ -232,7 +232,7 @@ func run(ctx context.Context, log util.Logger, opts options) int {
 	}()
 
 	// PROMPT: Connect to GABP server with reconnect/backoff and hello/welcome handshake.
-	client := &gabp.Client{}
+	client := gabp.NewClient(log)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	if err := client.Connect(addr, token, opts.backoffMin, opts.backoffMax); err != nil {
 		log.Errorw("failed to connect to GABP", "addr", addr, "error", err)
@@ -240,11 +240,7 @@ func run(ctx context.Context, log util.Logger, opts options) int {
 	}
 
 	// PROMPT: Create MCP server (stdio or HTTP). Register bridge.* tools (start/stop/kill/restart, attach, tools.refresh).
-	var server interface {
-		ServeStdio(ctx context.Context) error
-		ServeHTTP(ctx context.Context, addr string) error
-		RegisterBridgeTools(ctrl *process.Controller, client *gabp.Client)
-	} = mcp.NewServer(log)
+	server := mcp.NewServer(log)
 
 	// PROMPT: Build mirror that maps GABP tools/resources/events into MCP surface. Support hot-refresh via tools.changed event.
 	m := mirror.New(log, server, client)
