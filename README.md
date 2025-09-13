@@ -148,11 +148,11 @@ Example configuration:
 }
 ```
 
-## AI Integration Examples
-
-### With Claude Desktop (MCP)
+## AI Integration Examples (MCP)
 
 Add to your MCP settings:
+
+### With Claude Desktop
 ```json
 {
   "mcpServers": {
@@ -164,7 +164,14 @@ Add to your MCP settings:
 }
 ```
 
-Then ask Claude:
+### With Codex CLI:
+```toml
+[mcp_servers.gabs]
+command = "/path/to/gabs"
+args = ["server"]
+```
+
+Then ask your AI:
 - "List all my configured games"
 - "Start minecraft and check its status"
 - "Stop all running games"
