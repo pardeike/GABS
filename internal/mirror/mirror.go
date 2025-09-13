@@ -13,13 +13,15 @@ type Mirror struct {
 	log    util.Logger
 	server *mcp.Server
 	client *gabp.Client
+	gameId string // Game ID for namespacing tools
 }
 
-func New(log util.Logger, server *mcp.Server, client *gabp.Client) *Mirror {
+func New(log util.Logger, server *mcp.Server, client *gabp.Client, gameId string) *Mirror {
 	return &Mirror{
 		log:    log,
 		server: server,
 		client: client,
+		gameId: gameId,
 	}
 }
 
@@ -30,17 +32,22 @@ func (m *Mirror) SyncTools() error {
 		return fmt.Errorf("failed to list GABP tools: %w", err)
 	}
 
-	// Register each GABP tool as an MCP tool
+	// Register each GABP tool as an MCP tool with game-specific naming
 	for _, tool := range gabpTools {
+		// Create game-prefixed tool name for multi-game clarity
+		gameSpecificName := fmt.Sprintf("%s.%s", m.gameId, tool.Name)
+		
 		mcpTool := mcp.Tool{
-			Name:        tool.Name,
-			Description: tool.Description,
+			Name:        gameSpecificName,
+			Description: fmt.Sprintf("%s (Game: %s)", tool.Description, m.gameId),
 			InputSchema: tool.InputSchema,
 		}
 		
-		// Create handler that forwards to GABP
+		// Create handler that forwards to GABP with original tool name
+		originalToolName := tool.Name // Capture original name for GABP call
 		handler := func(toolName string) func(args map[string]interface{}) (*mcp.ToolResult, error) {
 			return func(args map[string]interface{}) (*mcp.ToolResult, error) {
+				// Call GABP with original tool name (without game prefix)
 				result, isError, err := m.client.CallTool(toolName, args)
 				if err != nil {
 					return &mcp.ToolResult{
@@ -71,34 +78,34 @@ func (m *Mirror) SyncTools() error {
 					IsError:           false,
 				}, nil
 			}
-		}(tool.Name)
+		}(originalToolName)
 
 		m.server.RegisterTool(mcpTool, handler)
-		m.log.Debugw("registered GABP tool as MCP tool", "name", tool.Name)
+		m.log.Debugw("registered GABP tool as game-specific MCP tool", "gameId", m.gameId, "originalName", tool.Name, "mcpName", gameSpecificName)
 	}
 
-	m.log.Infow("synced GABP tools to MCP", "count", len(gabpTools))
+	m.log.Infow("synced GABP tools to MCP with game namespacing", "gameId", m.gameId, "count", len(gabpTools))
 	return nil
 }
 
 func (m *Mirror) ExposeResources() error {
 	// TODO: Expose GABP event channels as MCP resources
-	// For now, expose a basic logs resource
+	// For now, expose a basic logs resource with game-specific naming
 	logsResource := mcp.Resource{
-		URI:         "gab://events/logs",
-		Name:        "Event Logs",
-		Description: "Recent GABP events and logs",
+		URI:         fmt.Sprintf("gab://%s/events/logs", m.gameId),
+		Name:        fmt.Sprintf("%s Event Logs", m.gameId),
+		Description: fmt.Sprintf("Recent GABP events and logs for game: %s", m.gameId),
 		MimeType:    "application/json",
 	}
 
 	handler := func() ([]mcp.Content, error) {
-		// Return empty content for now - this would fetch recent events
+		// Return game-specific content
 		return []mcp.Content{
-			{Type: "text", Text: "Event logs would appear here"},
+			{Type: "text", Text: fmt.Sprintf("Event logs for game %s would appear here", m.gameId)},
 		}, nil
 	}
 
 	m.server.RegisterResource(logsResource, handler)
-	m.log.Infow("exposed GABP resources as MCP resources")
+	m.log.Infow("exposed GABP resources as game-specific MCP resources", "gameId", m.gameId)
 	return nil
 }

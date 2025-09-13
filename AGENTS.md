@@ -337,6 +337,220 @@ try {
 }
 ```
 
+## Multi-Game Tool Management
+
+### The Challenge with Multiple Games
+
+When you have multiple games running simultaneously (e.g., Minecraft and RimWorld), each with their own GABP-compliant mods, GABS faces a critical challenge: **tool name conflicts**.
+
+**Problem Example:**
+- Minecraft mod exposes: `inventory/get`, `world/place_block`, `player/teleport`  
+- RimWorld mod exposes: `inventory/get`, `crafting/build`, `player/teleport`
+
+Without proper handling, both games would register `inventory/get`, causing:
+- Tool conflicts (last registered wins)
+- AI confusion (which game's inventory?)
+- No way to specify target game
+- Unpredictable behavior
+
+### GABS Solution: Game-Prefixed Tool Names
+
+GABS solves this by **automatically prefixing all mirrored tools with the game ID**:
+
+```typescript
+// Before (confusing):
+inventory/get       // Which game?
+player/teleport     // Minecraft or RimWorld?
+
+// After (crystal clear):
+minecraft.inventory/get     // Obviously Minecraft's inventory
+rimworld.inventory/get      // Obviously RimWorld's inventory  
+minecraft.player/teleport   // Minecraft teleportation
+rimworld.player/teleport    // RimWorld colonist movement
+```
+
+### AI Usage Patterns
+
+#### 1. Discovering Available Games and Tools
+
+```typescript
+// First, see what games are configured and running
+const games = await mcpClient.callTool("games.list", {});
+console.log("Available games:", games);
+
+// Then see what tools each game provides
+const allTools = await mcpClient.callTool("games.tools", {});
+console.log("All game tools:", allTools);
+
+// Or focus on specific game
+const minecraftTools = await mcpClient.callTool("games.tools", {
+  gameId: "minecraft"
+});
+```
+
+#### 2. Using Game-Specific Tools
+
+```typescript
+// AI can now be explicit about which game to control
+const minecraftInventory = await mcpClient.callTool("minecraft.inventory/get", {
+  playerId: "steve"
+});
+
+const rimworldInventory = await mcpClient.callTool("rimworld.inventory/get", {
+  playerId: "colonist1"  
+});
+
+// No ambiguity - AI knows exactly which game each call targets
+```
+
+#### 3. Multi-Game Coordination
+
+```typescript
+// AI can coordinate actions across multiple games
+const players = await Promise.all([
+  mcpClient.callTool("minecraft.player/list", {}),
+  mcpClient.callTool("rimworld.player/list", {})
+]);
+
+console.log("Total players across all games:", 
+  players[0].length + players[1].length);
+
+// Move players in different games simultaneously  
+await Promise.all([
+  mcpClient.callTool("minecraft.player/teleport", {
+    playerId: "steve", 
+    x: 100, y: 64, z: 200
+  }),
+  mcpClient.callTool("rimworld.player/teleport", {
+    playerId: "colonist1",
+    x: 50, y: 25
+  })
+]);
+```
+
+### Advanced Multi-Game Scenarios
+
+#### Cross-Game Resource Management
+
+```typescript
+// AI can manage resources across multiple games
+const resources = await Promise.all([
+  mcpClient.readResource("gab://minecraft/events/logs"),
+  mcpClient.readResource("gab://rimworld/events/logs")
+]);
+
+// Compare activity levels
+const minecraftEvents = JSON.parse(resources[0]);
+const rimworldEvents = JSON.parse(resources[1]);
+
+if (minecraftEvents.length > rimworldEvents.length) {
+  console.log("Minecraft is more active today");
+} else {
+  console.log("RimWorld colony needs attention");
+}
+```
+
+#### Automated Multi-Game Testing
+
+```typescript
+class MultiGameTester {
+  async testInventorySystems() {
+    const games = ["minecraft", "rimworld"];
+    const results = {};
+    
+    for (const gameId of games) {
+      try {
+        // Test inventory functionality in each game
+        const inventory = await this.mcpClient.callTool(`${gameId}.inventory/get`, {
+          playerId: "test-player"
+        });
+        
+        results[gameId] = {
+          success: true,
+          itemCount: inventory.items?.length || 0
+        };
+      } catch (error) {
+        results[gameId] = {
+          success: false,
+          error: error.message
+        };
+      }
+    }
+    
+    return results;
+  }
+}
+```
+
+### Implementation Details for AI Developers
+
+#### Tool Discovery Strategy
+1. **Use `games.list`** to see configured games and their status
+2. **Use `games.tools`** to discover what tools each game provides  
+3. **Look for game prefixes** (e.g., `minecraft.`, `rimworld.`) to identify game-specific tools
+4. **Filter tools by game** when you need to work with specific games
+
+#### Error Handling Best Practices
+```typescript
+async function callGameTool(gameId, toolName, args) {
+  const fullToolName = `${gameId}.${toolName}`;
+  
+  try {
+    return await mcpClient.callTool(fullToolName, args);
+  } catch (error) {
+    if (error.code === -32601) {
+      // Tool not found - maybe game not running or mod not installed
+      const gameStatus = await mcpClient.callTool("games.status", { gameId });
+      throw new Error(`${toolName} not available for ${gameId}. Game status: ${gameStatus}`);
+    }
+    throw error;
+  }
+}
+```
+
+#### Resource Naming Convention
+Resources are also game-prefixed to avoid conflicts:
+- `gab://minecraft/events/logs` - Minecraft event logs
+- `gab://rimworld/world/map` - RimWorld colony map
+- `gab://minecraft/config/settings` - Minecraft server settings
+
+### Migration from Single-Game Setups
+
+If you have existing AI code that assumes single-game operation:
+
+**Before (single game):**
+```typescript
+const inventory = await mcpClient.callTool("inventory/get", { playerId: "steve" });
+```
+
+**After (multi-game aware):**
+```typescript
+// Option 1: Explicit game targeting
+const inventory = await mcpClient.callTool("minecraft.inventory/get", { playerId: "steve" });
+
+// Option 2: Dynamic game selection
+const primaryGame = "minecraft"; // from config or user preference
+const inventory = await mcpClient.callTool(`${primaryGame}.inventory/get`, { playerId: "steve" });
+
+// Option 3: Try all games until one succeeds
+for (const gameId of ["minecraft", "rimworld"]) {
+  try {
+    const inventory = await mcpClient.callTool(`${gameId}.inventory/get`, { playerId: "steve" });
+    if (inventory) break;
+  } catch (error) {
+    continue; // Try next game
+  }
+}
+```
+
+### Benefits for AI Agents
+
+1. **Crystal Clear Intent**: `minecraft.inventory/get` vs `rimworld.inventory/get` - no ambiguity
+2. **Parallel Game Control**: AI can manage multiple games simultaneously without conflicts  
+3. **Robust Error Handling**: AI knows exactly which game failed and why
+4. **Scalable Architecture**: Add more games without tool name conflicts
+5. **Better User Experience**: AI can tell users exactly which game it's interacting with
+
 ## Game Mod Integration
 
 ### For AI Agents Helping Mod Development
