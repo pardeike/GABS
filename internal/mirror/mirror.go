@@ -2,6 +2,7 @@ package mirror
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/pardeike/gabs/internal/gabp"
 	"github.com/pardeike/gabs/internal/mcp"
@@ -35,7 +36,9 @@ func (m *Mirror) SyncTools() error {
 	// Register each GABP tool as an MCP tool with game-specific naming
 	for _, tool := range gabpTools {
 		// Create game-prefixed tool name for multi-game clarity
-		gameSpecificName := fmt.Sprintf("%s.%s", m.gameId, tool.Name)
+		// Replace invalid characters (dots and slashes) with underscores for MCP compliance
+		sanitizedToolName := strings.ReplaceAll(strings.ReplaceAll(tool.Name, ".", "_"), "/", "_")
+		gameSpecificName := fmt.Sprintf("%s_%s", m.gameId, sanitizedToolName)
 		
 		mcpTool := mcp.Tool{
 			Name:        gameSpecificName,

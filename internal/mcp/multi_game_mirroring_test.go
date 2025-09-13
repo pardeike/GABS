@@ -31,15 +31,15 @@ func TestMultiGameToolMirroring(t *testing.T) {
 		
 		// Register minecraft tools
 		minecraftTools := []Tool{
-			{Name: "minecraft.inventory/get", Description: "Get player inventory in Minecraft (Game: minecraft)"},
-			{Name: "minecraft.world/place_block", Description: "Place a block in Minecraft world (Game: minecraft)"},
-			{Name: "minecraft.player/teleport", Description: "Teleport player in Minecraft (Game: minecraft)"},
+			{Name: "minecraft_inventory_get", Description: "Get player inventory in Minecraft (Game: minecraft)"},
+			{Name: "minecraft_world_place_block", Description: "Place a block in Minecraft world (Game: minecraft)"},
+			{Name: "minecraft_player_teleport", Description: "Teleport player in Minecraft (Game: minecraft)"},
 		}
 
 		rimworldTools := []Tool{
-			{Name: "rimworld.inventory/get", Description: "Get colonist inventory in RimWorld (Game: rimworld)"},
-			{Name: "rimworld.crafting/build", Description: "Build items in RimWorld (Game: rimworld)"},  
-			{Name: "rimworld.player/teleport", Description: "Move colonist in RimWorld (Game: rimworld)"},
+			{Name: "rimworld_inventory_get", Description: "Get colonist inventory in RimWorld (Game: rimworld)"},
+			{Name: "rimworld_crafting_build", Description: "Build items in RimWorld (Game: rimworld)"},  
+			{Name: "rimworld_player_teleport", Description: "Move colonist in RimWorld (Game: rimworld)"},
 		}
 
 		// Register tools as Mirror would do
@@ -81,7 +81,7 @@ func TestMultiGameToolMirroring(t *testing.T) {
 				Method:  "tools/call",
 				ID:      json.RawMessage(`"call-minecraft-inventory"`),
 				Params: map[string]interface{}{
-					"name": "minecraft.inventory/get",
+					"name": "minecraft_inventory_get",
 					"arguments": map[string]interface{}{
 						"playerId": "steve",
 					},
@@ -90,7 +90,7 @@ func TestMultiGameToolMirroring(t *testing.T) {
 
 			callResponse := server.HandleMessage(callMsg)
 			if callResponse == nil {
-				t.Fatal("Expected response from minecraft.inventory/get")
+				t.Fatal("Expected response from minecraft_inventory_get")
 			}
 
 			callBytes, _ := json.Marshal(callResponse)
@@ -103,7 +103,7 @@ func TestMultiGameToolMirroring(t *testing.T) {
 				Method:  "tools/call",
 				ID:      json.RawMessage(`"call-rimworld-inventory"`),
 				Params: map[string]interface{}{
-					"name": "rimworld.inventory/get",
+					"name": "rimworld_inventory_get",
 					"arguments": map[string]interface{}{
 						"playerId": "colonist1",
 					},
@@ -112,7 +112,7 @@ func TestMultiGameToolMirroring(t *testing.T) {
 
 			callResponse := server.HandleMessage(callMsg)
 			if callResponse == nil {
-				t.Fatal("Expected response from rimworld.inventory/get")
+				t.Fatal("Expected response from rimworld_inventory_get")
 			}
 
 			callBytes, _ := json.Marshal(callResponse)
@@ -121,7 +121,7 @@ func TestMultiGameToolMirroring(t *testing.T) {
 	})
 }
 
-// TestGamesToolsCommand tests the new games.tools command
+// TestGamesToolsCommand tests the new games_tools command
 func TestGamesToolsCommand(t *testing.T) {
 	// Create a temporary config for testing
 	tempDir, err := os.MkdirTemp("", "gabs_tools_test")
@@ -170,13 +170,13 @@ func TestGamesToolsCommand(t *testing.T) {
 
 	// Simulate having some game-specific tools registered (as Mirror would do)
 	minecraftTools := []Tool{
-		{Name: "minecraft.inventory/get", Description: "Get player inventory in Minecraft (Game: minecraft)"},
-		{Name: "minecraft.world/place_block", Description: "Place a block in Minecraft world (Game: minecraft)"},
+		{Name: "minecraft_inventory_get", Description: "Get player inventory in Minecraft (Game: minecraft)"},
+		{Name: "minecraft_world_place_block", Description: "Place a block in Minecraft world (Game: minecraft)"},
 	}
 
 	rimworldTools := []Tool{
-		{Name: "rimworld.inventory/get", Description: "Get colonist inventory in RimWorld (Game: rimworld)"},
-		{Name: "rimworld.crafting/build", Description: "Build items in RimWorld (Game: rimworld)"},
+		{Name: "rimworld_inventory_get", Description: "Get colonist inventory in RimWorld (Game: rimworld)"},
+		{Name: "rimworld_crafting_build", Description: "Build items in RimWorld (Game: rimworld)"},
 	}
 
 	// Register tools
@@ -193,43 +193,43 @@ func TestGamesToolsCommand(t *testing.T) {
 	}
 
 	t.Run("ListAllGameTools", func(t *testing.T) {
-		// Test games.tools without gameId - should list all 
+		// Test games_tools without gameId - should list all 
 		toolsMsg := &Message{
 			JSONRPC: "2.0",
 			Method:  "tools/call",
 			ID:      json.RawMessage(`"list-game-tools"`),
 			Params: map[string]interface{}{
-				"name":      "games.tools",
+				"name":      "games_tools",
 				"arguments": map[string]interface{}{},
 			},
 		}
 
 		response := server.HandleMessage(toolsMsg)
 		if response == nil {
-			t.Fatal("Expected response from games.tools")
+			t.Fatal("Expected response from games_tools")
 		}
 
 		respBytes, _ := json.Marshal(response)
 		responseStr := string(respBytes)
-		t.Logf("games.tools (all games): %s", responseStr)
+		t.Logf("games_tools (all games): %s", responseStr)
 		
 		// Should mention both minecraft and rimworld tools
-		if !strings.Contains(responseStr, "minecraft.inventory/get") {
+		if !strings.Contains(responseStr, "minecraft_inventory_get") {
 			t.Error("Expected to see minecraft tools")
 		}
-		if !strings.Contains(responseStr, "rimworld.inventory/get") {
+		if !strings.Contains(responseStr, "rimworld_inventory_get") {
 			t.Error("Expected to see rimworld tools") 
 		}
 	})
 
 	t.Run("ListMinecraftToolsOnly", func(t *testing.T) {
-		// Test games.tools with specific gameId  
+		// Test games_tools with specific gameId  
 		toolsMsg := &Message{
 			JSONRPC: "2.0",
 			Method:  "tools/call",
 			ID:      json.RawMessage(`"list-minecraft-tools"`),
 			Params: map[string]interface{}{
-				"name": "games.tools",
+				"name": "games_tools",
 				"arguments": map[string]interface{}{
 					"gameId": "minecraft",
 				},
@@ -238,18 +238,18 @@ func TestGamesToolsCommand(t *testing.T) {
 
 		response := server.HandleMessage(toolsMsg)
 		if response == nil {
-			t.Fatal("Expected response from games.tools")
+			t.Fatal("Expected response from games_tools")
 		}
 
 		respBytes, _ := json.Marshal(response)
 		responseStr := string(respBytes)
-		t.Logf("games.tools (minecraft only): %s", responseStr)
+		t.Logf("games_tools (minecraft only): %s", responseStr)
 		
 		// Should mention minecraft tools but not rimworld
-		if !strings.Contains(responseStr, "minecraft.inventory/get") {
+		if !strings.Contains(responseStr, "minecraft_inventory_get") {
 			t.Error("Expected to see minecraft tools")
 		}
-		if strings.Contains(responseStr, "rimworld.inventory/get") {
+		if strings.Contains(responseStr, "rimworld_inventory_get") {
 			t.Error("Should not see rimworld tools when filtering for minecraft")
 		}
 	})
@@ -262,14 +262,14 @@ func TestProposedSolution(t *testing.T) {
 	t.Run("GamePrefixedTools", func(t *testing.T) {
 		// Strategy 1: Prefix all tools with game ID
 		// inventory/get becomes:
-		// - minecraft.inventory/get  
-		// - rimworld.inventory/get
+		// - minecraft_inventory_get  
+		// - rimworld_inventory_get
 		
 		// This makes it clear to AI which game each tool belongs to
-		// AI can then explicitly choose: "use minecraft.inventory/get to get Steve's inventory"
+		// AI can then explicitly choose: "use minecraft_inventory_get to get Steve's inventory"
 		t.Log("Strategy 1: Game-prefixed tool names")
-		t.Log("  minecraft.inventory/get - Get player inventory in Minecraft")  
-		t.Log("  rimworld.inventory/get - Get colonist inventory in RimWorld")
+		t.Log("  minecraft_inventory_get - Get player inventory in Minecraft")  
+		t.Log("  rimworld_inventory_get - Get colonist inventory in RimWorld")
 		t.Log("  AI can clearly specify which game to target")
 	})
 
@@ -290,10 +290,10 @@ func TestProposedSolution(t *testing.T) {
 		// This is simpler but requires switching context
 		
 		t.Log("Strategy 3: Single active game context")
-		t.Log("  games.switch {'gameId': 'minecraft'}")
-		t.Log("  Now all tools (inventory/get, world/place_block) apply to Minecraft")
-		t.Log("  games.switch {'gameId': 'rimworld'}")  
-		t.Log("  Now all tools (inventory/get, crafting/build) apply to RimWorld")
+		t.Log("  games_switch {'gameId': 'minecraft'}")
+		t.Log("  Now all tools (inventory_get, world_place_block) apply to Minecraft")
+		t.Log("  games_switch {'gameId': 'rimworld'}")  
+		t.Log("  Now all tools (inventory_get, crafting_build) apply to RimWorld")
 	})
 	
 	// I think Strategy 1 (game-prefixed tools) is clearest for AI
