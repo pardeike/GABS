@@ -7,11 +7,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -313,7 +315,27 @@ func addGame(log util.Logger, gameID string) int {
 		LaunchMode: promptChoice("Launch Mode", "DirectPath", []string{"DirectPath", "SteamAppId", "EpicAppId", "CustomCommand"}),
 	}
 
-	game.Target = promptString("Target (path/id)", "")
+	// Enhance target prompt for DirectPath mode with platform-specific help
+	var targetPrompt string
+	if game.LaunchMode == "DirectPath" {
+		if runtime.GOOS == "darwin" {
+			targetPrompt = "Target (executable path or .app bundle)"
+		} else {
+			targetPrompt = "Target (executable path)"
+		}
+	} else {
+		targetPrompt = "Target (path/id)"
+	}
+	
+	game.Target = promptString(targetPrompt, "")
+	
+	// For DirectPath on macOS, resolve .app bundles to actual executables
+	if game.LaunchMode == "DirectPath" && game.Target != "" {
+		if resolvedTarget, err := resolveMacOSAppBundle(game.Target); err == nil && resolvedTarget != game.Target {
+			fmt.Printf("✓ Resolved app bundle to executable: %s\n", resolvedTarget)
+			game.Target = resolvedTarget
+		}
+	}
 	
 	if game.LaunchMode == "DirectPath" || game.LaunchMode == "CustomCommand" {
 		workingDir := promptString("Working Directory (optional)", "")
@@ -438,13 +460,18 @@ func promptString(prompt, defaultValue string) string {
 		fmt.Printf("%s: ", prompt)
 	}
 	
-	var input string
-	fmt.Scanln(&input)
-	
-	if input == "" {
-		return defaultValue
+	// Use bufio.Scanner to read the entire line, including spaces
+	scanner := bufio.NewScanner(os.Stdin)
+	if scanner.Scan() {
+		input := strings.TrimSpace(scanner.Text())
+		if input == "" {
+			return defaultValue
+		}
+		return input
 	}
-	return input
+	
+	// If scan failed or reached EOF, return default value
+	return defaultValue
 }
 
 func promptChoice(prompt, defaultValue string, choices []string) string {
@@ -457,8 +484,12 @@ func promptChoice(prompt, defaultValue string, choices []string) string {
 	}
 	fmt.Print(": ")
 	
+	// Use bufio.Scanner to read the entire line, including spaces
+	scanner := bufio.NewScanner(os.Stdin)
 	var input string
-	fmt.Scanln(&input)
+	if scanner.Scan() {
+		input = strings.TrimSpace(scanner.Text())
+	}
 	
 	if input == "" {
 		return defaultValue
@@ -473,6 +504,92 @@ func promptChoice(prompt, defaultValue string, choices []string) string {
 	
 	fmt.Printf("Invalid choice. Please select one of: %s\n", strings.Join(choices, ", "))
 	return promptChoice(prompt, defaultValue, choices)
+}
+
+// resolveMacOSAppBundle resolves a macOS .app bundle path to the actual executable inside it
+func resolveMacOSAppBundle(appPath string) (string, error) {
+	// Only process on macOS and only for .app bundles
+	if runtime.GOOS != "darwin" || !strings.HasSuffix(appPath, ".app") {
+		return appPath, nil
+	}
+	
+	// Check if the app bundle exists
+	if _, err := os.Stat(appPath); os.IsNotExist(err) {
+		return appPath, nil // Return original path if it doesn't exist (user might be entering a path that doesn't exist yet)
+	}
+	
+	// Look for executables in Contents/MacOS/
+	macOSDir := filepath.Join(appPath, "Contents", "MacOS")
+	if _, err := os.Stat(macOSDir); os.IsNotExist(err) {
+		// Not a standard app bundle structure, but might be valid - warn user
+		fmt.Printf("⚠️  Warning: %s doesn't appear to be a standard app bundle (missing Contents/MacOS)\n", filepath.Base(appPath))
+		return appPath, nil
+	}
+	
+	entries, err := os.ReadDir(macOSDir)
+	if err != nil {
+		fmt.Printf("⚠️  Warning: Cannot read Contents/MacOS directory in %s\n", filepath.Base(appPath))
+		return appPath, nil
+	}
+	
+	var executables []string
+	appName := strings.TrimSuffix(filepath.Base(appPath), ".app")
+	
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		
+		// Check if file is executable
+		fullPath := filepath.Join(macOSDir, entry.Name())
+		if info, err := os.Stat(fullPath); err == nil {
+			if info.Mode()&0111 != 0 { // Has execute permission
+				executables = append(executables, entry.Name())
+			}
+		}
+	}
+	
+	if len(executables) == 0 {
+		fmt.Printf("⚠️  Warning: No executable files found in %s/Contents/MacOS\n", filepath.Base(appPath))
+		return appPath, nil
+	}
+	
+	// If there's only one executable, use it
+	if len(executables) == 1 {
+		fmt.Printf("🔍 Found executable: %s\n", executables[0])
+		return filepath.Join(macOSDir, executables[0]), nil
+	}
+	
+	// Multiple executables - try to find one that matches the app name
+	for _, executable := range executables {
+		if strings.Contains(strings.ToLower(executable), strings.ToLower(appName)) {
+			fmt.Printf("🔍 Found matching executable: %s\n", executable)
+			return filepath.Join(macOSDir, executable), nil
+		}
+	}
+	
+	// Multiple executables, none match app name - let user choose
+	fmt.Printf("\n🔍 Found multiple executables in %s:\n", filepath.Base(appPath))
+	for i, executable := range executables {
+		fmt.Printf("  %d. %s\n", i+1, executable)
+	}
+	
+	for {
+		choice := promptString("Select executable (1-"+fmt.Sprintf("%d", len(executables))+")", "1")
+		if choice == "" {
+			choice = "1"
+		}
+		
+		// Parse choice
+		var index int
+		if _, err := fmt.Sscanf(choice, "%d", &index); err == nil && index >= 1 && index <= len(executables) {
+			selectedExecutable := executables[index-1]
+			fmt.Printf("✓ Selected: %s\n", selectedExecutable)
+			return filepath.Join(macOSDir, selectedExecutable), nil
+		}
+		
+		fmt.Printf("Please enter a number between 1 and %d\n", len(executables))
+	}
 }
 
 func parseBackoff(s string) (time.Duration, time.Duration, error) {
