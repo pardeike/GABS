@@ -2,31 +2,45 @@
 
 ## Your Mission
 
-You are working with **GABS (Game Agent Bridge Server)**, which implements the GABP (Game Agent Bridge Protocol) as an MCP server. GABS enables AI tools to interact with games through a standardized bridge interface.
+You are working with **GABS (Game Agent Bridge Server)**, which implements the GABP (Game Agent Bridge Protocol) as an MCP server. GABS enables AI tools to interact with games through GABP compliant modifications that act as a standardized bridge interface.
 
-GABS acts as a translator between AI agents and game modifications, allowing AI systems to:
-- 🎮 Control and monitor games in real-time
-- 🔧 Debug and test game modifications 
-- 📊 Analyze game state and player behavior
-- 🤖 Automate game testing and development workflows
+GABS acts as a translator between AI agents and GABP compliant game modifications, allowing AI systems to:
+- Control and monitor games in real-time
+- Debug and test game modifications 
+- Analyze game state and player behavior
+- Automate game testing and development workflows
 
 ## Architecture Overview
 
 ```
-AI Agent ← MCP → GABS ← GABP → Game Mod ← Game API → Game
+AI Agent ← MCP → GABS ← GABP → GABP Compliant Mod ← Game API → Game
 ```
 
 - **AI Agent**: Your AI assistant (Claude, ChatGPT, custom tools)
 - **MCP**: Model Context Protocol (standard AI-tool communication)
 - **GABS**: Game Agent Bridge Server (this project)
 - **GABP**: Game Agent Bridge Protocol (JSON-RPC style messaging)
-- **Game Mod**: Modification that implements GABP in the target game
+- **GABP Compliant Mod**: Modification that implements GABP in the target game
+
+### GABP Compliant Mod Types
+
+GABS connects to game modifications that implement the GABP protocol. These mods can take different architectural approaches:
+
+1. **Central Community Mods**: A single mod that searches for and exposes tools from all other installed mods, acting as a central hub for game functionality
+
+2. **Individual Framework Mods**: Specific mods that use a GABP framework to expose their own unique functionality (crafting systems, building tools, etc.)
+
+3. **General Game Control Mods**: Mods that make the entire game remotely controllable, providing access to core game mechanics rather than mod-specific features
+
+4. **Combined Control Mods**: Mods that provide both game control and mod-specific functionality, allowing ultimate control over both the base game and modification features
+
+This flexibility means you can have fine-grained control over specific mod functionality, broad control over the entire game, or any combination that suits your needs.
 
 ## Quick Start for AI Development
 
 ### 1. Understanding GABS from AI Perspective
 
-GABS appears to your AI tool as an MCP server that provides:
+GABS appears to your AI tool as an MCP server that provides access to GABP compliant game modifications with:
 
 - **Tools**: Game actions you can execute (e.g., `inventory/get`, `world/place_block`)
 - **Resources**: Game data you can read (e.g., `world/map.json`, `config/settings.txt`)
@@ -89,7 +103,7 @@ GABS exposes game functionality as MCP tools. Common patterns:
 - `bridge/refresh` - Refresh tool/resource discovery
 
 #### Game-Specific Tools
-These depend on what the game mod exposes:
+These depend on what the GABP compliant game mod exposes:
 - `inventory/get`, `inventory/set` - Player inventory management
 - `world/get_block`, `world/place_block` - World manipulation
 - `player/move`, `player/teleport` - Player actions
@@ -327,7 +341,7 @@ try {
 
 ### For AI Agents Helping Mod Development
 
-If you're an AI assistant helping someone develop a game mod:
+If you're an AI assistant helping someone develop a GABP compliant game mod:
 
 #### 1. Reading Bridge Configuration
 
@@ -451,7 +465,7 @@ GABS creates configuration in standard locations:
 - All connections are loopback-only (127.0.0.1)
 - Token-based authentication prevents unauthorized access
 - GABS never exposes ports to external networks
-- Game mods should validate all tool parameters
+- GABP compliant game mods should validate all tool parameters
 
 ## Debugging and Troubleshooting
 
@@ -470,7 +484,7 @@ GABS creates configuration in standard locations:
    - Check token string matches exactly
 
 4. **"Method not found"** 
-   - Game mod hasn't implemented the requested tool
+   - GABP compliant game mod hasn't implemented the requested tool
    - Check mod's tool registration code
 
 ### Debug Logging
@@ -481,7 +495,7 @@ Enable detailed logging in GABS:
 gabs run --gameId mygame --target "/path/to/game" --log-level debug
 ```
 
-Monitor GABP messages in your game mod:
+Monitor GABP messages in your GABP compliant game mod:
 
 ```csharp
 public class DebugGABPClient : GABPClient {
