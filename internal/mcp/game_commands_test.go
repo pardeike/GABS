@@ -1,0 +1,145 @@
+package mcp
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/pardeike/gabs/internal/config"
+	"github.com/pardeike/gabs/internal/util"
+)
+
+// TestCurrentGameCommandBehavior demonstrates the current issue
+func TestCurrentGameCommandBehavior(t *testing.T) {
+	// Create a temporary config with a Steam game
+	tempDir, err := os.MkdirTemp("", "gabs_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+	
+	configPath := filepath.Join(tempDir, "config.json")
+	
+	// Create config with RimWorld game - this mirrors the README example
+	gamesConfig := &config.GamesConfig{
+		Version: "1.0",
+		Games: map[string]config.GameConfig{
+			"rimworld": {
+				ID:         "rimworld",
+				Name:       "RimWorld",
+				LaunchMode: "SteamAppId",
+				Target:     "294100", // This is what AI sees and tries to use as gameId
+				GabpMode:   "local",
+			},
+		},
+	}
+	
+	err = config.SaveGamesConfigToPath(gamesConfig, configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	
+	// Load config and create server
+	loadedConfig, err := config.LoadGamesConfigFromPath(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	
+	logger := util.NewLogger("info")
+	server := NewServer(logger)
+	server.RegisterGameManagementTools(loadedConfig, 0, 0)
+	
+	// Test games.list - see what output AI gets
+	t.Run("GamesList", func(t *testing.T) {
+		listMsg := &Message{
+			JSONRPC: "2.0",
+			Method:  "tools/call",
+			ID:      json.RawMessage(`"test-list"`),
+			Params: map[string]interface{}{
+				"name":      "games.list",
+				"arguments": map[string]interface{}{},
+			},
+		}
+		
+		response := server.HandleMessage(listMsg)
+		if response == nil {
+			t.Fatal("Expected response from games.list")
+		}
+		
+		// Check if response contains the confusing format
+		respBytes, _ := json.Marshal(response)
+		responseStr := string(respBytes)
+		t.Logf("games.list output: %s", responseStr)
+		
+		// The output should contain both "rimworld" and "294100"
+		// This is what confuses AI
+		if !strings.Contains(responseStr, "rimworld") {
+			t.Error("Expected to see game ID 'rimworld' in output")
+		}
+		if !strings.Contains(responseStr, "294100") {
+			t.Error("Expected to see Steam App ID '294100' in output")
+		}
+	})
+	
+	// Test games.start with correct ID (should work)
+	t.Run("GamesStartWithCorrectId", func(t *testing.T) {
+		startCorrectMsg := &Message{
+			JSONRPC: "2.0",
+			Method:  "tools/call",
+			ID:      json.RawMessage(`"test-start-correct"`),
+			Params: map[string]interface{}{
+				"name": "games.start",
+				"arguments": map[string]interface{}{
+					"gameId": "rimworld",
+				},
+			},
+		}
+		
+		response := server.HandleMessage(startCorrectMsg)
+		if response == nil {
+			t.Fatal("Expected response from games.start")
+		}
+		
+		// Should not be an error (though may fail to actually start due to no Steam)
+		respBytes, _ := json.Marshal(response)
+		responseStr := string(respBytes)
+		t.Logf("games.start with 'rimworld': %s", responseStr)
+		
+		// Should find the game (even if start fails)
+		if strings.Contains(responseStr, "not found") {
+			t.Error("Should find game 'rimworld'")
+		}
+	})
+	
+	// Test games.start with Steam App ID (currently fails - this is the bug)
+	t.Run("GamesStartWithSteamAppId", func(t *testing.T) {
+		startWrongMsg := &Message{
+			JSONRPC: "2.0",
+			Method:  "tools/call",
+			ID:      json.RawMessage(`"test-start-wrong"`),
+			Params: map[string]interface{}{
+				"name": "games.start",
+				"arguments": map[string]interface{}{
+					"gameId": "294100", // AI tries this after seeing it in games.list
+				},
+			},
+		}
+		
+		response := server.HandleMessage(startWrongMsg)
+		if response == nil {
+			t.Fatal("Expected response from games.start")
+		}
+		
+		respBytes, _ := json.Marshal(response)
+		responseStr := string(respBytes)
+		t.Logf("games.start with '294100': %s", responseStr)
+		
+		// Currently this should fail with "not found"
+		// After our fix, it should work
+		if !strings.Contains(responseStr, "not found") {
+			t.Error("Expected current implementation to fail with 'not found' for Steam App ID")
+		}
+	})
+}
