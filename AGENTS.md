@@ -51,37 +51,43 @@ GABS appears to your AI tool as an MCP server that provides access to GABP compl
 ```typescript
 // AI agent connecting to GABS via MCP
 const mcpClient = new MCPClient();
-await mcpClient.connect("stdio://gabs");
+await mcpClient.connect("stdio://gabs server");
 
-// Discover available game tools
-const tools = await mcpClient.listTools();
-console.log("Available game actions:", tools.map(t => t.name));
+// Discover configured games and their status
+const games = await mcpClient.callTool("games.list", {});
+console.log("Available games:", games);
 
-// Execute a game action  
-const result = await mcpClient.callTool("inventory/get", {
-  playerId: "steve"
+// Start a specific game
+const result = await mcpClient.callTool("games.start", {
+  gameId: "minecraft"  // or use Steam App ID like "294100"
 });
 
-// Read game data
-const worldData = await mcpClient.readResource("world/schematic.json");
-
-// Subscribe to game events (if supported)
-mcpClient.onEvent("player/move", (event) => {
-  console.log(`Player moved to: ${event.payload.position}`);
+// Check game status
+const status = await mcpClient.callTool("games.status", {
+  gameId: "minecraft"
 });
+
+// Once game mod connects, discover available game actions
+const tools = await mcpClient.callTool("games.tools", {
+  gameId: "minecraft"  
+});
+console.log("Game-specific tools:", tools);
 ```
 
-### 3. Starting GABS
+### 2. Starting GABS
 
-Your AI tool can launch GABS to start game integration:
+Your AI tool connects to GABS which provides game integration:
 
 ```bash
-# Start game with GABS bridge
-gabs run --gameId minecraft --launch DirectPath --target "/path/to/minecraft.exe"
+# First: Configure your games once  
+gabs games add minecraft
+gabs games add rimworld
 
-# Or attach to already running game
-gabs attach --gameId minecraft
+# Then: Start GABS as MCP server
+gabs server
 ```
+
+GABS automatically creates bridge configurations when games are started, allowing GABP compliant game mods to connect.
 
 ## MCP Integration Details
 
@@ -89,25 +95,22 @@ gabs attach --gameId minecraft
 
 GABS exposes game functionality as MCP tools. Common patterns:
 
-#### Core GABP Tools
-- `tools/list` - Discover available game actions
-- `tools/call` - Execute specific game actions
-- `events/subscribe` - Subscribe to game events
-- `events/unsubscribe` - Unsubscribe from events
-- `resources/list` - List available game resources
-- `resources/read` - Read specific game resource
+#### Core Game Management Tools
+- `games.list` - Discover configured games and their status
+- `games.start` - Start a game using game ID or launch target  
+- `games.stop` - Gracefully stop a running game
+- `games.kill` - Force terminate a game
+- `games.status` - Check detailed status of games
+- `games.tools` - List available game-specific tools (from GABP compliant mods)
 
-#### Bridge Management Tools  
-- `bridge/status` - Check bridge connection status
-- `bridge/restart` - Restart the game process
-- `bridge/refresh` - Refresh tool/resource discovery
-
-#### Game-Specific Tools
-These depend on what the GABP compliant game mod exposes:
+#### Game-Specific Tools (via GABP)
+When a game's GABP compliant mod connects, additional tools become available:
 - `inventory/get`, `inventory/set` - Player inventory management
 - `world/get_block`, `world/place_block` - World manipulation
 - `player/move`, `player/teleport` - Player actions
 - `chat/send`, `chat/history` - Chat integration
+
+*Note: Game-specific tools depend on what the GABP compliant mod exposes and may be prefixed with game ID for multi-game setups.*
 
 ### Resources Provided by GABS
 
@@ -148,7 +151,7 @@ mcpClient.onEvent("player/chat", (event) => {
 
 ## Advanced AI Integration Patterns
 
-### 1. Game State Monitoring
+### Game State Monitoring
 
 ```typescript
 class GameStateMonitor {
@@ -158,28 +161,35 @@ class GameStateMonitor {
   }
 
   async startMonitoring() {
-    // Subscribe to all relevant events
-    await this.client.callTool("events/subscribe", {
-      channels: ["player/*", "world/*", "game/*"]
-    });
-
-    // Periodic state snapshots
+    // Monitor all configured games
     setInterval(async () => {
-      const state = await this.client.callTool("state/get", {});
-      this.gameState = { ...this.gameState, ...state };
+      const games = await this.client.callTool("games.list", {});
+      this.gameState = games;
+      
+      // Check for games that have GABP tools available
+      for (const game of games) {
+        if (game.status === "running") {
+          try {
+            const tools = await this.client.callTool("games.tools", {
+              gameId: game.id
+            });
+            console.log(`${game.id} has ${tools.length} GABP tools available`);
+          } catch (error) {
+            // Game mod hasn't connected yet
+          }
+        }
+      }
     }, 5000);
   }
 
-  async analyzePlayerBehavior(playerId) {
-    // AI analysis of player patterns
-    const recentMoves = this.getRecentEvents("player/move", playerId);
-    const analysis = await this.runAIAnalysis(recentMoves);
-    return analysis;
+  async analyzeGameActivity(gameId) {
+    const status = await this.client.callTool("games.status", { gameId });
+    return status;
   }
 }
 ```
 
-### 2. Automated Game Testing
+### Automated Game Testing
 
 ```typescript
 class GameTester {
@@ -187,38 +197,43 @@ class GameTester {
     this.client = mcpClient;
   }
 
-  async testCraftingSystem() {
+  async testGameLaunch(gameId) {
     try {
-      // Get initial inventory
-      const startInventory = await this.client.callTool("inventory/get", {});
+      // Start the game
+      const startResult = await this.client.callTool("games.start", { gameId });
       
-      // Attempt crafting
-      const craftResult = await this.client.callTool("crafting/craft", {
-        recipe: "wooden_sword",
-        quantity: 1
-      });
-
-      // Verify results
-      const endInventory = await this.client.callTool("inventory/get", {});
+      // Wait for game to initialize
+      await new Promise(resolve => setTimeout(resolve, 5000));
       
-      return this.validateCraftingResults(startInventory, endInventory, craftResult);
+      // Check if game is running
+      const status = await this.client.callTool("games.status", { gameId });
+      
+      // Try to get GABP tools (indicates mod is connected)
+      let tools = [];
+      try {
+        tools = await this.client.callTool("games.tools", { gameId });
+      } catch (error) {
+        // GABP mod hasn't connected yet
+      }
+      
+      return {
+        success: status.status === "running" || status.status === "launched",
+        status: status.status,
+        gabpTools: tools.length,
+        pid: status.pid
+      };
     } catch (error) {
       return { success: false, error: error.message };
     }
   }
 
   async runAutomatedTests() {
-    const tests = [
-      () => this.testCraftingSystem(),
-      () => this.testMovementSystem(), 
-      () => this.testInventoryManagement(),
-      () => this.testWorldInteraction()
-    ];
-
+    const games = await this.client.callTool("games.list", {});
     const results = [];
-    for (const test of tests) {
-      const result = await test();
-      results.push(result);
+    
+    for (const game of games) {
+      const result = await this.testGameLaunch(game.id);
+      results.push({ gameId: game.id, ...result });
     }
 
     return results;
@@ -374,58 +389,64 @@ rimworld.player/teleport    // RimWorld colonist movement
 #### 1. Discovering Available Games and Tools
 
 ```typescript
-// First, see what games are configured and running
+// First, see what games are configured and their status
 const games = await mcpClient.callTool("games.list", {});
 console.log("Available games:", games);
 
-// Then see what tools each game provides
-const allTools = await mcpClient.callTool("games.tools", {});
-console.log("All game tools:", allTools);
-
-// Or focus on specific game
-const minecraftTools = await mcpClient.callTool("games.tools", {
+// Check individual game status
+const minecraftStatus = await mcpClient.callTool("games.status", {
   gameId: "minecraft"
 });
+
+// See what GABP tools a running game provides
+if (minecraftStatus.status === "running") {
+  try {
+    const minecraftTools = await mcpClient.callTool("games.tools", {
+      gameId: "minecraft"
+    });
+    console.log("Minecraft GABP tools:", minecraftTools);
+  } catch (error) {
+    console.log("Minecraft mod not yet connected");
+  }
+}
 ```
 
 #### 2. Using Game-Specific Tools
 
 ```typescript
-// AI can now be explicit about which game to control
-const minecraftInventory = await mcpClient.callTool("minecraft.inventory/get", {
-  playerId: "steve"
-});
+// Start games first
+await mcpClient.callTool("games.start", { gameId: "minecraft" });
+await mcpClient.callTool("games.start", { gameId: "rimworld" });
 
-const rimworldInventory = await mcpClient.callTool("rimworld.inventory/get", {
-  playerId: "colonist1"  
-});
-
-// No ambiguity - AI knows exactly which game each call targets
+// Once GABP mods connect, you can use their exposed tools
+// (Tool names depend on what each mod implements)
+try {
+  const inventory = await mcpClient.callTool("inventory/get", {
+    playerId: "steve"
+  });
+  console.log("Minecraft inventory:", inventory);
+} catch (error) {
+  console.log("Minecraft inventory tool not available");
+}
 ```
 
 #### 3. Multi-Game Coordination
 
 ```typescript
-// AI can coordinate actions across multiple games
-const players = await Promise.all([
-  mcpClient.callTool("minecraft.player/list", {}),
-  mcpClient.callTool("rimworld.player/list", {})
-]);
+// Start multiple games
+const games = ["minecraft", "rimworld"];
+const startResults = await Promise.allSettled(
+  games.map(gameId => mcpClient.callTool("games.start", { gameId }))
+);
 
-console.log("Total players across all games:", 
-  players[0].length + players[1].length);
+// Check which games are running
+const statusResults = await Promise.all(
+  games.map(gameId => mcpClient.callTool("games.status", { gameId }))
+);
 
-// Move players in different games simultaneously  
-await Promise.all([
-  mcpClient.callTool("minecraft.player/teleport", {
-    playerId: "steve", 
-    x: 100, y: 64, z: 200
-  }),
-  mcpClient.callTool("rimworld.player/teleport", {
-    playerId: "colonist1",
-    x: 50, y: 25
-  })
-]);
+console.log("Running games:", 
+  statusResults.filter(s => s.status === "running" || s.status === "launched")
+);
 ```
 
 ### Advanced Multi-Game Scenarios

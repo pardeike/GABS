@@ -1,189 +1,121 @@
-# Solution Summary: GABS Connection Architecture for Cloud AI
+# Solution Summary: GABS Application Lifecycle Management
 
 ## Problem Analysis
 
-The issue asked: **"Should the mod create the server that speaks GABP or the bridge server?"** for cloud-based AI scenarios where AI runs in sandboxes with restricted network access.
+The issue requested fixes for critical application lifecycle management problems in GABS that prevented proper game control, especially when using Steam App IDs.
 
-## Key Discovery
+## Key Problems Identified
 
-**The current GABS architecture was already optimal for cloud scenarios:**
-- **Game mods act as GABP servers** (listen on ports)  
-- **GABS acts as GABP client** (connects to mods)
-- **AI connects to GABS via MCP** (stdio/HTTP)
-
-This design supports cloud AI because sandboxes can typically make **outbound connections** to game servers, even when they can't accept incoming connections.
+1. **Steam App ID resolution failure**: Starting/stopping games using Steam App ID (e.g., "294100") instead of game ID (e.g., "rimworld") would fail with "not found" errors
+2. **Incomplete process state tracking**: Applications weren't properly tracked in global state, leading to inconsistent status reporting  
+3. **Missing GABP integration**: Bridge configuration wasn't automatically created when starting games, breaking the connection between GABS and game mods
+4. **Poor process lifecycle handling**: Dead processes weren't cleaned up, and Steam/Epic launcher processes weren't distinguished from actual game processes
 
 ## Implementation
 
-### 1. Added Connection Mode Configuration
+### 1. Enhanced Process Status Detection
 
-**New CLI Flags:**
-- `--gabpMode`: Connection mode (local|remote|connect)
-- `--gabpHost`: GABP server host for remote connections
+**Added robust `IsRunning()` method** (`internal/process/controller.go`):
+- Cross-platform process state checking using signal 0
+- Automatic cleanup of dead processes from the global games map
+- Distinguished between Steam/Epic launcher processes (show as "launched") and direct processes (show as "running")
+- Proper handling of launcher vs direct process lifecycle differences
 
-**Connection Modes:**
-
-| Mode | Use Case | GABS Behavior | Game Mod Behavior |
-|------|----------|---------------|-------------------|
-| `local` | Local development | Writes bridge.json with localhost | Reads config, listens on 127.0.0.1 |
-| `remote` | Cloud AI + remote game | Writes bridge.json with remote host | Reads config, listens on specified host |
-| `connect` | Advanced scenarios | Reads existing bridge.json | Manages own GABP server |
-
-### 2. Enhanced Configuration System
-
-**Extended bridge.json format:**
-```json
-{
-  "port": 49234,
-  "token": "abc123...",
-  "gameId": "minecraft", 
-  "agentName": "gabs-v0.1.0",
-  "host": "192.168.1.100",
-  "mode": "remote"
+```go
+func (c *Controller) IsRunning() bool {
+    // Special handling for Steam/Epic launchers that exit quickly
+    if c.spec.Mode == "SteamAppId" || c.spec.Mode == "EpicAppId" {
+        return false // Launcher exits, game runs independently
+    }
+    
+    // For direct processes, check if still alive
+    err := c.cmd.Process.Signal(syscall.Signal(0))
+    return err == nil
 }
 ```
 
-**New Functions:**
-- `WriteBridgeJSONWithConfig()`: Create bridge.json with custom host/mode
-- `ReadBridgeJSON()`: Read existing bridge.json for connect mode
-- Backward compatibility with existing bridge.json files
+### 2. Integrated GABP Bridge Configuration  
 
-### 3. Updated Command Behavior
+**Auto-creation of bridge config** (`internal/mcp/stdio_server.go`):
+- Bridge configuration automatically created when starting any game via `games.start` MCP tool
+- Includes proper port allocation, secure token generation, and host/mode settings from game config
+- Enhanced logging shows GABP connection details (port, masked token, config path)
 
-**`gabs run` command:**
-- Local/Remote mode: Writes bridge.json, launches game, connects to mod
-- Connect mode: Reads existing bridge.json, connects to running mod
-
-**`gabs start` command:**
-- Now supports gabpMode/gabpHost configuration
-- Writes properly configured bridge.json
-
-**`gabs attach` command:**
-- Enhanced to read bridge.json and support host override
-- Perfect for cloud AI connecting to remote games
-
-## Deployment Scenarios Enabled
-
-### 1. Local Development (Default)
-```bash
-gabs run --gameId minecraft --launch DirectPath --target "/path/to/minecraft"
-```
-- Traditional localhost development
-- Zero configuration required
-
-### 2. Cloud AI + Home Gaming
-```bash
-# On home computer
-gabs run --gameId minecraft --gabpMode remote --gabpHost 192.168.1.100 --launch DirectPath --target "/path/to/minecraft"
-
-# From cloud AI
-gabs attach --gameId minecraft --gabpHost your-home-ip.ddns.net
-```
-- AI runs in cloud sandbox
-- Game runs on home computer
-- Outbound connection from cloud to home
-
-### 3. Cloud Gaming + Cloud AI
-```bash
-# On cloud gaming instance
-gabs run --gameId game --gabpMode remote --gabpHost <cloud_internal_ip> --launch DirectPath --target "/path/to/game"
-
-# From AI instance (same cloud)
-gabs attach --gameId game --gabpHost <cloud_internal_ip>
-```
-- Both game and AI in cloud infrastructure
-- Low latency, high performance
-
-### 4. Advanced: Mod-Managed GABP
-```bash
-gabs run --gameId advanced-mod --gabpMode connect
-```
-- Game mod controls own GABP server lifecycle
-- GABS simply connects to existing server
-- Maximum flexibility for complex scenarios
-
-## Security & Network Considerations
-
-### Authentication
-- 64-character random hex tokens per session
-- Required for all GABP communications
-- Fresh token generation for each session
-
-### Network Architecture
-- **Outbound connections from AI sandbox** ✅ (typically allowed)
-- **Inbound connections to sandbox** ❌ (typically blocked)
-- **Token-based authentication** ✅ (secure)
-- **TLS encryption** ⚠️ (future enhancement)
-
-### Firewall Configuration
-```bash
-# Allow GABP connections from trusted AI sources
-sudo ufw allow from <ai_cloud_ip> to any port <gabp_port>
+```go
+// Create GABP bridge configuration before starting process
+port, token, bridgePath, err := config.WriteBridgeJSONWithConfig(game.ID, "", bridgeConfig)
+if err != nil {
+    return fmt.Errorf("failed to create bridge config: %w", err)
+}
 ```
 
-## Testing & Validation
+### 3. Fixed Steam App ID Resolution
 
-### Unit Tests
-- Configuration parsing and generation
-- Bridge.json read/write operations
-- Backward compatibility verification
-- Error handling for missing files
+**Enhanced `resolveGameId()` method**:
+- Properly handles both game ID and target resolution
+- Steam App ID ("294100") resolves to same game as game ID ("rimworld")  
+- Process cleanup logic no longer interferes with resolution
 
-### Integration Tests  
-- CLI command functionality
-- Connection mode behavior
-- Host override functionality
-- End-to-end configuration flow
+Both of these work identically:
+```json
+{"method": "tools/call", "params": {"name": "games.start", "arguments": {"gameId": "rimworld"}}}
+{"method": "tools/call", "params": {"name": "games.start", "arguments": {"gameId": "294100"}}}
+```
 
-### Manual Validation
-- Local development scenarios
-- Remote configuration generation
-- Connect mode operation
-- Help text and documentation
+### 4. Improved Application State Management
 
-## Documentation
+**Process controllers properly managed**:
+- Controllers stored in `server.games` map keyed by game ID
+- Multiple access methods (game ID vs Steam App ID) operate on same underlying state  
+- Enhanced status reporting with PID tracking and better error messages
+- Proper cleanup on process termination
 
-### New Files
-- **DEPLOYMENT.md**: Comprehensive deployment guide
-- **SOLUTION_SUMMARY.md**: This implementation summary
-- **Enhanced README.md**: Updated with connection scenarios
+## Configuration-First Architecture
 
-### Updated Documentation
-- CLI help text with new flags
-- Usage examples for each mode
-- Security considerations
-- Troubleshooting guidance
+The actual GABS implementation uses a **configuration-first approach** that is more elegant than CLI-heavy game management:
 
-## Backward Compatibility
+### Current Workflow:
+1. **Configure games once**: `gabs games add minecraft` (interactive setup)
+2. **Start MCP server**: `gabs server` 
+3. **AI controls games**: Using MCP tools like `games.start {"gameId": "minecraft"}`
 
-**Fully maintained:**
-- Existing bridge.json files work unchanged
-- Default behavior unchanged (local mode)
-- All existing CLI commands work as before
-- No breaking changes to GABP protocol
+### MCP Tools Available:
+- `games.list` - List configured games and their status
+- `games.start` - Start a game (auto-creates GABP bridge)
+- `games.stop` - Stop a game gracefully  
+- `games.kill` - Force terminate a game
+- `games.status` - Check detailed game status
+- `games.tools` - List GABP tools from connected game mods
 
-**Migration path:**
-- Existing deployments: No changes required
-- New deployments: Can use enhanced modes as needed
-- Gradual adoption: Mix old and new configurations
+### Key Advantages:
+- **Separation of concerns**: Configuration (CLI) vs Control (MCP)
+- **AI-friendly**: Natural tool-based game control
+- **Flexible ID resolution**: Use game ID or Steam App ID interchangeably
+- **Automatic bridge setup**: GABP configuration created seamlessly
 
-## Future Enhancements
+## Validation
 
-**Potential improvements identified:**
-1. **Reverse Connection Mode**: GABS server, mod client (for extreme firewall scenarios)
-2. **TLS Encryption**: Transport-level security for sensitive deployments  
-3. **Discovery Protocol**: Automatic discovery of available games/mods
-4. **Proxy Support**: Built-in SSH tunnel, HTTP proxy support
-5. **Load Balancing**: Multiple GABS instances per game
+End-to-end MCP testing confirmed all issues resolved:
+- ✅ Steam App ID "294100" correctly resolves to configured game  
+- ✅ Starting with Steam App ID creates GABP bridge and launches game
+- ✅ Status tracking shows proper state transitions (stopped → running/launched)
+- ✅ Bridge configuration contains all necessary GABP connection information
+- ✅ Process cleanup prevents stale entries in games map
+- ✅ Multiple start attempts handle gracefully (no "not found" errors)
+- ✅ All existing functionality remains backward compatible
 
-## Conclusion
+## Changes Made
 
-**The solution successfully addresses the original question by:**
+**Files Modified:**
+- `internal/mcp/stdio_server.go`: Enhanced game lifecycle management and GABP integration
+- `internal/process/controller.go`: Added robust process state detection and launcher handling  
+- `internal/mcp/lifecycle_test.go`: Comprehensive test suite validating all improvements
 
-1. **Clarifying the optimal architecture**: Mod as server, GABS as client is correct for cloud scenarios
-2. **Adding flexible configuration**: Support for local, remote, and advanced connection patterns  
-3. **Maintaining full compatibility**: Zero breaking changes to existing deployments
-4. **Providing comprehensive documentation**: Clear guidance for all deployment scenarios
-5. **Enabling cloud AI scenarios**: Sandbox-friendly outbound connection pattern
+**Key Improvements:**
+1. **Automatic GABP bridge creation** when starting games
+2. **Robust process state tracking** with proper Steam/Epic launcher handling
+3. **Steam App ID resolution** works seamlessly alongside game IDs  
+4. **Enhanced error handling** and status reporting
+5. **Process cleanup** prevents stale state accumulation
 
-**The implementation is minimal, focused, and production-ready** while supporting the full spectrum of deployment patterns from local development to complex cloud architectures.
+The fixes are minimal and surgical, preserving backward compatibility while resolving the core application lifecycle issues that were blocking effective AI-game integration.
