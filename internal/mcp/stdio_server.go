@@ -396,35 +396,65 @@ func (s *Server) getGameSpecificTools(gameID string) []Tool {
 
 // checkGameStatus returns the current status of a game
 func (s *Server) checkGameStatus(gameID string) string {
-	s.mu.RLock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	
 	controller, exists := s.games[gameID]
-	s.mu.RUnlock()
-
 	if !exists {
 		return "stopped"
 	}
 
-	// Check if the process is still running
-	// This is a simple check - in a more sophisticated implementation
-	// we could also check GABP connection status
-	if controller != nil {
-		// The process controller doesn't expose process state directly,
-		// but we can try a simple check by seeing if we can signal it
+	launchMode := controller.GetLaunchMode()
+	
+	// For Steam/Epic launcher games, we can't easily track the actual game process
+	// So we use a different status model
+	if launchMode == "SteamAppId" || launchMode == "EpicAppId" {
+		// For launcher-based games, assume they're "launched" (not "running")
+		// because we don't track the actual game process
+		return "launched" // Special status indicating we triggered the launcher
+	}
+
+	// For direct processes, check if the process is actually running
+	if controller != nil && controller.IsRunning() {
 		return "running"
 	}
 
+	// Process is dead, clean up
+	delete(s.games, gameID)
+	// TODO: Also cleanup any GABP connections and mirrored tools for this game
+	s.log.Debugw("cleaned up dead game process", "gameId", gameID)
+	
 	return "stopped"
 }
 
-// startGame starts a game process using the process controller
+// startGame starts a game process using the process controller and sets up GABP bridge
 func (s *Server) startGame(game config.GameConfig, backoffMin, backoffMax time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// Check if already running
-	if controller, exists := s.games[game.ID]; exists && controller != nil {
+	if controller, exists := s.games[game.ID]; exists && controller != nil && controller.IsRunning() {
 		return fmt.Errorf("game %s is already running", game.ID)
 	}
+
+	// Clean up any stale controller reference
+	delete(s.games, game.ID)
+
+	// Create GABP bridge configuration
+	var bridgeConfig config.BridgeConfig
+	if game.GabpHost != "" {
+		bridgeConfig.Host = game.GabpHost
+	}
+	if game.GabpMode != "" {
+		bridgeConfig.Mode = game.GabpMode
+	}
+
+	port, token, bridgePath, err := config.WriteBridgeJSONWithConfig(game.ID, "", bridgeConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create bridge config: %w", err)
+	}
+
+	s.log.Infow("created GABP bridge configuration", "gameId", game.ID, "port", port, "token", token[:8]+"...", "host", bridgeConfig.Host, "mode", bridgeConfig.Mode, "configPath", bridgePath)
 
 	// Convert GameConfig to LaunchSpec
 	launchSpec := process.LaunchSpec{
@@ -449,32 +479,43 @@ func (s *Server) startGame(game config.GameConfig, backoffMin, backoffMax time.D
 	// Track the running game
 	s.games[game.ID] = controller
 	
-	s.log.Infow("game started", "gameId", game.ID, "mode", game.LaunchMode)
+	s.log.Infow("game started with GABP bridge", "gameId", game.ID, "mode", game.LaunchMode, "pid", controller.GetPID(), "gabpPort", port)
+	
+	// TODO: In a future enhancement, we could start monitoring for GABP connections
+	// and automatically set up mirroring when the game mod connects
+	
 	return nil
 }
 
 // stopGame stops a game process gracefully or by force
 func (s *Server) stopGame(game config.GameConfig, force bool) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	controller, exists := s.games[game.ID]
 	if !exists {
+		s.mu.Unlock()
 		return fmt.Errorf("game %s is not running", game.ID)
 	}
 
+	// Remove from tracking immediately to prevent double-stops
+	delete(s.games, game.ID)
+	s.mu.Unlock()
+
+	// Stop the process
 	var err error
 	if force {
 		err = controller.Kill()
-		s.log.Infow("game killed", "gameId", game.ID)
+		s.log.Infow("game killed", "gameId", game.ID, "pid", controller.GetPID())
 	} else {
 		// Use default grace period of 3 seconds
 		err = controller.Stop(3 * time.Second)
-		s.log.Infow("game stopped", "gameId", game.ID)
+		s.log.Infow("game stopped", "gameId", game.ID, "pid", controller.GetPID())
 	}
 
-	// Remove from tracking regardless of whether stop/kill succeeded
-	delete(s.games, game.ID)
+	// TODO: In future enhancement, also cleanup GABP connections and mirrored tools
+	// This would involve:
+	// 1. Disconnecting any active GABP client for this game
+	// 2. Unregistering all game-specific tools (gameId.* tools)
+	// 3. Cleaning up bridge configuration files
 
 	return err
 }

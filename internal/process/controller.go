@@ -74,7 +74,22 @@ func (c *Controller) Start() error {
 		c.cmd.Dir = c.spec.WorkingDir
 	}
 
-	// Start the process
+	// For Steam/Epic launchers, we need different handling since the launcher
+	// process exits quickly but the game continues running independently
+	if c.spec.Mode == "SteamAppId" || c.spec.Mode == "EpicAppId" {
+		// Start the launcher and let it exit
+		if err := c.cmd.Start(); err != nil {
+			return fmt.Errorf("failed to start %s launcher: %w", c.spec.Mode, err)
+		}
+		
+		// Don't wait for launcher to finish - it's just a trigger
+		// The actual game process runs independently
+		// Note: This means IsRunning() will return false for Steam/Epic games
+		// which is technically correct since we're not managing the game process directly
+		return nil
+	}
+
+	// For direct processes, start normally and track the actual process
 	return c.cmd.Start()
 }
 
@@ -109,6 +124,49 @@ func (c *Controller) Kill() error {
 		return fmt.Errorf("no process to kill")
 	}
 	return c.cmd.Process.Kill()
+}
+
+// IsRunning checks if the controlled process is still running
+func (c *Controller) IsRunning() bool {
+	if c.cmd == nil || c.cmd.Process == nil {
+		return false
+	}
+	
+	// Special case: Steam/Epic launchers exit quickly but game continues
+	// For these cases, we assume the game is running if we have a recent launch
+	// This is imperfect but matches the reality that we don't track the actual game process
+	if c.spec.Mode == "SteamAppId" || c.spec.Mode == "EpicAppId" {
+		// For launcher-based games, we can't easily track the actual game process
+		// Return true for a reasonable period after launch, then false
+		// This is a limitation of the launcher approach - we don't manage the game directly
+		// TODO: Could improve by trying to find game process by name/other heuristics
+		return false // For now, be conservative and assume launcher games manage themselves
+	}
+	
+	// For direct processes, check if the process is still alive
+	// First try to see if the process has already been waited for
+	if c.cmd.ProcessState != nil {
+		// Process has exited
+		return false
+	}
+	
+	// Try to signal the process with signal 0 (doesn't affect the process, just checks existence)
+	// This is the most reliable cross-platform approach
+	err := c.cmd.Process.Signal(syscall.Signal(0))
+	return err == nil
+}
+
+// GetPID returns the process ID if available
+func (c *Controller) GetPID() int {
+	if c.cmd == nil || c.cmd.Process == nil {
+		return 0
+	}
+	return c.cmd.Process.Pid
+}
+
+// GetLaunchMode returns the launch mode for this controller
+func (c *Controller) GetLaunchMode() string {
+	return c.spec.Mode
 }
 
 func (c *Controller) Restart() error {
