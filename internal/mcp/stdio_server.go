@@ -275,6 +275,80 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' (%s) terminated successfully", game.ID, game.Name)}},
 		}, nil
 	})
+
+	// games.tools tool - List tools available for specific games
+	s.RegisterTool(Tool{
+		Name:        "games.tools", 
+		Description: "List game-specific tools available from running games with GABP connections",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"gameId": map[string]interface{}{
+					"type":        "string", 
+					"description": "Game ID to list tools for (optional, lists all if not provided)",
+				},
+			},
+		},
+	}, func(args map[string]interface{}) (*ToolResult, error) {
+		gameId, hasGameID := args["gameId"].(string)
+		
+		var content strings.Builder
+		
+		if hasGameID {
+			// List tools for specific game
+			game, exists := s.resolveGameId(gamesConfig, gameId)
+			if !exists {
+				return &ToolResult{
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games.list to see available games.", gameId)}},
+					IsError: true,
+				}, nil
+			}
+			
+			content.WriteString(fmt.Sprintf("Tools for game '%s':\n\n", game.ID))
+			// Get tools that start with this game's prefix
+			gameTools := s.getGameSpecificTools(game.ID)
+			if len(gameTools) == 0 {
+				content.WriteString(fmt.Sprintf("No GABP tools available for this game.\n"))
+				status := s.checkGameStatus(game.ID)
+				if status != "running" {
+					content.WriteString(fmt.Sprintf("Game is currently '%s'. Start it with games.start to enable GABP tools.\n", status))
+				}
+			} else {
+				for _, tool := range gameTools {
+					content.WriteString(fmt.Sprintf("• **%s** - %s\n", tool.Name, tool.Description))
+				}
+			}
+		} else {
+			// List tools for all games
+			content.WriteString("Game-Specific Tools Available:\n\n")
+			games := gamesConfig.ListGames()
+			
+			hasAnyTools := false
+			for _, game := range games {
+				gameTools := s.getGameSpecificTools(game.ID)
+				if len(gameTools) > 0 {
+					hasAnyTools = true
+					status := s.checkGameStatus(game.ID)
+					content.WriteString(fmt.Sprintf("**%s** (%s, %d tools):\n", game.ID, status, len(gameTools)))
+					for _, tool := range gameTools {
+						content.WriteString(fmt.Sprintf("  • %s - %s\n", tool.Name, tool.Description))
+					}
+					content.WriteString("\n")
+				}
+			}
+			
+			if !hasAnyTools {
+				content.WriteString("No game-specific tools available.\n")
+				content.WriteString("Start games with GABP-compliant mods to see their tools.\n")
+			}
+			
+			content.WriteString("\nNote: Tools are prefixed with game ID (e.g., 'minecraft.inventory/get') to avoid conflicts between games.\n")
+		}
+		
+		return &ToolResult{
+			Content: []Content{{Type: "text", Text: content.String()}},
+		}, nil
+	})
 }
 
 // RegisterBridgeTools registers the legacy bridge management tools (for compatibility)
@@ -301,6 +375,23 @@ func (s *Server) resolveGameId(gamesConfig *config.GamesConfig, gameIdOrTarget s
 	}
 	
 	return nil, false
+}
+
+// getGameSpecificTools returns tools that belong to a specific game
+func (s *Server) getGameSpecificTools(gameID string) []Tool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	
+	var gameTools []Tool
+	prefix := gameID + "."
+	
+	for toolName, handler := range s.tools {
+		if strings.HasPrefix(toolName, prefix) {
+			gameTools = append(gameTools, handler.Tool)
+		}
+	}
+	
+	return gameTools
 }
 
 // checkGameStatus returns the current status of a game
