@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"runtime"
 	"sync"
 	"time"
 
@@ -132,7 +133,7 @@ func (c *Client) handshake() error {
 	params := SessionHelloParams{
 		Token:         c.token,
 		BridgeVersion: "1.0.0",
-		Platform:      "linux", // TODO: detect actual platform
+		Platform:      runtime.GOOS, // Detect actual platform
 		LaunchId:      launchId,
 		ClientInfo: &ClientInfo{
 			Name:    "gabs",
