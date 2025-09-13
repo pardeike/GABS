@@ -1,0 +1,175 @@
+package config
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestWriteBridgeJSONWithConfig(t *testing.T) {
+	// Create temporary directory for testing
+	tempDir := t.TempDir()
+	
+	tests := []struct {
+		name         string
+		gameID       string
+		config       BridgeConfig
+		expectHost   string
+		expectMode   string
+	}{
+		{
+			name:         "default config",
+			gameID:       "testgame",
+			config:       BridgeConfig{},
+			expectHost:   "127.0.0.1",
+			expectMode:   "local",
+		},
+		{
+			name:         "remote config",
+			gameID:       "minecraft",
+			config:       BridgeConfig{Host: "192.168.1.100", Mode: "remote"},
+			expectHost:   "192.168.1.100",
+			expectMode:   "remote",
+		},
+		{
+			name:         "connect mode",
+			gameID:       "rimworld",
+			config:       BridgeConfig{Mode: "connect"},
+			expectHost:   "127.0.0.1",
+			expectMode:   "connect",
+		},
+	}
+	
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create game-specific directory (matching the behavior when configDir is specified)
+			gameDir := filepath.Join(tempDir, tt.gameID)
+			if err := os.MkdirAll(gameDir, 0755); err != nil {
+				t.Fatalf("Failed to create game dir: %v", err)
+			}
+			
+			// Write bridge.json with game-specific directory
+			port, token, cfgPath, err := WriteBridgeJSONWithConfig(tt.gameID, gameDir, tt.config)
+			if err != nil {
+				t.Fatalf("WriteBridgeJSONWithConfig failed: %v", err)
+			}
+			
+			// Verify return values
+			if port < 49152 || port > 65535 {
+				t.Errorf("Port %d out of expected range [49152, 65535]", port)
+			}
+			if len(token) != 64 {
+				t.Errorf("Token length %d, expected 64", len(token))
+			}
+			expectedPath := filepath.Join(gameDir, "bridge.json")
+			if cfgPath != expectedPath {
+				t.Errorf("Config path %s, expected %s", cfgPath, expectedPath)
+			}
+			
+			// Read and verify file contents
+			data, err := os.ReadFile(cfgPath)
+			if err != nil {
+				t.Fatalf("Failed to read bridge.json: %v", err)
+			}
+			
+			var bridge BridgeJSON
+			if err := json.Unmarshal(data, &bridge); err != nil {
+				t.Fatalf("Failed to parse bridge.json: %v", err)
+			}
+			
+			// Verify configuration was applied correctly
+			if bridge.Host != tt.expectHost {
+				t.Errorf("Host %s, expected %s", bridge.Host, tt.expectHost)
+			}
+			if bridge.Mode != tt.expectMode {
+				t.Errorf("Mode %s, expected %s", bridge.Mode, tt.expectMode)
+			}
+			if bridge.Port != port {
+				t.Errorf("Port mismatch: bridge.json has %d, expected %d", bridge.Port, port)
+			}
+			if bridge.Token != token {
+				t.Errorf("Token mismatch")
+			}
+			if bridge.GameId != tt.gameID {
+				t.Errorf("GameId %s, expected %s", bridge.GameId, tt.gameID)
+			}
+		})
+	}
+}
+
+func TestReadBridgeJSON(t *testing.T) {
+	tempDir := t.TempDir()
+	gameDir := filepath.Join(tempDir, "testread")
+	
+	// First create a bridge.json file
+	config := BridgeConfig{Host: "10.0.0.1", Mode: "remote"}
+	port, token, _, err := WriteBridgeJSONWithConfig("testread", gameDir, config)
+	if err != nil {
+		t.Fatalf("Setup failed: %v", err)
+	}
+	
+	// Now read it back
+	readHost, readPort, readToken, err := ReadBridgeJSON("testread", gameDir)
+	if err != nil {
+		t.Fatalf("ReadBridgeJSON failed: %v", err)
+	}
+	
+	// Verify values match
+	if readHost != "10.0.0.1" {
+		t.Errorf("Read host %s, expected 10.0.0.1", readHost)
+	}
+	if readPort != port {
+		t.Errorf("Read port %d, expected %d", readPort, port)
+	}
+	if readToken != token {
+		t.Errorf("Read token mismatch")
+	}
+	
+	// Test reading non-existent file
+	nonExistentDir := filepath.Join(tempDir, "nonexistent")
+	_, _, _, err = ReadBridgeJSON("nonexistent", nonExistentDir)
+	if err == nil {
+		t.Error("Expected error reading non-existent bridge.json")
+	}
+}
+
+func TestBackwardCompatibility(t *testing.T) {
+	tempDir := t.TempDir()
+	
+	// Create old-style bridge.json without host/mode fields
+	oldBridge := BridgeJSON{
+		Port:   12345,
+		Token:  "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+		GameId: "oldgame",
+		Agent:  "gabs-v0.1.0",
+		// No Host or Mode fields
+	}
+	
+	gameDir := filepath.Join(tempDir, "oldgame")
+	if err := os.MkdirAll(gameDir, 0755); err != nil {
+		t.Fatalf("Failed to create dir: %v", err)
+	}
+	
+	data, _ := json.MarshalIndent(oldBridge, "", "  ")
+	cfgPath := filepath.Join(gameDir, "bridge.json")
+	if err := os.WriteFile(cfgPath, data, 0644); err != nil {
+		t.Fatalf("Failed to write old bridge.json: %v", err)
+	}
+	
+	// Read it back and verify defaults are applied
+	host, port, token, err := ReadBridgeJSON("oldgame", gameDir)
+	if err != nil {
+		t.Fatalf("ReadBridgeJSON failed: %v", err)
+	}
+	
+	if host != "127.0.0.1" {
+		t.Errorf("Expected default host 127.0.0.1, got %s", host)
+	}
+	if port != 12345 {
+		t.Errorf("Expected port 12345, got %d", port)
+	}
+	if token != oldBridge.Token {
+		t.Errorf("Token mismatch")
+	}
+}

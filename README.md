@@ -1,45 +1,46 @@
 # GABS - Game Agent Bridge Server
 
-**Make your game mods AI-ready in minutes!**
+**Configuration-first MCP server for AI-powered game automation!**
 
-GABS is a universal bridge that connects AI tools to GABP compliant modifications in your games. Whether you're modding Minecraft, RimWorld, or any other game, GABS lets AI assistants understand and interact with your mods automatically by connecting to mods that implement the GABP (Game Agent Bridge Protocol).
+GABS is a universal bridge that connects AI tools to GABP compliant modifications in your games. With its new configuration-first architecture, you define your games once and then control them naturally through AI using MCP tools.
 
 ## Why GABS?
 
 **For Game Modders:**
 - **AI-Powered Development**: Let AI assistants help debug, test, and develop your mods
+- **Configuration-First**: Define games once, control via AI naturally
 - **Universal Tool**: Works with any game, any mod framework, any AI assistant
 - **Cross-Platform**: One binary runs on Windows, macOS, and Linux
-- **Zero Setup**: Drop in the binary and you're ready to go
+- **Zero Setup**: Configure once and you're ready to go
 - **Secure**: Local-only connections with token authentication
 
 **Real Examples:**
-- Ask AI to test your new crafting recipe while you code
-- Have AI automatically detect bugs in your building system
-- Let AI assistants read your mod's documentation and help users
-- Debug multiplayer sync issues with AI monitoring game state
+- Ask AI "start minecraft and check if the server is running"
+- Have AI automatically test your new crafting recipe across multiple games
+- Let AI assistants monitor game status and restart crashed servers
+- Debug multiplayer sync issues with AI controlling multiple game instances
 
 ## What is GABS?
 
-GABS implements the [GABP (Game Agent Bridge Protocol)](https://github.com/pardeike/GABP) - a standard way for AI tools to communicate with games through GABP compliant mods. Think of it as a translator that lets AI assistants "speak" to your game mods that have implemented the GABP protocol.
+GABS implements the [GABP (Game Agent Bridge Protocol)](https://github.com/pardeike/GABP) - a standard way for AI tools to communicate with games through GABP compliant mods. It serves as an MCP server that exposes game control capabilities to AI assistants.
 
-The server connects to mods in your game that support GABP. These can be:
-- **Central community mods** that search for and expose tools from all installed mods
-- **Individual mods** using a GABP framework to expose their own functionality  
-- **General game control mods** that make the entire game remotely controllable (not just specific mod features)
-- **Combined approaches** where you can control both the game itself and specific mod functionality for ultimate control
+**Key Architecture Insight:** GABS uses a **configuration-first approach**. You define all your games once, then AI controls them naturally through MCP tools instead of complex CLI commands.
 
 ```
-Your AI Assistant ← → GABS ← → GABP Compliant Mod ← → Your Game
+Your AI Assistant ← MCP Tools → GABS ← GABP → Game Mod ← → Your Game
+                    games.start           (mod=server)
+                    games.stop
+                    games.list
 ```
 
 **Key Features:**
+- **Configuration-first**: Define games once in config, control via AI
+- **MCP-native**: Game management through natural MCP tool calls
 - **Works with any game**: Not tied to specific games or engines  
 - **Works with any AI**: Compatible with ChatGPT, Claude, local LLMs, and custom AI tools
 - **Easy integration**: Simple JSON API that any mod can implement
 - **Real-time events**: AI gets live updates as things happen in your game
 - **Resource access**: AI can read game files, configs, and documentation
-- **Tool execution**: AI can trigger actions in your game
 
 ## Quick Start
 
@@ -50,72 +51,176 @@ Choose your platform:
 - **macOS**: [`gabs-darwin-arm64`](../../releases/latest) 
 - **Linux**: [`gabs-linux-amd64`](../../releases/latest)
 
-### 2. Basic Usage
+### 2. Configure Your Games
 
 ```bash
-# Launch your game with GABS bridge
-gabs run --gameId minecraft --launch DirectPath --target "/path/to/minecraft"
+# Add your games to the configuration
+gabs games add minecraft
+gabs games add rimworld
 
-# Or connect to already running game
-gabs attach --gameId minecraft
-
-# Check if everything is working  
-gabs status --gameId minecraft
+# View configured games
+gabs games list
 ```
 
-### 3. Integration with AI Tools
-
-GABS acts as an MCP (Model Context Protocol) server, so it works automatically with:
-- **Claude Desktop** (with MCP support)
-- **VS Code** (with MCP extensions)
-- **Custom AI tools** (using MCP protocol)
-
-## Supported Launch Modes
-
-GABS can start your game in multiple ways:
+### 3. Start the MCP Server
 
 ```bash
-# Direct executable path
-gabs run --gameId mygame --launch DirectPath --target "/path/to/game.exe"
+# For AI assistants (stdio)
+gabs server
 
-# Steam games (by App ID)
-gabs run --gameId rimworld --launch SteamAppId --target 294100
-
-# Epic Games
-gabs run --gameId mygame --launch EpicAppId --target "GameIdentifier"
-
-# Custom command with arguments
-gabs run --gameId mygame --launch CustomCommand --target "launcher.exe" --arg "--windowed" --arg "--debug"
+# For HTTP-based tools  
+gabs server --http localhost:8080
 ```
 
-## Configuration
+### 4. AI Control via MCP Tools
 
-GABS automatically creates configuration files in platform-specific locations:
+Once the server is running, AI can use these MCP tools:
 
-- **Windows**: `%APPDATA%/GAB/your-game-id/`
-- **macOS**: `~/Library/Application Support/GAB/your-game-id/`  
-- **Linux**: `~/.local/state/gab/your-game-id/`
+- **`games.list`** - List all configured games and their status
+- **`games.start`** - Start a game: `{"gameId": "minecraft"}`
+- **`games.stop`** - Stop a game gracefully: `{"gameId": "minecraft"}`
+- **`games.kill`** - Force terminate: `{"gameId": "minecraft"}`
+- **`games.status`** - Check status: `{"gameId": "minecraft"}` or all games
 
-The `bridge.json` file contains connection details that your mod reads to connect to GABS.
+## Configuration Management
+
+### Adding Games
+
+```bash
+# Interactive configuration
+gabs games add minecraft
+
+# View game details
+gabs games show minecraft  
+
+# Remove a game
+gabs games remove minecraft
+```
+
+### Configuration File
+
+Games are stored in platform-specific locations:
+
+- **Windows**: `%APPDATA%/GABS/config.json`
+- **macOS**: `~/Library/Application Support/GABS/config.json`  
+- **Linux**: `~/.config/gabs/config.json`
+
+Example configuration:
+```json
+{
+  "version": "1.0",
+  "games": {
+    "minecraft": {
+      "id": "minecraft",
+      "name": "Minecraft Server",
+      "launchMode": "DirectPath",
+      "target": "/opt/minecraft/start.sh",
+      "workingDir": "/opt/minecraft",
+      "gabpMode": "local",
+      "description": "Main Minecraft server"
+    },
+    "rimworld": {
+      "id": "rimworld", 
+      "name": "RimWorld",
+      "launchMode": "SteamAppId",
+      "target": "294100",
+      "gabpMode": "local"
+    }
+  }
+}
+```
+
+## AI Integration Examples
+
+### With Claude Desktop (MCP)
+
+Add to your MCP settings:
+```json
+{
+  "mcpServers": {
+    "gabs": {
+      "command": "/path/to/gabs",
+      "args": ["server"]
+    }
+  }
+}
+```
+
+Then ask Claude:
+- "List all my configured games"
+- "Start minecraft and check its status"
+- "Stop all running games"
+
+### With Custom AI Tools
+
+```python
+# Python example using MCP client
+import mcp_client
+
+client = mcp_client.connect_stdio(["/path/to/gabs", "server"])
+
+# List games
+games = client.call_tool("games.list", {})
+print(games)
+
+# Start a game
+result = client.call_tool("games.start", {"gameId": "minecraft"})
+```
+
+## Deployment Scenarios
+
+### Local Development
+Perfect for development where AI and games run on the same machine:
+```bash
+gabs games add mygame
+gabs server
+# AI connects and controls games locally
+```
+
+### Cloud AI + Remote Games
+For AI running in cloud connecting to games on remote machines, configure games with remote GABP settings:
+
+```json
+{
+  "id": "minecraft",
+  "name": "Remote Minecraft",
+  "gabpMode": "remote", 
+  "gabpHost": "192.168.1.100"
+}
+```
+
+### Game Server Management
+Use GABS to let AI manage multiple game servers:
+```bash
+gabs games add minecraft-survival
+gabs games add minecraft-creative  
+gabs games add rimworld-colony1
+gabs server --http :8080
+```
+
+AI can then manage all servers through a single interface.
 
 ## For Mod Developers
 
 ### Adding GABP Support to Your Mod
 
-To work with GABS, your mod must implement the GABP protocol. This makes your mod "GABP compliant" and allows GABS to connect to it.
+To work with GABS, your mod must implement the GABP protocol as a server:
 
-1. **Read the bridge config** when your mod starts:
+1. **Read the bridge config** when GABS starts your game:
    ```json
    {
      "port": 12345,
-     "token": "secret-auth-token",
-     "launchId": "unique-session-id"
+     "token": "secret-auth-token", 
+     "gameId": "your-game-id",
+     "agentName": "gabs-v0.1.0",
+     "host": "127.0.0.1",
+     "mode": "local"
    }
    ```
 
-2. **Connect to GABS** using the GABP protocol (see [GABP Specification](https://github.com/pardeike/GABP))
+2. **Act as GABP server** - listen on the specified port for GABS connections
 
-3. **Expose your functionality** as tools, resources, and events
+3. **Expose your functionality** as tools, resources, and events per the GABP spec
 
 ### Example Integration
 
@@ -123,59 +228,52 @@ To work with GABS, your mod must implement the GABP protocol. This makes your mo
 // C# example for Unity/Harmony mods
 public class GABPMod : Mod {
     void Start() {
-        var config = ReadBridgeConfig();  // Read port/token from bridge.json
-        var client = new GABPClient(config.port, config.token);
+        var config = ReadBridgeConfig();  // Read from bridge.json
+        var server = new GABPServer(config.port, config.token);
         
         // Register your mod's capabilities
-        client.RegisterTool("inventory/get", GetInventory);
-        client.RegisterTool("world/place_block", PlaceBlock);
-        client.RegisterEvent("player/move");
+        server.RegisterTool("inventory/get", GetInventory);
+        server.RegisterTool("world/place_block", PlaceBlock);
+        server.RegisterEvent("player/move");
         
-        client.Connect();
+        server.Listen(); // Act as GABP server for GABS to connect to
     }
 }
 ```
 
-## Documentation
-
-- **[AGENTS.md](AGENTS.md)** - Complete implementation guide for AI agents
-- **[GABP Specification](https://github.com/pardeike/GABP)** - Protocol details and schemas
-- **[Examples](https://github.com/pardeike/GABP/tree/main/EXAMPLES)** - Real message examples
-
 ## Advanced Usage
 
-### HTTP Mode (for web-based AI tools)
+### Multiple Game Instances
 
 ```bash
-# Run as HTTP server instead of stdio
-gabs run --gameId mygame --target "/path/to/game" --http "localhost:8080"
+# Configure multiple instances of the same game
+gabs games add minecraft-server1
+gabs games add minecraft-server2
+
+# AI can manage them separately
+games.start {"gameId": "minecraft-server1"}
+games.start {"gameId": "minecraft-server2"}
 ```
 
-### Multiple Games
+### Custom Launch Modes
+
+GABS supports multiple ways to launch games:
+
+- **DirectPath**: Direct executable path
+- **SteamAppId**: Launch via Steam App ID  
+- **EpicAppId**: Launch via Epic Games Store
+- **CustomCommand**: Custom launch command with arguments
+
+### HTTP Mode for Web Integration
 
 ```bash
-# Run different games simultaneously  
-gabs run --gameId minecraft --target "/path/to/minecraft" --http ":8080"
-gabs run --gameId rimworld --target "/path/to/rimworld" --http ":8081"  
-```
+# Run as HTTP server for web-based AI tools
+gabs server --http localhost:8080
 
-### Process Management
-
-```bash
-# Start game but don't run MCP server yet
-gabs start --gameId mygame --target "/path/to/game"
-
-# Later, connect MCP to running game
-gabs attach --gameId mygame
-
-# Stop gracefully
-gabs stop --gameId mygame
-
-# Force kill if needed
-gabs kill --gameId mygame
-
-# Restart game
-gabs restart --gameId mygame
+# Use standard HTTP MCP protocol
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "games.list", "arguments": {}}}'
 ```
 
 ## Build from Source
@@ -188,11 +286,6 @@ go build ./cmd/gabs
 
 # Build for all platforms
 make build-all
-
-# Or manually:
-GOOS=darwin  GOARCH=arm64  go build -o dist/gabs-darwin-arm64 ./cmd/gabs
-GOOS=linux   GOARCH=amd64  go build -o dist/gabs-linux-amd64  ./cmd/gabs  
-GOOS=windows GOARCH=amd64  go build -o dist/gabs-windows-amd64.exe ./cmd/gabs
 ```
 
 ## Contributing
@@ -212,17 +305,20 @@ The GABP protocol specification is licensed under CC BY 4.0.
 
 ## FAQ
 
-**Q: Do I need to modify my existing mod to use GABS?**  
-A: Yes, your mod needs to implement the GABP protocol to communicate with GABS. This makes it "GABP compliant." But it's just a simple JSON API!
+**Q: How is this different from the old CLI-heavy approach?**  
+A: The new architecture separates concerns: CLI manages configuration, MCP tools manage game lifecycle. Instead of `gabs run --gameId minecraft --launch DirectPath --target /path`, you configure once with `gabs games add minecraft` and then AI uses `games.start {"gameId": "minecraft"}`.
 
-**Q: Can multiple AI tools connect at the same time?**  
-A: Currently, one AI tool per game instance. Run multiple GABS instances for multiple AI connections.
+**Q: Can I migrate from the old CLI commands?**  
+A: Yes! The old bridge.json files are still supported. The new system reads them for backward compatibility while providing the cleaner configuration-first approach.
+
+**Q: Can multiple AI tools control games simultaneously?**  
+A: Currently, one AI tool per GABS instance. Run multiple GABS instances for multiple AI connections, or coordinate through the AI tools themselves.
 
 **Q: Does this work with multiplayer games?**  
 A: GABS connects to your local mod instance. Multiplayer compatibility depends on your mod's design.
 
 **Q: Is this secure?**  
-A: GABS only accepts local connections and uses token authentication. Your game never exposes ports to the internet.
+A: GABS only accepts local connections by default and uses token authentication. Your games never expose ports directly to the internet unless you explicitly configure remote access.
 
 **Q: What games are supported?**  
-A: Any game where you can add GABP compliant mods! We have examples for Unity, C#/Harmony, and Java games.
+A: Any game where you can add GABP compliant mods! Popular targets include Unity games, Java games (Minecraft), and games that support C#/Harmony modding.

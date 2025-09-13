@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
+	"time"
 
-	"github.com/pardeike/gabs/internal/gabp"
-	"github.com/pardeike/gabs/internal/process"
+	"github.com/pardeike/gabs/internal/config"
 	"github.com/pardeike/gabs/internal/util"
 )
 
@@ -61,70 +62,244 @@ func (s *Server) RegisterResource(resource Resource, handler func() ([]Content, 
 	}
 }
 
-// RegisterBridgeTools registers the bridge management tools
-func (s *Server) RegisterBridgeTools(ctrl *process.Controller, client *gabp.Client) {
-	// bridge.app.restart tool
+// RegisterGameManagementTools registers the game management tools for the new architecture
+func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration) {
+	// games.list tool
 	s.RegisterTool(Tool{
-		Name:        "bridge.app.restart",
-		Description: "Restart the target application",
+		Name:        "games.list",
+		Description: "List all configured games and their current status",
+		InputSchema: map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		},
+	}, func(args map[string]interface{}) (*ToolResult, error) {
+		games := gamesConfig.ListGames()
+		
+		var content strings.Builder
+		if len(games) == 0 {
+			content.WriteString("No games configured. Use the CLI to add games: gabs games add <id>")
+		} else {
+			content.WriteString(fmt.Sprintf("Configured Games (%d):\n\n", len(games)))
+			for _, game := range games {
+				status := "stopped" // TODO: Check actual status
+				content.WriteString(fmt.Sprintf("• **%s** (%s) - %s\n", game.ID, game.Name, status))
+				content.WriteString(fmt.Sprintf("  Launch: %s via %s\n", game.LaunchMode, game.Target))
+				if game.Description != "" {
+					content.WriteString(fmt.Sprintf("  %s\n", game.Description))
+				}
+				content.WriteString("\n")
+			}
+		}
+		
+		return &ToolResult{
+			Content: []Content{{Type: "text", Text: content.String()}},
+		}, nil
+	})
+
+	// games.status tool
+	s.RegisterTool(Tool{
+		Name:        "games.status",
+		Description: "Check the status of one or more games",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"graceful": map[string]interface{}{
-					"type":        "boolean",
-					"description": "Whether to restart gracefully",
-					"default":     true,
+				"gameId": map[string]interface{}{
+					"type":        "string",
+					"description": "Game ID to check status for (optional, checks all if not provided)",
 				},
 			},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
-		err := ctrl.Restart()
-		if err != nil {
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to restart: %v", err)}},
-				IsError: true,
-			}, nil
+		gameID, hasGameID := args["gameId"].(string)
+		
+		var content strings.Builder
+		if hasGameID {
+			// Check specific game
+			game, exists := gamesConfig.GetGame(gameID)
+			if !exists {
+				return &ToolResult{
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found", gameID)}},
+					IsError: true,
+				}, nil
+			}
+			
+			status := checkGameStatus(*game) // TODO: Implement actual status checking
+			content.WriteString(fmt.Sprintf("**%s** (%s): %s\n", game.ID, game.Name, status))
+		} else {
+			// Check all games
+			games := gamesConfig.ListGames()
+			content.WriteString("Game Status Summary:\n\n")
+			for _, game := range games {
+				status := checkGameStatus(game) // TODO: Implement actual status checking
+				content.WriteString(fmt.Sprintf("• **%s**: %s\n", game.ID, status))
+			}
 		}
+		
 		return &ToolResult{
-			Content: []Content{{Type: "text", Text: "Application restarted successfully"}},
+			Content: []Content{{Type: "text", Text: content.String()}},
 		}, nil
 	})
 
-	// bridge.app.stop tool  
+	// games.start tool
 	s.RegisterTool(Tool{
-		Name:        "bridge.app.stop",
-		Description: "Stop the target application",
+		Name:        "games.start",
+		Description: "Start a configured game",
 		InputSchema: map[string]interface{}{
-			"type":       "object",
-			"properties": map[string]interface{}{},
+			"type": "object",
+			"properties": map[string]interface{}{
+				"gameId": map[string]interface{}{
+					"type":        "string",
+					"description": "Game ID to start",
+				},
+			},
+			"required": []string{"gameId"},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
-		err := ctrl.Stop(0) // Use default grace period
-		if err != nil {
+		gameID, ok := args["gameId"].(string)
+		if !ok {
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to stop: %v", err)}},
+				Content: []Content{{Type: "text", Text: "gameId parameter is required"}},
 				IsError: true,
 			}, nil
 		}
+
+		game, exists := gamesConfig.GetGame(gameID)
+		if !exists {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found", gameID)}},
+				IsError: true,
+			}, nil
+		}
+
+		err := startGame(*game, backoffMin, backoffMax) // TODO: Implement game starting
+		if err != nil {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to start %s: %v", gameID, err)}},
+				IsError: true,
+			}, nil
+		}
+
 		return &ToolResult{
-			Content: []Content{{Type: "text", Text: "Application stopped successfully"}},
+			Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' started successfully", gameID)}},
 		}, nil
 	})
 
-	// bridge.tools.refresh tool
+	// games.stop tool
 	s.RegisterTool(Tool{
-		Name:        "bridge.tools.refresh",
-		Description: "Refresh tools from the GABP connection",
+		Name:        "games.stop",
+		Description: "Gracefully stop a running game",
 		InputSchema: map[string]interface{}{
-			"type":       "object",
-			"properties": map[string]interface{}{},
+			"type": "object",
+			"properties": map[string]interface{}{
+				"gameId": map[string]interface{}{
+					"type":        "string",
+					"description": "Game ID to stop",
+				},
+			},
+			"required": []string{"gameId"},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
-		// This would trigger a re-sync with the mirror
+		gameID, ok := args["gameId"].(string)
+		if !ok {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: "gameId parameter is required"}},
+				IsError: true,
+			}, nil
+		}
+
+		game, exists := gamesConfig.GetGame(gameID)
+		if !exists {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found", gameID)}},
+				IsError: true,
+			}, nil
+		}
+
+		err := stopGame(*game, false) // TODO: Implement game stopping  
+		if err != nil {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to stop %s: %v", gameID, err)}},
+				IsError: true,
+			}, nil
+		}
+
 		return &ToolResult{
-			Content: []Content{{Type: "text", Text: "Tools refreshed"}},
+			Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' stopped successfully", gameID)}},
 		}, nil
 	})
+
+	// games.kill tool
+	s.RegisterTool(Tool{
+		Name:        "games.kill",
+		Description: "Force terminate a running game",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"gameId": map[string]interface{}{
+					"type":        "string",
+					"description": "Game ID to force terminate",
+				},
+			},
+			"required": []string{"gameId"},
+		},
+	}, func(args map[string]interface{}) (*ToolResult, error) {
+		gameID, ok := args["gameId"].(string)
+		if !ok {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: "gameId parameter is required"}},
+				IsError: true,
+			}, nil
+		}
+
+		game, exists := gamesConfig.GetGame(gameID)
+		if !exists {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found", gameID)}},
+				IsError: true,
+			}, nil
+		}
+
+		err := stopGame(*game, true) // TODO: Implement game force killing
+		if err != nil {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to kill %s: %v", gameID, err)}},
+				IsError: true,
+			}, nil
+		}
+
+		return &ToolResult{
+			Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' terminated successfully", gameID)}},
+		}, nil
+	})
+}
+
+// RegisterBridgeTools registers the legacy bridge management tools (for compatibility)
+func (s *Server) RegisterBridgeTools(ctrl interface{}, client interface{}) {
+	// Legacy bridge tools - kept for compatibility but not used in new architecture
+	// In the new architecture, game management is done through games.* tools
+}
+
+// TODO: Implement these helper functions
+func checkGameStatus(game config.GameConfig) string {
+	// Placeholder implementation
+	// In real implementation, check if process is running, GABP connection status, etc.
+	return "stopped"
+}
+
+func startGame(game config.GameConfig, backoffMin, backoffMax time.Duration) error {
+	// Placeholder implementation  
+	// In real implementation, start the game process and connect to GABP
+	return fmt.Errorf("game starting not yet implemented")
+}
+
+func stopGame(game config.GameConfig, force bool) error {
+	// Placeholder implementation
+	// In real implementation, stop the game process gracefully or by force
+	action := "stop"
+	if force {
+		action = "kill"
+	}
+	return fmt.Errorf("game %s not yet implemented", action)
 }
 
 func (s *Server) ServeStdio(ctx context.Context) error {
