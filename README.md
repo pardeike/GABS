@@ -1,17 +1,17 @@
-# 🎮 GABS - Game Agent Bridge Server
+# GABS - Game Agent Bridge Server
 
 **Make your game mods AI-ready in minutes!**
 
-GABS is a universal bridge that connects AI tools to your game modifications. Whether you're modding Minecraft, RimWorld, or any other game, GABS lets AI assistants understand and interact with your mods automatically.
+GABS is a universal bridge that connects AI tools to GABP compliant modifications in your games. Whether you're modding Minecraft, RimWorld, or any other game, GABS lets AI assistants understand and interact with your mods automatically by connecting to mods that implement the GABP (Game Agent Bridge Protocol).
 
-## 🚀 Why GABS?
+## Why GABS?
 
 **For Game Modders:**
-- 🤖 **AI-Powered Development**: Let AI assistants help debug, test, and develop your mods
-- 🔧 **Universal Tool**: Works with any game, any mod framework, any AI assistant
-- 🌐 **Cross-Platform**: One binary runs on Windows, macOS, and Linux
-- ⚡ **Zero Setup**: Drop in the binary and you're ready to go
-- 🔒 **Secure**: Local-only connections with token authentication
+- **AI-Powered Development**: Let AI assistants help debug, test, and develop your mods
+- **Universal Tool**: Works with any game, any mod framework, any AI assistant
+- **Cross-Platform**: One binary runs on Windows, macOS, and Linux
+- **Zero Setup**: Drop in the binary and you're ready to go
+- **Secure**: Local-only connections with token authentication
 
 **Real Examples:**
 - Ask AI to test your new crafting recipe while you code
@@ -19,23 +19,29 @@ GABS is a universal bridge that connects AI tools to your game modifications. Wh
 - Let AI assistants read your mod's documentation and help users
 - Debug multiplayer sync issues with AI monitoring game state
 
-## 🛠️ What is GABS?
+## What is GABS?
 
-GABS implements the [GABP (Game Agent Bridge Protocol)](https://github.com/pardeike/GABP) - a standard way for AI tools to communicate with games. Think of it as a translator that lets AI assistants "speak" to your game mods.
+GABS implements the [GABP (Game Agent Bridge Protocol)](https://github.com/pardeike/GABP) - a standard way for AI tools to communicate with games through GABP compliant mods. Think of it as a translator that lets AI assistants "speak" to your game mods that have implemented the GABP protocol.
+
+The server connects to mods in your game that support GABP. These can be:
+- **Central community mods** that search for and expose tools from all installed mods
+- **Individual mods** using a GABP framework to expose their own functionality  
+- **General game control mods** that make the entire game remotely controllable (not just specific mod features)
+- **Combined approaches** where you can control both the game itself and specific mod functionality for ultimate control
 
 ```
-Your AI Assistant ← → GABS ← → Your Game Mod ← → Your Game
+Your AI Assistant ← → GABS ← → GABP Compliant Mod ← → Your Game
 ```
 
 **Key Features:**
-- 🎯 **Works with any game**: Not tied to specific games or engines  
-- 🧠 **Works with any AI**: Compatible with ChatGPT, Claude, local LLMs, and custom AI tools
-- 🔌 **Easy integration**: Simple JSON API that any mod can implement
-- 📡 **Real-time events**: AI gets live updates as things happen in your game
-- 📚 **Resource access**: AI can read game files, configs, and documentation
-- 🛠️ **Tool execution**: AI can trigger actions in your game
+- **Works with any game**: Not tied to specific games or engines  
+- **Works with any AI**: Compatible with ChatGPT, Claude, local LLMs, and custom AI tools
+- **Easy integration**: Simple JSON API that any mod can implement
+- **Real-time events**: AI gets live updates as things happen in your game
+- **Resource access**: AI can read game files, configs, and documentation
+- **Tool execution**: AI can trigger actions in your game
 
-## 📦 Quick Start
+## Quick Start
 
 ### 1. Download GABS
 
@@ -64,7 +70,7 @@ GABS acts as an MCP (Model Context Protocol) server, so it works automatically w
 - **VS Code** (with MCP extensions)
 - **Custom AI tools** (using MCP protocol)
 
-## 🎯 Supported Launch Modes
+## Supported Launch Modes
 
 GABS can start your game in multiple ways:
 
@@ -82,7 +88,7 @@ gabs run --gameId mygame --launch EpicAppId --target "GameIdentifier"
 gabs run --gameId mygame --launch CustomCommand --target "launcher.exe" --arg "--windowed" --arg "--debug"
 ```
 
-## 🔧 Configuration
+## Configuration
 
 GABS automatically creates configuration files in platform-specific locations:
 
@@ -92,9 +98,11 @@ GABS automatically creates configuration files in platform-specific locations:
 
 The `bridge.json` file contains connection details that your mod reads to connect to GABS.
 
-## 🏗️ For Mod Developers
+## For Mod Developers
 
 ### Adding GABP Support to Your Mod
+
+To work with GABS, your mod must implement the GABP protocol. This makes your mod "GABP compliant" and allows GABS to connect to it.
 
 1. **Read the bridge config** when your mod starts:
    ```json
@@ -128,13 +136,13 @@ public class GABPMod : Mod {
 }
 ```
 
-## 📖 Documentation
+## Documentation
 
 - **[AGENTS.md](AGENTS.md)** - Complete implementation guide for AI agents
 - **[GABP Specification](https://github.com/pardeike/GABP)** - Protocol details and schemas
 - **[Examples](https://github.com/pardeike/GABP/tree/main/EXAMPLES)** - Real message examples
 
-## 🚀 Advanced Usage
+## Advanced Usage
 
 ### HTTP Mode (for web-based AI tools)
 
@@ -170,7 +178,7 @@ gabs kill --gameId mygame
 gabs restart --gameId mygame
 ```
 
-## 🔧 Build from Source
+## Build from Source
 
 Requirements: Go 1.22+
 
@@ -187,25 +195,25 @@ GOOS=linux   GOARCH=amd64  go build -o dist/gabs-linux-amd64  ./cmd/gabs
 GOOS=windows GOARCH=amd64  go build -o dist/gabs-windows-amd64.exe ./cmd/gabs
 ```
 
-## 🤝 Contributing
+## Contributing
 
 We welcome contributions! Whether you're:
-- 🎮 A game modder wanting to add GABP support to your favorite game
-- 🤖 An AI developer building new automation tools  
-- 📚 Someone improving documentation or examples
+- A game modder wanting to add GABP support to your favorite game
+- An AI developer building new automation tools  
+- Someone improving documentation or examples
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-## 📜 License
+## License
 
 GABS is licensed under the MIT License. See [LICENSE](LICENSE) for details.
 
 The GABP protocol specification is licensed under CC BY 4.0.
 
-## ❓ FAQ
+## FAQ
 
 **Q: Do I need to modify my existing mod to use GABS?**  
-A: Yes, your mod needs to implement the GABP protocol to communicate with GABS. But it's just a simple JSON API!
+A: Yes, your mod needs to implement the GABP protocol to communicate with GABS. This makes it "GABP compliant." But it's just a simple JSON API!
 
 **Q: Can multiple AI tools connect at the same time?**  
 A: Currently, one AI tool per game instance. Run multiple GABS instances for multiple AI connections.
@@ -217,4 +225,4 @@ A: GABS connects to your local mod instance. Multiplayer compatibility depends o
 A: GABS only accepts local connections and uses token authentication. Your game never exposes ports to the internet.
 
 **Q: What games are supported?**  
-A: Any game where you can add mods that implement GABP! We have examples for Unity, C#/Harmony, and Java games.
+A: Any game where you can add GABP compliant mods! We have examples for Unity, C#/Harmony, and Java games.
