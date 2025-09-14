@@ -25,7 +25,6 @@ type BridgeInfo struct {
 	Host  string
 	Port  int
 	Token string
-	Mode  string
 }
 
 type Controller struct {
@@ -58,12 +57,11 @@ func (c *Controller) Configure(spec LaunchSpec) error {
 }
 
 // SetBridgeInfo sets the bridge connection information that will be passed to the game via environment variables
-func (c *Controller) SetBridgeInfo(host string, port int, token, mode string) {
+func (c *Controller) SetBridgeInfo(host string, port int, token string) {
 	c.bridgeInfo = &BridgeInfo{
 		Host:  host,
 		Port:  port,
 		Token: token,
-		Mode:  mode,
 	}
 }
 

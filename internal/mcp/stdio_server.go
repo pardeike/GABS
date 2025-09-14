@@ -624,9 +624,8 @@ func (s *Server) startGame(game config.GameConfig, backoffMin, backoffMax time.D
 
 	// GABS always uses local communication
 	host := "127.0.0.1"
-	mode := "local"
 
-	s.log.Infow("created GABP bridge configuration", "gameId", game.ID, "port", port, "token", token[:8]+"...", "host", host, "mode", mode, "configPath", bridgePath)
+	s.log.Infow("created GABP bridge configuration", "gameId", game.ID, "port", port, "token", token[:8]+"...", "host", host, "configPath", bridgePath)
 
 	// Convert GameConfig to LaunchSpec
 	launchSpec := process.LaunchSpec{
@@ -645,7 +644,7 @@ func (s *Server) startGame(game config.GameConfig, backoffMin, backoffMax time.D
 	}
 
 	// Set bridge connection info for environment variables
-	controller.SetBridgeInfo(host, port, token, mode)
+	controller.SetBridgeInfo(host, port, token)
 
 	// Start the game
 	if err := controller.Start(); err != nil {

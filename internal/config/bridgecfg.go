@@ -17,7 +17,6 @@ type BridgeJSON struct {
 	GameId string `json:"gameId"`
 	Agent  string `json:"agentName"`
 	Host   string `json:"host,omitempty"` // Always 127.0.0.1 for local communication
-	Mode   string `json:"mode,omitempty"` // Always "local" for GABS
 	// PROMPT: Optional extra fields for mod consumption.
 }
 
@@ -60,7 +59,6 @@ func WriteBridgeJSONWithConfig(gameID, configDir string, config BridgeConfig) (i
 
 	// GABS always communicates locally
 	host := "127.0.0.1"
-	mode := "local"
 
 	// Create bridge config
 	bridge := BridgeJSON{
@@ -69,7 +67,6 @@ func WriteBridgeJSONWithConfig(gameID, configDir string, config BridgeConfig) (i
 		GameId: gameID,
 		Agent:  "gabs-v0.1.0",
 		Host:   host,
-		Mode:   mode,
 	}
 
 	// Create unique filename with timestamp to avoid conflicts in concurrent launches

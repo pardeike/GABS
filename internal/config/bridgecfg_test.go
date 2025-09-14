@@ -17,28 +17,24 @@ func TestWriteBridgeJSONWithConfig(t *testing.T) {
 		gameID     string
 		config     BridgeConfig
 		expectHost string
-		expectMode string
 	}{
 		{
 			name:       "default config",
 			gameID:     "testgame",
 			config:     BridgeConfig{},
 			expectHost: "127.0.0.1",
-			expectMode: "local",
 		},
 		{
 			name:       "local config (same as default)",
 			gameID:     "minecraft",
 			config:     BridgeConfig{},
 			expectHost: "127.0.0.1",
-			expectMode: "local",
 		},
 		{
 			name:       "another local config",
 			gameID:     "rimworld",
 			config:     BridgeConfig{},
 			expectHost: "127.0.0.1",
-			expectMode: "local",
 		},
 	}
 
@@ -92,9 +88,6 @@ func TestWriteBridgeJSONWithConfig(t *testing.T) {
 			// Verify configuration was applied correctly
 			if bridge.Host != tt.expectHost {
 				t.Errorf("Host %s, expected %s", bridge.Host, tt.expectHost)
-			}
-			if bridge.Mode != tt.expectMode {
-				t.Errorf("Mode %s, expected %s", bridge.Mode, tt.expectMode)
 			}
 			if bridge.Port != port {
 				t.Errorf("Port mismatch: bridge.json has %d, expected %d", bridge.Port, port)
