@@ -17,11 +17,13 @@ import (
 
 // Server runs MCP over stdio.
 type Server struct {
-	log       util.Logger
-	tools     map[string]*ToolHandler
-	resources map[string]*ResourceHandler
-	games     map[string]*process.Controller // Track running games
-	mu        sync.RWMutex
+	log         util.Logger
+	tools       map[string]*ToolHandler
+	resources   map[string]*ResourceHandler
+	games       map[string]*process.Controller // Track running games
+	mu          sync.RWMutex
+	writers     []util.FrameWriter           // Track client connections for notifications
+	writersMu   sync.RWMutex                // Protect writers slice
 }
 
 // ToolHandler represents a tool handler function
@@ -42,6 +44,7 @@ func NewServer(log util.Logger) *Server {
 		tools:     make(map[string]*ToolHandler),
 		resources: make(map[string]*ResourceHandler),
 		games:     make(map[string]*process.Controller),
+		writers:   make([]util.FrameWriter, 0),
 	}
 }
 
@@ -735,10 +738,52 @@ func (s *Server) ServeStdio(ctx context.Context) error {
 	return s.Serve(os.Stdin, os.Stdout)
 }
 
+// SendNotification sends a notification to all connected clients
+func (s *Server) SendNotification(method string, params interface{}) {
+	notification := NewNotification(method, params)
+	
+	s.writersMu.RLock()
+	defer s.writersMu.RUnlock()
+	
+	for _, writer := range s.writers {
+		if err := writer.WriteJSON(notification); err != nil {
+			s.log.Warnw("failed to send notification", "method", method, "error", err)
+		}
+	}
+}
+
+// SendToolsListChangedNotification notifies clients that the tool list has changed
+func (s *Server) SendToolsListChangedNotification() {
+	s.SendNotification("notifications/tools/list_changed", map[string]interface{}{})
+	s.log.Debugw("sent tools/list_changed notification")
+}
+
+// SendResourcesListChangedNotification notifies clients that the resource list has changed
+func (s *Server) SendResourcesListChangedNotification() {
+	s.SendNotification("notifications/resources/list_changed", map[string]interface{}{})
+	s.log.Debugw("sent resources/list_changed notification")
+}
+
 func (s *Server) Serve(r io.Reader, w io.Writer) error {
 	// Implement newline-delimited JSON-RPC over stdio per MCP stdio transport
 	reader := util.NewNewlineFrameReader(r)
 	writer := util.NewNewlineFrameWriter(w)
+
+	// Track this writer for notifications
+	s.writersMu.Lock()
+	s.writers = append(s.writers, writer)
+	writerIndex := len(s.writers) - 1
+	s.writersMu.Unlock()
+
+	// Clean up writer on exit
+	defer func() {
+		s.writersMu.Lock()
+		// Remove writer from slice
+		if writerIndex < len(s.writers) {
+			s.writers = append(s.writers[:writerIndex], s.writers[writerIndex+1:]...)
+		}
+		s.writersMu.Unlock()
+	}()
 
 	for {
 		var msg Message

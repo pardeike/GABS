@@ -347,6 +347,13 @@ func (c *Client) SubscribeEvents(channels []string, handler EventHandler) error 
 	return err
 }
 
+// GetCapabilities returns the server capabilities from the welcome response
+func (c *Client) GetCapabilities() Capabilities {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.capabilities
+}
+
 // mapToStruct converts a generic interface{} to a specific struct
 func mapToStruct(src interface{}, dst interface{}) error {
 	data, err := json.Marshal(src)
