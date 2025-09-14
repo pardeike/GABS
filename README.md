@@ -67,9 +67,9 @@ GABS will ask simple questions to set up each game:
 - **Game Name**: Friendly display name
 - **Launch Mode**: How to start the game (Direct executable, Steam App ID, Epic, or Custom command)
 - **Target**: Path to executable or Steam/Epic App ID
-- **Stop Process Name**: For Steam/Epic games, the actual game process name for proper stopping
+- **Stop Process Name**: **Required for Steam/Epic games** - the actual game process name for proper stopping
 
-**Important for Steam/Epic users:** GABS needs the actual game process name (like `RimWorldWin64.exe`) to properly stop games, not just the launcher process.
+**Critical for Steam/Epic users:** GABS **requires** the actual game process name (like `RimWorldWin64.exe` for RimWorld, `java` for Minecraft) to properly stop games launched through Steam or Epic. Without this, GABS can start games but cannot stop them reliably.
 
 ### 3. Start the Server
 
