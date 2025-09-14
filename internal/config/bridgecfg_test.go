@@ -13,24 +13,20 @@ func TestWriteBridgeJSON(t *testing.T) {
 	tempDir := t.TempDir()
 
 	tests := []struct {
-		name       string
-		gameID     string
-		expectHost string
+		name   string
+		gameID string
 	}{
 		{
-			name:       "default config",
-			gameID:     "testgame",
-			expectHost: "127.0.0.1",
+			name:   "default config",
+			gameID: "testgame",
 		},
 		{
-			name:       "local config (same as default)",
-			gameID:     "minecraft",
-			expectHost: "127.0.0.1",
+			name:   "local config (same as default)",
+			gameID: "minecraft",
 		},
 		{
-			name:       "another local config",
-			gameID:     "rimworld",
-			expectHost: "127.0.0.1",
+			name:   "another local config",
+			gameID: "rimworld",
 		},
 	}
 
@@ -82,9 +78,6 @@ func TestWriteBridgeJSON(t *testing.T) {
 			}
 
 			// Verify configuration was applied correctly
-			if bridge.Host != tt.expectHost {
-				t.Errorf("Host %s, expected %s", bridge.Host, tt.expectHost)
-			}
 			if bridge.Port != port {
 				t.Errorf("Port mismatch: bridge.json has %d, expected %d", bridge.Port, port)
 			}
@@ -154,13 +147,11 @@ func TestReadBridgeJSON(t *testing.T) {
 func TestBackwardCompatibility(t *testing.T) {
 	tempDir := t.TempDir()
 
-	// Create old-style bridge.json without host/mode fields
+	// Create old-style bridge.json without extra fields
 	oldBridge := BridgeJSON{
 		Port:   12345,
 		Token:  "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
 		GameId: "oldgame",
-		Agent:  "gabs-v0.1.0",
-		// No Host or Mode fields
 	}
 
 	gameDir := filepath.Join(tempDir, "oldgame")
@@ -174,7 +165,7 @@ func TestBackwardCompatibility(t *testing.T) {
 		t.Fatalf("Failed to write old bridge.json: %v", err)
 	}
 
-	// Read it back and verify defaults are applied
+	// Read it back and verify values are correct
 	host, port, token, err := ReadBridgeJSON("oldgame", gameDir)
 	if err != nil {
 		t.Fatalf("ReadBridgeJSON failed: %v", err)

@@ -177,10 +177,7 @@ When you start a game, GABS creates a bridge configuration file that looks like 
 {
   "port": 49234,
   "token": "a1b2c3d4e5f6...",
-  "gameId": "minecraft", 
-  "agentName": "gabs-v0.1.0",
-  "host": "127.0.0.1",
-  "mode": "local"
+  "gameId": "minecraft"
 }
 ```
 
