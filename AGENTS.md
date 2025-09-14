@@ -74,6 +74,38 @@ const tools = await mcpClient.callTool("games.tools", {
 console.log("Game-specific tools:", tools);
 ```
 
+### Enhanced Game Control
+
+GABS now provides improved stopping capabilities through optional process name configuration:
+
+```typescript
+// For games with configured stopProcessName, stopping is more reliable
+const stopResult = await mcpClient.callTool("games.stop", {
+  gameId: "rimworld"  // Will stop actual RimWorld process, not just Steam launcher
+});
+
+// Force kill also works with process names
+const killResult = await mcpClient.callTool("games.kill", {
+  gameId: "minecraft"  // Will kill Java process if stopProcessName is "java"
+});
+
+// Check improved status information
+const status = await mcpClient.callTool("games.status", {
+  gameId: "rimworld"
+});
+// Status will indicate if process name stopping is available
+```
+
+### Process Name Configuration
+
+When setting up games with better stopping control:
+- **Steam/Epic Games**: Configure the actual game executable name (e.g., `"RimWorldWin64.exe"`)
+- **Java Games**: Use `"java"` to stop Java processes
+- **Unity Games**: Often `"GameName.exe"` on Windows
+- **Custom**: Any process name that uniquely identifies your game
+
+This addresses the common limitation where launcher-based games (Steam/Epic) could only have their launcher stopped, not the actual running game.
+
 ### 2. Starting GABS
 
 Your AI tool connects to GABS which provides game integration:
@@ -97,7 +129,9 @@ GABS exposes game functionality as MCP tools. Common patterns:
 
 #### Core Game Management Tools
 - `games.list` - Discover configured games and their status
-- `games.start` - Start a game using game ID or launch target  
+- `games.start` - Start a game using game ID or launch target
+- `games.stop` - Gracefully stop a game (supports process name-based stopping for better control)
+- `games.kill` - Force terminate a game (supports process name-based stopping for better control)  
 - `games.stop` - Gracefully stop a running game
 - `games.kill` - Force terminate a game
 - `games.status` - Check detailed status of games

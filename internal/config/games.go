@@ -9,15 +9,16 @@ import (
 
 // GameConfig represents a single game configuration
 type GameConfig struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	LaunchMode  string   `json:"launchMode"`  // DirectPath|SteamAppId|EpicAppId|CustomCommand
-	Target      string   `json:"target"`      // path or id
-	Args        []string `json:"args,omitempty"`
-	WorkingDir  string   `json:"workingDir,omitempty"`
-	GabpHost    string   `json:"gabpHost,omitempty"`    // Host for GABP server connection
-	GabpMode    string   `json:"gabpMode,omitempty"`    // Connection mode: local|remote|connect
-	Description string   `json:"description,omitempty"`
+	ID              string   `json:"id"`
+	Name            string   `json:"name"`
+	LaunchMode      string   `json:"launchMode"`       // DirectPath|SteamAppId|EpicAppId|CustomCommand
+	Target          string   `json:"target"`           // path or id
+	Args            []string `json:"args,omitempty"`
+	WorkingDir      string   `json:"workingDir,omitempty"`
+	StopProcessName string   `json:"stopProcessName,omitempty"` // Optional process name for stopping the game
+	GabpHost        string   `json:"gabpHost,omitempty"`        // Host for GABP server connection
+	GabpMode        string   `json:"gabpMode,omitempty"`        // Connection mode: local|remote|connect
+	Description     string   `json:"description,omitempty"`
 }
 
 // GamesConfig represents the main GABS configuration

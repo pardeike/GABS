@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -206,6 +207,125 @@ func TestNewGabsDirectoryStructure(t *testing.T) {
 		expectedPath := filepath.Join(homeDir, ".gabs", gameID)
 		if configDir != expectedPath {
 			t.Errorf("Expected config directory '%s', got '%s'", expectedPath, configDir)
+		}
+	})
+}
+
+func TestStopProcessNameConfiguration(t *testing.T) {
+	// Create a temporary directory for testing
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+
+	t.Run("GameConfigWithStopProcessName", func(t *testing.T) {
+		// Create a game config with stop process name
+		config := &GamesConfig{
+			Version: "1.0",
+			Games: map[string]GameConfig{
+				"testgame": {
+					ID:              "testgame",
+					Name:            "Test Game",
+					LaunchMode:      "SteamAppId",
+					Target:          "123456",
+					StopProcessName: "testgame.exe",
+					Description:     "Test game with stop process name",
+				},
+			},
+		}
+
+		// Save the config
+		err := SaveGamesConfigToPath(config, configPath)
+		if err != nil {
+			t.Fatalf("Failed to save config: %v", err)
+		}
+
+		// Load and verify
+		loadedConfig, err := LoadGamesConfigFromPath(configPath)
+		if err != nil {
+			t.Fatalf("Failed to load config: %v", err)
+		}
+
+		game, exists := loadedConfig.GetGame("testgame")
+		if !exists {
+			t.Fatal("Game not found after loading")
+		}
+
+		if game.StopProcessName != "testgame.exe" {
+			t.Errorf("Expected StopProcessName 'testgame.exe', got '%s'", game.StopProcessName)
+		}
+	})
+
+	t.Run("GameConfigWithoutStopProcessName", func(t *testing.T) {
+		// Create a game config without stop process name
+		config := &GamesConfig{
+			Version: "1.0",
+			Games: map[string]GameConfig{
+				"simplegame": {
+					ID:         "simplegame",
+					Name:       "Simple Game",
+					LaunchMode: "DirectPath",
+					Target:     "/path/to/game",
+				},
+			},
+		}
+
+		// Save the config
+		configPath2 := filepath.Join(tempDir, "config2.json")
+		err := SaveGamesConfigToPath(config, configPath2)
+		if err != nil {
+			t.Fatalf("Failed to save config: %v", err)
+		}
+
+		// Load and verify
+		loadedConfig, err := LoadGamesConfigFromPath(configPath2)
+		if err != nil {
+			t.Fatalf("Failed to load config: %v", err)
+		}
+
+		game, exists := loadedConfig.GetGame("simplegame")
+		if !exists {
+			t.Fatal("Game not found after loading")
+		}
+
+		if game.StopProcessName != "" {
+			t.Errorf("Expected empty StopProcessName, got '%s'", game.StopProcessName)
+		}
+	})
+
+	t.Run("JSONSerializationWithStopProcessName", func(t *testing.T) {
+		game := GameConfig{
+			ID:              "testgame",
+			Name:            "Test Game",
+			LaunchMode:      "SteamAppId", 
+			Target:          "123456",
+			StopProcessName: "TestGame.exe",
+			GabpMode:        "local",
+			Description:     "A test game",
+		}
+
+		// Marshal to JSON
+		jsonData, err := json.MarshalIndent(game, "", "  ")
+		if err != nil {
+			t.Fatalf("Failed to marshal game config: %v", err)
+		}
+
+		// Verify JSON contains stopProcessName
+		jsonStr := string(jsonData)
+		if !strings.Contains(jsonStr, "stopProcessName") {
+			t.Error("JSON should contain stopProcessName field")
+		}
+		if !strings.Contains(jsonStr, "TestGame.exe") {
+			t.Error("JSON should contain the stopProcessName value")
+		}
+
+		// Unmarshal and verify
+		var unmarshaled GameConfig
+		err = json.Unmarshal(jsonData, &unmarshaled)
+		if err != nil {
+			t.Fatalf("Failed to unmarshal game config: %v", err)
+		}
+
+		if unmarshaled.StopProcessName != "TestGame.exe" {
+			t.Errorf("Expected StopProcessName 'TestGame.exe', got '%s'", unmarshaled.StopProcessName)
 		}
 	})
 }

@@ -512,11 +512,12 @@ func (s *Server) startGame(game config.GameConfig, backoffMin, backoffMax time.D
 
 	// Convert GameConfig to LaunchSpec
 	launchSpec := process.LaunchSpec{
-		GameId:     game.ID,
-		Mode:       game.LaunchMode,
-		PathOrId:   game.Target,
-		Args:       game.Args,
-		WorkingDir: game.WorkingDir,
+		GameId:          game.ID,
+		Mode:            game.LaunchMode,
+		PathOrId:        game.Target,
+		Args:            game.Args,
+		WorkingDir:      game.WorkingDir,
+		StopProcessName: game.StopProcessName,
 	}
 
 	// Create and configure controller
