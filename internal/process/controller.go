@@ -196,7 +196,7 @@ func (c *Controller) IsRunning() bool {
 			// If we found processes with this name, the game is running
 			return len(pids) > 0
 		}
-		
+
 		// Without StopProcessName, we can't track launcher-based games
 		// The launcher process itself exits quickly, but the game continues independently
 		return false
@@ -243,12 +243,12 @@ func (c *Controller) IsLauncherProcessRunning() bool {
 	if c.cmd == nil || c.cmd.Process == nil {
 		return false
 	}
-	
+
 	// Check if the process has already been waited for
 	if c.cmd.ProcessState != nil {
 		return false
 	}
-	
+
 	// Try to signal the launcher process
 	err := c.cmd.Process.Signal(syscall.Signal(0))
 	return err == nil
@@ -265,8 +265,8 @@ func (c *Controller) Restart() error {
 // Platform-specific helpers
 
 func (c *Controller) getSteamLauncher() string {
-	// TODO: Add direct Steam executable detection for better reliability
-	// Could check common Steam installation paths and use steam.exe directly
+	// Note: We *could* add direct Steam executable detection for better reliability,
+	// maybe check common Steam installation paths and use steam.exe directly
 	// instead of relying on system URL handlers, which provides better error handling
 	switch runtime.GOOS {
 	case "windows":
