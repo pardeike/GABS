@@ -141,9 +141,6 @@ func TestInvalidToolNames(t *testing.T) {
 
 // Helper function to test the sanitization logic
 func sanitizeToolName(toolName string) string {
-	// This matches the logic in mirror.go
-	// Convert slashes to dots to follow reverse domain notation
-	result := toolName
-	result = regexp.MustCompile(`/`).ReplaceAllString(result, ".")
-	return result
+	// This matches the logic in mirror.go using the util function
+	return util.NormalizeToolNameBasic(toolName)
 }

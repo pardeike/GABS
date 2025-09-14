@@ -2,8 +2,8 @@ package mirror
 
 import (
 	"fmt"
-	"strings"
 
+	"github.com/pardeike/gabs/internal/config"
 	"github.com/pardeike/gabs/internal/gabp"
 	"github.com/pardeike/gabs/internal/mcp"
 	"github.com/pardeike/gabs/internal/util"
@@ -11,18 +11,20 @@ import (
 
 // Mirror maps GABP tools/resources/events to MCP.
 type Mirror struct {
-	log    util.Logger
-	server *mcp.Server
-	client *gabp.Client
-	gameId string // Game ID for namespacing tools
+	log                 util.Logger
+	server              *mcp.Server
+	client              *gabp.Client
+	gameId              string // Game ID for namespacing tools
+	normalizationConfig *config.ToolNormalizationConfig
 }
 
-func New(log util.Logger, server *mcp.Server, client *gabp.Client, gameId string) *Mirror {
+func New(log util.Logger, server *mcp.Server, client *gabp.Client, gameId string, normalizationConfig *config.ToolNormalizationConfig) *Mirror {
 	return &Mirror{
-		log:    log,
-		server: server,
-		client: client,
-		gameId: gameId,
+		log:                 log,
+		server:              server,
+		client:              client,
+		gameId:              gameId,
+		normalizationConfig: normalizationConfig,
 	}
 }
 
@@ -36,8 +38,8 @@ func (m *Mirror) SyncTools() error {
 	// Register each GABP tool as an MCP tool with game-specific naming
 	for _, tool := range gabpTools {
 		// Create game-prefixed tool name for multi-game clarity
-		// Convert slashes to dots for reverse domain notation, keep dots as-is
-		sanitizedToolName := strings.ReplaceAll(tool.Name, "/", ".")
+		// Apply basic normalization first (convert slashes to dots)
+		sanitizedToolName := util.NormalizeToolNameBasic(tool.Name)
 		gameSpecificName := fmt.Sprintf("%s.%s", m.gameId, sanitizedToolName)
 
 		mcpTool := mcp.Tool{
@@ -83,7 +85,8 @@ func (m *Mirror) SyncTools() error {
 			}
 		}(originalToolName)
 
-		m.server.RegisterTool(mcpTool, handler)
+		// Register the tool with normalization config
+		m.server.RegisterToolWithConfig(mcpTool, handler, m.normalizationConfig)
 		m.log.Debugw("registered GABP tool as game-specific MCP tool", "gameId", m.gameId, "originalName", tool.Name, "mcpName", gameSpecificName)
 	}
 

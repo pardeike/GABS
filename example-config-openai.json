@@ -1,0 +1,25 @@
+{
+  "version": "1.0",
+  "toolNormalization": {
+    "enableOpenAINormalization": true,
+    "maxToolNameLength": 64,
+    "preserveOriginalName": true
+  },
+  "games": {
+    "minecraft": {
+      "id": "minecraft",
+      "name": "Minecraft",
+      "launchMode": "DirectPath",
+      "target": "/path/to/minecraft",
+      "description": "Minecraft game with GABP mod"
+    },
+    "rimworld": {
+      "id": "rimworld",
+      "name": "RimWorld",
+      "launchMode": "SteamAppId",
+      "target": "294100",
+      "stopProcessName": "RimWorldWin64.exe",
+      "description": "RimWorld game via Steam"
+    }
+  }
+}

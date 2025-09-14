@@ -45,12 +45,44 @@ func NewServer(log util.Logger) *Server {
 	}
 }
 
-// RegisterTool registers a tool with its handler
+// RegisterTool registers a tool with its handler, applying normalization if configured
 func (s *Server) RegisterTool(tool Tool, handler func(args map[string]interface{}) (*ToolResult, error)) {
+	s.RegisterToolWithConfig(tool, handler, nil)
+}
+
+// RegisterToolWithConfig registers a tool with its handler, applying normalization based on config
+func (s *Server) RegisterToolWithConfig(tool Tool, handler func(args map[string]interface{}) (*ToolResult, error), normalizationConfig *config.ToolNormalizationConfig) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.tools[tool.Name] = &ToolHandler{
-		Tool:    tool,
+
+	// Apply normalization if configured
+	registeredTool := tool
+	if normalizationConfig != nil && normalizationConfig.EnableOpenAINormalization {
+		normalizedResult := util.NormalizeToolNameForOpenAI(tool.Name, normalizationConfig.MaxToolNameLength)
+		
+		if normalizedResult.WasNormalized {
+			// Store original name in metadata
+			if registeredTool.Meta == nil {
+				registeredTool.Meta = make(map[string]interface{})
+			}
+			registeredTool.Meta["originalName"] = normalizedResult.OriginalName
+			
+			// Update the tool name to the normalized version
+			registeredTool.Name = normalizedResult.NormalizedName
+			
+			// Optionally preserve original name in description
+			if normalizationConfig.PreserveOriginalName && registeredTool.Description != "" {
+				registeredTool.Description = fmt.Sprintf("%s (Original: %s)", registeredTool.Description, normalizedResult.OriginalName)
+			}
+			
+			s.log.Debugw("normalized tool name for OpenAI compatibility", 
+				"original", normalizedResult.OriginalName, 
+				"normalized", normalizedResult.NormalizedName)
+		}
+	}
+
+	s.tools[registeredTool.Name] = &ToolHandler{
+		Tool:    registeredTool,
 		Handler: handler,
 	}
 }
@@ -67,8 +99,10 @@ func (s *Server) RegisterResource(resource Resource, handler func() ([]Content, 
 
 // RegisterGameManagementTools registers the game management tools for the new architecture
 func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration) {
+	normalizationConfig := gamesConfig.GetToolNormalization()
+
 	// games.list tool
-	s.RegisterTool(Tool{
+	s.RegisterToolWithConfig(Tool{
 		Name:        "games.list",
 		Description: "List all configured game IDs",
 		InputSchema: map[string]interface{}{
@@ -93,10 +127,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		return &ToolResult{
 			Content: []Content{{Type: "text", Text: content.String()}},
 		}, nil
-	})
+	}, normalizationConfig)
 
 	// games.show tool
-	s.RegisterTool(Tool{
+	s.RegisterToolWithConfig(Tool{
 		Name:        "games.show",
 		Description: "Show detailed configuration and validation status for a specific game",
 		InputSchema: map[string]interface{}{
@@ -159,10 +193,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		return &ToolResult{
 			Content: []Content{{Type: "text", Text: content.String()}},
 		}, nil
-	})
+	}, normalizationConfig)
 
 	// games.status tool
-	s.RegisterTool(Tool{
+	s.RegisterToolWithConfig(Tool{
 		Name:        "games.status",
 		Description: "Check the status of one or more games using game ID or launch target",
 		InputSchema: map[string]interface{}{
@@ -211,10 +245,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		return &ToolResult{
 			Content: []Content{{Type: "text", Text: content.String()}},
 		}, nil
-	})
+	}, normalizationConfig)
 
 	// games.start tool
-	s.RegisterTool(Tool{
+	s.RegisterToolWithConfig(Tool{
 		Name:        "games.start",
 		Description: "Start a configured game using game ID or launch target (e.g., Steam App ID)",
 		InputSchema: map[string]interface{}{
@@ -255,10 +289,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		return &ToolResult{
 			Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' (%s) started successfully", game.ID, game.Name)}},
 		}, nil
-	})
+	}, normalizationConfig)
 
 	// games.stop tool
-	s.RegisterTool(Tool{
+	s.RegisterToolWithConfig(Tool{
 		Name:        "games.stop",
 		Description: "Gracefully stop a running game using game ID or launch target",
 		InputSchema: map[string]interface{}{
@@ -307,10 +341,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		return &ToolResult{
 			Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' (%s) stopped successfully", game.ID, game.Name)}},
 		}, nil
-	})
+	}, normalizationConfig)
 
 	// games.kill tool
-	s.RegisterTool(Tool{
+	s.RegisterToolWithConfig(Tool{
 		Name:        "games.kill",
 		Description: "Force terminate a running game using game ID or launch target",
 		InputSchema: map[string]interface{}{
@@ -359,10 +393,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		return &ToolResult{
 			Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' (%s) terminated successfully", game.ID, game.Name)}},
 		}, nil
-	})
+	}, normalizationConfig)
 
 	// games.tools tool - List tools available for specific games
-	s.RegisterTool(Tool{
+	s.RegisterToolWithConfig(Tool{
 		Name:        "games.tools",
 		Description: "List game-specific tools available from running games with GABP connections",
 		InputSchema: map[string]interface{}{
@@ -433,7 +467,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		return &ToolResult{
 			Content: []Content{{Type: "text", Text: content.String()}},
 		}, nil
-	})
+	}, normalizationConfig)
 }
 
 // RegisterBridgeTools registers the legacy bridge management tools (for compatibility)
