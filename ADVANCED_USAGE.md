@@ -2,6 +2,8 @@
 
 This guide covers advanced GABS features for power users and complex setups.
 
+> **Prerequisites:** Make sure you've read the [Configuration Guide](CONFIGURATION.md) and [AI Integration Guide](INTEGRATION.md) first. For production deployments, see the [Deployment Guide](DEPLOYMENT.md).
+
 ## Multiple Game Instances
 
 You can run multiple copies of the same game with different configurations:
@@ -224,6 +226,31 @@ manageGames();
 ```
 
 ## Configuration File Advanced Features
+
+### Tool Normalization for AI Compatibility
+
+For advanced AI integrations, especially with OpenAI's API, you can configure tool name normalization:
+
+```json
+{
+  "version": "1.0",
+  "toolNormalization": {
+    "enableOpenAINormalization": true,
+    "maxToolNameLength": 64,
+    "preserveOriginalName": true
+  },
+  "games": {
+    // ... your game configurations
+  }
+}
+```
+
+This feature:
+- Converts dotted names (`minecraft.inventory.get`) to underscored names (`minecraft_inventory_get`)
+- Enforces character limits for API compatibility
+- Preserves original names in descriptions for user clarity
+
+See [OpenAI Tool Normalization Guide](OPENAI_TOOL_NORMALIZATION.md) for complete configuration details.
 
 ### Multiple Config Files
 You can use different config files for different setups:

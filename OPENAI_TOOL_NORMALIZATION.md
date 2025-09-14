@@ -2,6 +2,8 @@
 
 GABS now supports automatic normalization of MCP tool names to be compatible with OpenAI's API requirements.
 
+> **Quick Start:** Add this feature to your config as shown in the [Configuration Guide](CONFIGURATION.md). For AI integration setup, see the [AI Integration Guide](INTEGRATION.md).
+
 ## Problem
 
 OpenAI's API has strict requirements for tool names:

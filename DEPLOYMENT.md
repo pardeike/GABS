@@ -2,6 +2,8 @@
 
 This guide explains how to deploy GABS in different scenarios, from local development to cloud-based AI systems.
 
+> **Related guides:** [Configuration Guide](CONFIGURATION.md) for game setup, [AI Integration Guide](INTEGRATION.md) for connecting AI tools, [Advanced Usage Guide](ADVANCED_USAGE.md) for complex configurations.
+
 ## Architecture Overview
 
 GABS uses a **configuration-first approach** where games are configured once, then controlled through MCP tools:
@@ -46,33 +48,17 @@ AI uses MCP tools to control games:
 
 ## Configuration Modes
 
-When adding games with `gabs games add`, you can configure different connection patterns:
+GABS currently uses **local-only communication** for security and simplicity:
 
-### Local Mode (Default)
-**Use Case:** AI and game on the same machine
-
-During game configuration:
-- **GABP Mode**: `local`
-- **GABP Host**: `127.0.0.1` (default)
-
-Game mods will create GABP servers on localhost only.
-
-### Remote Mode  
-**Use Case:** AI in cloud, game on remote machine
+### Local Communication (Current Implementation)
+**Use Case:** AI and game on the same machine (recommended)
 
 During game configuration:
-- **GABP Mode**: `remote`
-- **GABP Host**: Your machine's IP address (e.g., `192.168.1.100`)
+- Bridge connections use localhost (127.0.0.1) only
+- Unique ports and tokens generated automatically
+- Maximum security with no network exposure
 
-Game mods will create GABP servers accessible from other machines.
-
-### Connect Mode
-**Use Case:** Game mod manages its own GABP server
-
-During game configuration:
-- **GABP Mode**: `connect`
-
-GABS will look for existing bridge configuration instead of creating one.
+Game mods read bridge configuration from `~/.gabs/{gameId}/bridge.json`
 
 ## Common Deployment Scenarios
 
@@ -83,7 +69,6 @@ GABS will look for existing bridge configuration instead of creating one.
 ```bash
 # Configure game once
 gabs games add rimworld
-# When prompted, accept defaults (local mode)
 
 # Start GABS server
 gabs server
@@ -94,62 +79,36 @@ gabs server
 **Benefits:**
 - Simple setup, no network configuration
 - Fast, low-latency communication  
-- Perfect for development and testing
+- Maximum security with localhost-only communication
+- Perfect for development and production use
 
-### Scenario 2: Cloud AI + Home Gaming
+### Scenario 2: Cloud AI with Local Gaming
 
-**Setup:** AI running in Claude Desktop/cloud, game on home computer.
+**Setup:** AI running in cloud (like Claude Desktop), GABS and game on local machine.
 
-**On home computer:**
-1. Configure game for remote access:
+**On local machine:**
+1. Configure and run GABS:
    ```bash
    gabs games add minecraft
-   # When prompted:
-   # - GABP Mode: remote
-   # - GABP Host: 192.168.1.100 (your home machine's LAN IP)
-   ```
-
-2. Start GABS server:
-   ```bash
    gabs server --http 0.0.0.0:8080
    ```
 
-3. Configure port forwarding on router for port 8080
+2. Configure port forwarding on router for port 8080
 
 **On cloud AI side:**
-Configure AI to connect to your home GABS server via HTTP.
+Configure AI to connect to your GABS HTTP server.
 
 **Benefits:**
 - Powerful cloud AI capabilities
 - Game runs on your gaming hardware
-- AI can access games remotely
+- GABS manages secure local communication with games
 
 **Considerations:**
 - Security: Use firewall rules, consider VPN
 - Latency: Network delay affects responsiveness  
-- Reliability: Depends on home internet connection
+- Game communication remains local and secure
 
-### Scenario 3: Professional Cloud Gaming
-
-**Setup:** Both game and AI running in cloud infrastructure.
-
-```bash
-# On cloud gaming instance
-gabs games add game
-# Configure with remote mode, internal cloud IP
-
-# Start GABS server
-gabs server --http 0.0.0.0:8080
-
-# AI connects to cloud GABS instance
-```
-
-**Benefits:**
-- High performance, low latency
-- Professional infrastructure reliability
-- Scalable to multiple games/AI instances
-
-### Scenario 4: Multiple Game Server Management
+### Scenario 3: Multiple Game Server Management
 
 **Setup:** GABS managing multiple game servers for AI.
 
@@ -165,6 +124,11 @@ gabs server --http :8080
 
 # AI can manage all servers through single interface
 ```
+
+**Benefits:**
+- Centralized management of multiple games
+- Each game gets secure local communication
+- AI can control all games through unified interface
 
 ## Security Considerations
 
@@ -296,13 +260,20 @@ Potential improvements being considered:
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--gabpMode` | Connection mode: local\|remote\|connect | local |
-| `--gabpHost` | GABP server host address | 127.0.0.1 |
-| `--reconnectBackoff` | Reconnection retry timing | 100ms..5s |
+| `--http` | HTTP server address (e.g., :8080, localhost:8080) | stdio only |
+| `--reconnectBackoff` | Reconnection retry timing (e.g., 100ms..5s) | 100ms..5s |
 | `--configDir` | Override config directory | Platform-specific |
+| `--log-level` | Log level: trace\|debug\|info\|warn\|error | info |
+| `--grace` | Graceful stop timeout before kill | 3s |
 
 ### Environment Variables
 
-- `GAB_CONFIG_DIR`: Override default config directory
-- `GAB_LOG_LEVEL`: Set default log level
-- `GAB_GABP_HOST`: Set default GABP host
+**GABS Configuration:**
+- `GABS_CONFIG_DIR`: Override default config directory  
+- `GABS_LOG_LEVEL`: Set default log level
+
+**GABP Bridge (Set by GABS for Game Mods):**
+- `GABS_GAME_ID`: Game identifier passed to mod
+- `GABS_BRIDGE_PATH`: Path to bridge.json configuration file
+- `GABP_SERVER_PORT`: Port number for mod to listen on
+- `GABP_TOKEN`: Authentication token for GABS connection

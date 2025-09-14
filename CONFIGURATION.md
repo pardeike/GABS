@@ -45,14 +45,16 @@ The name of the actual game process to stop when using games.stop or games.kill.
 
 **Note:** For `SteamAppId` and `EpicAppId` launch modes, you must provide a `stopProcessName` or GABS will not be able to properly terminate the game.
 
-### 6. GABP Mode
-How GABS talks to your game mod:
-- **local**: Game mod runs on the same computer (most common)
-- **remote**: Game mod runs on a different computer
-- **connect**: GABS connects to an existing mod server
+### 6. Game Configuration Complete
 
-### 7. GABP Host (For Remote Mode)
-If using remote mode, enter the IP address where your game mod should listen.
+All games configured through GABS use **local GABP mode** for maximum security and simplicity. When you start a game, GABS automatically creates bridge configuration that:
+
+- Uses localhost (127.0.0.1) for communication
+- Generates secure random tokens for each session
+- Creates unique ports for each game instance
+- Stores connection details in `~/.gabs/{gameId}/bridge.json`
+
+Your game mods read this bridge configuration file to connect with GABS.
 
 ## Managing Your Games
 
@@ -81,6 +83,11 @@ Your games are saved in `~/.gabs/config.json`. Here's what it looks like:
 ```json
 {
   "version": "1.0",
+  "toolNormalization": {
+    "enableOpenAINormalization": false,
+    "maxToolNameLength": 64,
+    "preserveOriginalName": true
+  },
   "games": {
     "minecraft": {
       "id": "minecraft",
@@ -89,7 +96,6 @@ Your games are saved in `~/.gabs/config.json`. Here's what it looks like:
       "target": "/opt/minecraft/start.sh",
       "workingDir": "/opt/minecraft",
       "stopProcessName": "java",
-      "gabpMode": "local",
       "description": "Main Minecraft server"
     },
     "rimworld": {
@@ -97,8 +103,7 @@ Your games are saved in `~/.gabs/config.json`. Here's what it looks like:
       "name": "RimWorld",
       "launchMode": "SteamAppId",
       "target": "294100",
-      "stopProcessName": "RimWorldWin64.exe",
-      "gabpMode": "local"
+      "stopProcessName": "RimWorldWin64.exe"
     }
   }
 }
@@ -148,22 +153,75 @@ Best for: Complex launch setups or special requirements
 }
 ```
 
-## GABP Modes Explained
+## GABP Communication
 
-### Local Mode (Default)
-- Game mod listens on `127.0.0.1` (localhost only)
-- Most secure option
-- Best for development and single-machine setups
+GABS uses **local-only GABP communication** for security and simplicity. Here's how it works:
 
-### Remote Mode
-- Game mod listens on your specified IP address
-- Allows AI running on different computers to connect
-- Requires network configuration
+### Local Communication (Current Implementation)
+- Game mods connect to GABS on localhost (127.0.0.1) only
+- Each game gets a unique port and secure token
+- Bridge configuration stored in `~/.gabs/{gameId}/bridge.json`
+- Maximum security with no network exposure
 
-### Connect Mode
-- GABS connects to an already-running mod server
-- Useful for persistent game servers
-- Game mod must be started manually first
+### Bridge Configuration
+When you start a game, GABS creates a bridge configuration file that looks like this:
+
+```json
+{
+  "port": 49234,
+  "token": "a1b2c3d4e5f6...",
+  "gameId": "minecraft", 
+  "agentName": "gabs-v0.1.0",
+  "host": "127.0.0.1",
+  "mode": "local"
+}
+```
+
+Your game mod reads this file to establish a secure connection with GABS.
+
+## Tool Normalization Configuration
+
+GABS can automatically normalize MCP tool names to be compatible with different AI platforms, particularly OpenAI's API which has strict naming requirements.
+
+### Tool Normalization Options
+
+The `toolNormalization` section supports these options:
+
+- **`enableOpenAINormalization`** (boolean): Enable/disable OpenAI-compatible normalization (default: `false`)
+  - Replaces dots (.) with underscores (_) in tool names
+  - Enforces 64-character length limit
+  - Ensures tool names start with a letter
+- **`maxToolNameLength`** (integer): Maximum length for tool names (default: `64`)
+- **`preserveOriginalName`** (boolean): Store original name in tool description/metadata (default: `true`)
+
+### Example Configuration
+
+```json
+{
+  "version": "1.0",
+  "toolNormalization": {
+    "enableOpenAINormalization": true,
+    "maxToolNameLength": 64,
+    "preserveOriginalName": true
+  },
+  "games": {
+    // ... your game configurations
+  }
+}
+```
+
+### When to Use OpenAI Normalization
+
+Enable this feature when:
+- Using GABS with OpenAI's API directly
+- Your game mods use dotted tool names (e.g., `minecraft.inventory.get`)
+- You need strict OpenAI API compliance
+
+**Example transformations:**
+- `minecraft.inventory.get` → `minecraft_inventory_get`
+- `rimworld.crafting.build` → `rimworld_crafting_build`
+
+For complete details about tool normalization, see the [OpenAI Tool Normalization Guide](OPENAI_TOOL_NORMALIZATION.md).
 
 ## Improved Game Stopping
 

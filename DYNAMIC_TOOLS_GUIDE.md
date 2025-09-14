@@ -4,6 +4,8 @@
 
 GABS uses a **progressive tool disclosure** system that helps AI agents handle the dynamic expansion of available tools as games connect. This guide explains how AI agents can effectively work with GABS's growing tool ecosystem.
 
+> **Related guides:** [AI Integration Guide](INTEGRATION.md) for connecting AI agents, [Configuration Guide](CONFIGURATION.md) for game setup, [AI Dynamic Tools FAQ](AI_DYNAMIC_TOOLS_FAQ.md) for common questions.
+
 ## The Progressive Tool Discovery Pattern
 
 ### Phase 1: Initial State (Core Game Management)
