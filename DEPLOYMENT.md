@@ -261,11 +261,19 @@ Potential improvements being considered:
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--http` | HTTP server address (e.g., :8080, localhost:8080) | stdio only |
-| `--reconnectBackoff` | Reconnection retry timing | 100ms..5s |
+| `--reconnectBackoff` | Reconnection retry timing (e.g., 100ms..5s) | 100ms..5s |
 | `--configDir` | Override config directory | Platform-specific |
+| `--log-level` | Log level: trace\|debug\|info\|warn\|error | info |
+| `--grace` | Graceful stop timeout before kill | 3s |
 
 ### Environment Variables
 
-- `GAB_CONFIG_DIR`: Override default config directory
-- `GAB_LOG_LEVEL`: Set default log level
-- `GAB_GABP_HOST`: Set default GABP host
+**GABS Configuration:**
+- `GABS_CONFIG_DIR`: Override default config directory  
+- `GABS_LOG_LEVEL`: Set default log level
+
+**GABP Bridge (Set by GABS for Game Mods):**
+- `GABS_GAME_ID`: Game identifier passed to mod
+- `GABS_BRIDGE_PATH`: Path to bridge.json configuration file
+- `GABP_SERVER_PORT`: Port number for mod to listen on
+- `GABP_TOKEN`: Authentication token for GABS connection
