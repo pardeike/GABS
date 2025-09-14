@@ -91,7 +91,13 @@ func (m *Mirror) SyncTools() error {
 				if resultText, ok := result["text"].(string); ok {
 					content = append(content, mcp.Content{Type: "text", Text: resultText})
 				} else {
-					content = append(content, mcp.Content{Type: "text", Text: fmt.Sprintf("%v", result)})
+					// Serialize non-text tool results as JSON instead of using %v
+					if jsonData, err := json.Marshal(result); err != nil {
+						// Fallback to string representation if JSON marshaling fails
+						content = append(content, mcp.Content{Type: "text", Text: fmt.Sprintf("Tool result (JSON marshal failed): %v", result)})
+					} else {
+						content = append(content, mcp.Content{Type: "text", Text: string(jsonData)})
+					}
 				}
 
 				return &mcp.ToolResult{
@@ -147,7 +153,12 @@ func (m *Mirror) ExposeResources() error {
 			"capabilities": m.client.GetCapabilities(),
 		}
 
-		eventJson, _ := json.Marshal(eventData)
+		eventJson, err := json.Marshal(eventData)
+		if err != nil {
+			return []mcp.Content{
+				{Type: "text", Text: fmt.Sprintf("Error marshaling event data: %v", err)},
+			}, err
+		}
 		
 		return []mcp.Content{
 			{Type: "text", Text: string(eventJson)},
@@ -186,7 +197,12 @@ func (m *Mirror) ExposeResources() error {
 			"lastUpdate":   fmt.Sprintf("%d", time.Now().Unix()),
 		}
 
-		stateJson, _ := json.Marshal(stateData)
+		stateJson, err := json.Marshal(stateData)
+		if err != nil {
+			return []mcp.Content{
+				{Type: "text", Text: fmt.Sprintf("Error marshaling state data: %v", err)},
+			}, err
+		}
 		
 		return []mcp.Content{
 			{Type: "text", Text: string(stateJson)},
@@ -214,7 +230,12 @@ func (m *Mirror) ExposeResources() error {
 			"note":        "Use GABP client event subscription to receive real-time updates",
 		}
 
-		streamJson, _ := json.Marshal(streamInfo)
+		streamJson, err := json.Marshal(streamInfo)
+		if err != nil {
+			return []mcp.Content{
+				{Type: "text", Text: fmt.Sprintf("Error marshaling stream info: %v", err)},
+			}, err
+		}
 		
 		return []mcp.Content{
 			{Type: "text", Text: string(streamJson)},
