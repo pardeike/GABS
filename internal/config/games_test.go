@@ -38,9 +38,11 @@ func TestGamesConfig(t *testing.T) {
 			Target:      "/path/to/minecraft",
 			Description: "A test game",
 		}
-
-		config.AddGame(game)
-
+		
+		if err := config.AddGame(game); err != nil {
+			t.Fatalf("Failed to add valid game: %v", err)
+		}
+		
 		retrieved, exists := config.GetGame("minecraft")
 		if !exists {
 			t.Error("Expected game to exist after adding")
@@ -100,9 +102,11 @@ func TestGamesConfig(t *testing.T) {
 		config, _ := LoadGamesConfigFromPath(configPath)
 
 		// Add a game
-		game := GameConfig{ID: "testgame", Name: "Test Game"}
-		config.AddGame(game)
-
+		game := GameConfig{ID: "testgame", Name: "Test Game", LaunchMode: "DirectPath", Target: "/path/to/game"}
+		if err := config.AddGame(game); err != nil {
+			t.Fatalf("Failed to add valid game: %v", err)
+		}
+		
 		// Verify it exists
 		_, exists := config.GetGame("testgame")
 		if !exists {
@@ -327,3 +331,127 @@ func TestStopProcessNameConfiguration(t *testing.T) {
 		}
 	})
 }
+
+func TestGameConfigValidation(t *testing.T) {
+	t.Run("ValidDirectPathGame", func(t *testing.T) {
+		game := GameConfig{
+			ID:         "test",
+			Name:       "Test Game",
+			LaunchMode: "DirectPath",
+			Target:     "/path/to/game",
+		}
+		
+		if err := game.Validate(); err != nil {
+			t.Errorf("Expected valid game to pass validation, got: %v", err)
+		}
+	})
+
+	t.Run("ValidSteamGameWithStopProcess", func(t *testing.T) {
+		game := GameConfig{
+			ID:              "rimworld",
+			Name:            "RimWorld",
+			LaunchMode:      "SteamAppId",
+			Target:          "294100",
+			StopProcessName: "RimWorldWin64.exe",
+		}
+		
+		if err := game.Validate(); err != nil {
+			t.Errorf("Expected valid Steam game to pass validation, got: %v", err)
+		}
+	})
+
+	t.Run("InvalidSteamGameWithoutStopProcess", func(t *testing.T) {
+		game := GameConfig{
+			ID:         "rimworld",
+			Name:       "RimWorld",
+			LaunchMode: "SteamAppId",
+			Target:     "294100",
+			// Missing StopProcessName
+		}
+		
+		err := game.Validate()
+		if err == nil {
+			t.Error("Expected Steam game without stopProcessName to fail validation")
+		}
+		if !strings.Contains(err.Error(), "stopProcessName is required") {
+			t.Errorf("Expected error about required stopProcessName, got: %v", err)
+		}
+	})
+
+	t.Run("InvalidEpicGameWithoutStopProcess", func(t *testing.T) {
+		game := GameConfig{
+			ID:         "testgame",
+			Name:       "Test Game",
+			LaunchMode: "EpicAppId",
+			Target:     "epic-id",
+			// Missing StopProcessName
+		}
+		
+		err := game.Validate()
+		if err == nil {
+			t.Error("Expected Epic game without stopProcessName to fail validation")
+		}
+		if !strings.Contains(err.Error(), "stopProcessName is required") {
+			t.Errorf("Expected error about required stopProcessName, got: %v", err)
+		}
+	})
+
+	t.Run("MissingRequiredFields", func(t *testing.T) {
+		tests := []struct {
+			name        string
+			game        GameConfig
+			expectedErr string
+		}{
+			{
+				name:        "Missing ID",
+				game:        GameConfig{Name: "Test", LaunchMode: "DirectPath", Target: "/path"},
+				expectedErr: "game ID is required",
+			},
+			{
+				name:        "Missing Name",
+				game:        GameConfig{ID: "test", LaunchMode: "DirectPath", Target: "/path"},
+				expectedErr: "game name is required",
+			},
+			{
+				name:        "Missing LaunchMode",
+				game:        GameConfig{ID: "test", Name: "Test", Target: "/path"},
+				expectedErr: "launch mode is required",
+			},
+			{
+				name:        "Missing Target",
+				game:        GameConfig{ID: "test", Name: "Test", LaunchMode: "DirectPath"},
+				expectedErr: "target is required",
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				err := tt.game.Validate()
+				if err == nil {
+					t.Errorf("Expected validation to fail for %s", tt.name)
+				}
+				if !strings.Contains(err.Error(), tt.expectedErr) {
+					t.Errorf("Expected error containing '%s', got: %v", tt.expectedErr, err)
+				}
+			})
+		}
+	})
+
+	t.Run("InvalidLaunchMode", func(t *testing.T) {
+		game := GameConfig{
+			ID:         "test",
+			Name:       "Test",
+			LaunchMode: "InvalidMode",
+			Target:     "/path",
+		}
+		
+		err := game.Validate()
+		if err == nil {
+			t.Error("Expected validation to fail for invalid launch mode")
+		}
+		if !strings.Contains(err.Error(), "invalid launch mode") {
+			t.Errorf("Expected error about invalid launch mode, got: %v", err)
+		}
+	})
+}
+>>>>>>> main

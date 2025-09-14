@@ -295,8 +295,11 @@ func addGame(log util.Logger, gameID string) int {
 			LaunchMode: "DirectPath",
 			Target:     "",
 		}
-		gamesConfig.AddGame(game)
-
+		if err := gamesConfig.AddGame(game); err != nil {
+			log.Errorw("invalid game configuration", "error", err)
+			return 1
+		}
+		
 		if err := config.SaveGamesConfig(gamesConfig); err != nil {
 			log.Errorw("failed to save games config", "error", err)
 			return 1
@@ -344,7 +347,19 @@ func addGame(log util.Logger, gameID string) int {
 	}
 
 	// Ask for optional stop process name for better game termination control
-	stopProcessName := promptString("Stop Process Name (optional - for better game stopping)", "")
+	// For launcher-based games (Steam/Epic), this is required
+	var stopProcessName string
+	if game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId" {
+		stopProcessName = promptString(fmt.Sprintf("Stop Process Name (REQUIRED for %s games)", game.LaunchMode), "")
+		for stopProcessName == "" {
+			fmt.Printf("⚠️  Stop Process Name is required for %s games to enable proper game termination.\n", game.LaunchMode)
+			fmt.Printf("   Without it, GABS can only stop the launcher process, not the actual game.\n")
+			fmt.Printf("   Examples: 'RimWorldWin64.exe' for RimWorld, 'java' for Minecraft\n")
+			stopProcessName = promptString(fmt.Sprintf("Stop Process Name (REQUIRED for %s games)", game.LaunchMode), "")
+		}
+	} else {
+		stopProcessName = promptString("Stop Process Name (optional - for better game stopping)", "")
+	}
 	if stopProcessName != "" {
 		game.StopProcessName = stopProcessName
 	}
@@ -354,8 +369,11 @@ func addGame(log util.Logger, gameID string) int {
 		game.Description = description
 	}
 
-	gamesConfig.AddGame(game)
-
+	if err := gamesConfig.AddGame(game); err != nil {
+		log.Errorw("invalid game configuration", "error", err)
+		return 1
+	}
+	
 	if err := config.SaveGamesConfig(gamesConfig); err != nil {
 		log.Errorw("failed to save games config", "error", err)
 		return 1
