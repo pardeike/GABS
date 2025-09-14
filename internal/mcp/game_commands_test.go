@@ -127,7 +127,6 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 		}
 	})
 	
->>>>>>> main
 	// Test games.start with correct ID (should work)
 	t.Run("GamesStartWithCorrectId", func(t *testing.T) {
 		startCorrectMsg := &Message{
