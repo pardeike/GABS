@@ -73,8 +73,7 @@ func (c *Controller) Start() error {
 		cmdName = c.spec.PathOrId
 		cmdArgs = c.spec.Args
 	case "SteamAppId":
-		cmdName = c.getSteamLauncher()
-		cmdArgs = []string{fmt.Sprintf("steam://rungameid/%s", c.spec.PathOrId)}
+		cmdName, cmdArgs = c.getSteamLauncherCommand(c.spec.PathOrId)
 	case "EpicAppId":
 		// Epic Games Store URL format
 		cmdName = c.getSystemOpenCommand()
@@ -265,9 +264,12 @@ func (c *Controller) Restart() error {
 // Platform-specific helpers
 
 func (c *Controller) getSteamLauncher() string {
-	// TODO: Add direct Steam executable detection for better reliability
-	// Could check common Steam installation paths and use steam.exe directly
-	// instead of relying on system URL handlers, which provides better error handling
+	// First try to find Steam executable directly for better reliability
+	if steamPath, found := findSteamExecutable(); found {
+		return steamPath
+	}
+
+	// Fallback to system URL handlers
 	switch runtime.GOOS {
 	case "windows":
 		return "cmd"
@@ -533,4 +535,130 @@ func (c *Controller) getBridgePath() string {
 		return filepath.Join(".gabs", c.spec.GameId, "bridge.json")
 	}
 	return filepath.Join(homeDir, ".gabs", c.spec.GameId, "bridge.json")
+}
+
+// getSteamLauncherCommand returns the appropriate command and arguments for launching Steam games
+// Returns direct Steam executable commands when available, otherwise falls back to URL handlers
+func (c *Controller) getSteamLauncherCommand(appId string) (string, []string) {
+	steamPath := c.getSteamLauncher()
+	
+	// Check if we're using a direct Steam executable or URL handler
+	if isValidSteamExecutable(steamPath) {
+		// Direct Steam executable - use -applaunch for better reliability
+		return steamPath, []string{"-applaunch", appId}
+	}
+	
+	// URL handler fallback - construct steam:// URL
+	steamURL := fmt.Sprintf("steam://rungameid/%s", appId)
+	switch runtime.GOOS {
+	case "windows":
+		return steamPath, []string{"/c", "start", "", steamURL}
+	case "darwin":
+		return steamPath, []string{steamURL}
+	default:
+		return steamPath, []string{steamURL}
+	}
+}
+
+// findSteamExecutable attempts to locate Steam executable on the system
+// Returns the path to Steam executable and whether it was found
+func findSteamExecutable() (string, bool) {
+	var candidatePaths []string
+	
+	switch runtime.GOOS {
+	case "windows":
+		// Common Steam installation paths on Windows
+		candidatePaths = []string{
+			filepath.Join(os.Getenv("PROGRAMFILES(X86)"), "Steam", "steam.exe"),
+			filepath.Join(os.Getenv("PROGRAMFILES"), "Steam", "steam.exe"),
+			"C:\\Program Files (x86)\\Steam\\steam.exe",
+			"C:\\Program Files\\Steam\\steam.exe",
+		}
+		
+		// Also check registry for Steam installation path (simplified)
+		if homeDir, err := os.UserHomeDir(); err == nil {
+			candidatePaths = append(candidatePaths, 
+				filepath.Join(homeDir, "AppData", "Local", "Steam", "steam.exe"))
+		}
+		
+	case "darwin":
+		// Common Steam installation paths on macOS
+		candidatePaths = []string{
+			"/Applications/Steam.app/Contents/MacOS/steam_osx",
+			"/Applications/Steam.app",
+		}
+		
+		if homeDir, err := os.UserHomeDir(); err == nil {
+			candidatePaths = append(candidatePaths,
+				filepath.Join(homeDir, "Applications", "Steam.app", "Contents", "MacOS", "steam_osx"),
+				filepath.Join(homeDir, "Applications", "Steam.app"))
+		}
+		
+	default:
+		// Linux and other Unix-like systems
+		candidatePaths = []string{
+			"/usr/bin/steam",
+			"/usr/local/bin/steam",
+			"/opt/steam/steam",
+			"/usr/games/steam",
+		}
+		
+		// Check common user installation paths
+		if homeDir, err := os.UserHomeDir(); err == nil {
+			candidatePaths = append(candidatePaths,
+				filepath.Join(homeDir, ".steam", "steam"),
+				filepath.Join(homeDir, ".local", "share", "Steam", "steam"),
+				filepath.Join(homeDir, "Steam", "steam"))
+		}
+		
+		// Check Flatpak installation
+		candidatePaths = append(candidatePaths, "/var/lib/flatpak/app/com.valvesoftware.Steam/current/active/export/bin/com.valvesoftware.Steam")
+		
+		// Check Snap installation
+		candidatePaths = append(candidatePaths, "/snap/bin/steam")
+	}
+	
+	// Find first existing executable
+	for _, path := range candidatePaths {
+		if isValidSteamExecutable(path) {
+			return path, true
+		}
+	}
+	
+	return "", false
+}
+
+// isValidSteamExecutable checks if the given path is a valid Steam executable
+func isValidSteamExecutable(path string) bool {
+	if path == "" {
+		return false
+	}
+	
+	// For .app bundles on macOS, check if directory exists
+	if runtime.GOOS == "darwin" && strings.HasSuffix(path, ".app") {
+		if stat, err := os.Stat(path); err == nil && stat.IsDir() {
+			return true
+		}
+		return false
+	}
+	
+	// For regular executables, check if file exists and is executable
+	stat, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	
+	// Must be a regular file
+	if !stat.Mode().IsRegular() {
+		return false
+	}
+	
+	// Must be executable (Unix permissions check)
+	if runtime.GOOS != "windows" {
+		if stat.Mode()&0111 == 0 { // No execute permissions
+			return false
+		}
+	}
+	
+	return true
 }
