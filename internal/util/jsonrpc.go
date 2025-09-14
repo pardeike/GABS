@@ -11,6 +11,11 @@ import (
 	"github.com/google/uuid"
 )
 
+// FrameWriter interface for JSON frame writers
+type FrameWriter interface {
+	WriteJSON(obj interface{}) error
+}
+
 // Message represents a JSON-RPC 2.0 message
 type Message struct {
 	Version string      `json:"jsonrpc,omitempty"`

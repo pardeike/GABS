@@ -17,11 +17,15 @@ import (
 
 // Server runs MCP over stdio.
 type Server struct {
-	log       util.Logger
-	tools     map[string]*ToolHandler
-	resources map[string]*ResourceHandler
-	games     map[string]*process.Controller // Track running games
-	mu        sync.RWMutex
+	log         util.Logger
+	tools       map[string]*ToolHandler
+	resources   map[string]*ResourceHandler
+	games       map[string]*process.Controller // Track running games
+	mu          sync.RWMutex
+	writers     []util.FrameWriter           // Track client connections for notifications
+	writersMu   sync.RWMutex                // Protect writers slice
+	gameTools   map[string][]string         // Track which tools belong to which games
+	gameResources map[string][]string       // Track which resources belong to which games
 }
 
 // ToolHandler represents a tool handler function
@@ -38,10 +42,13 @@ type ResourceHandler struct {
 
 func NewServer(log util.Logger) *Server {
 	return &Server{
-		log:       log,
-		tools:     make(map[string]*ToolHandler),
-		resources: make(map[string]*ResourceHandler),
-		games:     make(map[string]*process.Controller),
+		log:           log,
+		tools:         make(map[string]*ToolHandler),
+		resources:     make(map[string]*ResourceHandler),
+		games:         make(map[string]*process.Controller),
+		writers:       make([]util.FrameWriter, 0),
+		gameTools:     make(map[string][]string),
+		gameResources: make(map[string][]string),
 	}
 }
 
@@ -595,8 +602,14 @@ func (s *Server) checkGameStatus(gameID string) string {
 
 	// Process is dead, clean up
 	delete(s.games, gameID)
-	// TODO: Also cleanup any GABP connections and mirrored tools for this game
-	s.log.Debugw("cleaned up dead game process", "gameId", gameID)
+	// Cleanup GABP connections and mirrored tools for this game
+	// This involves:
+	// 1. Disconnecting any active GABP client for this game (handled by process termination)
+	// 2. Unregistering all game-specific tools (gameId.* tools)
+	// 3. Cleaning up bridge configuration files
+	s.CleanupGameResources(gameID)
+	s.CleanupBridgeConfig(gameID)
+	s.log.Debugw("cleaned up dead game process and resources", "gameId", gameID)
 
 	return "stopped"
 }
@@ -722,11 +735,13 @@ func (s *Server) stopGame(game config.GameConfig, force bool) error {
 		s.log.Infow("game stopped", "gameId", game.ID, "pid", controller.GetPID())
 	}
 
-	// TODO: In future enhancement, also cleanup GABP connections and mirrored tools
-	// This would involve:
-	// 1. Disconnecting any active GABP client for this game
+	// Cleanup GABP connections and mirrored tools when game stops
+	// This involves:
+	// 1. Disconnecting any active GABP client for this game (handled by process termination)
 	// 2. Unregistering all game-specific tools (gameId.* tools)
 	// 3. Cleaning up bridge configuration files
+	s.CleanupGameResources(game.ID)
+	s.CleanupBridgeConfig(game.ID)
 
 	return err
 }
@@ -735,10 +750,126 @@ func (s *Server) ServeStdio(ctx context.Context) error {
 	return s.Serve(os.Stdin, os.Stdout)
 }
 
+// SendNotification sends a notification to all connected clients
+func (s *Server) SendNotification(method string, params interface{}) {
+	notification := NewNotification(method, params)
+	
+	s.writersMu.RLock()
+	defer s.writersMu.RUnlock()
+	
+	for _, writer := range s.writers {
+		if err := writer.WriteJSON(notification); err != nil {
+			s.log.Warnw("failed to send notification", "method", method, "error", err)
+		}
+	}
+}
+
+// SendToolsListChangedNotification notifies clients that the tool list has changed
+func (s *Server) SendToolsListChangedNotification() {
+	s.SendNotification("notifications/tools/list_changed", map[string]interface{}{})
+	s.log.Debugw("sent tools/list_changed notification")
+}
+
+// SendResourcesListChangedNotification notifies clients that the resource list has changed
+func (s *Server) SendResourcesListChangedNotification() {
+	s.SendNotification("notifications/resources/list_changed", map[string]interface{}{})
+	s.log.Debugw("sent resources/list_changed notification")
+}
+
+// RegisterGameTool registers a tool for a specific game and tracks it for cleanup
+func (s *Server) RegisterGameTool(gameId string, tool Tool, handler func(args map[string]interface{}) (*ToolResult, error), normalizationConfig *config.ToolNormalizationConfig) {
+	s.RegisterToolWithConfig(tool, handler, normalizationConfig)
+	
+	// Track which game this tool belongs to
+	s.mu.Lock()
+	s.gameTools[gameId] = append(s.gameTools[gameId], tool.Name)
+	s.mu.Unlock()
+}
+
+// RegisterGameResource registers a resource for a specific game and tracks it for cleanup
+func (s *Server) RegisterGameResource(gameId string, resource Resource, handler func() ([]Content, error)) {
+	s.RegisterResource(resource, handler)
+	
+	// Track which game this resource belongs to
+	s.mu.Lock()
+	s.gameResources[gameId] = append(s.gameResources[gameId], resource.URI)
+	s.mu.Unlock()
+}
+
+// CleanupGameResources removes all tools and resources for a specific game
+func (s *Server) CleanupGameResources(gameId string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	
+	toolsRemoved := 0
+	resourcesRemoved := 0
+	
+	// Remove game-specific tools
+	if toolNames, exists := s.gameTools[gameId]; exists {
+		for _, toolName := range toolNames {
+			if _, exists := s.tools[toolName]; exists {
+				delete(s.tools, toolName)
+				toolsRemoved++
+			}
+		}
+		delete(s.gameTools, gameId)
+	}
+	
+	// Remove game-specific resources
+	if resourceURIs, exists := s.gameResources[gameId]; exists {
+		for _, resourceURI := range resourceURIs {
+			if _, exists := s.resources[resourceURI]; exists {
+				delete(s.resources, resourceURI)
+				resourcesRemoved++
+			}
+		}
+		delete(s.gameResources, gameId)
+	}
+	
+	if toolsRemoved > 0 || resourcesRemoved > 0 {
+		s.log.Infow("cleaned up game resources", "gameId", gameId, "toolsRemoved", toolsRemoved, "resourcesRemoved", resourcesRemoved)
+		
+		// Notify clients about changes
+		if toolsRemoved > 0 {
+			s.SendToolsListChangedNotification()
+		}
+		if resourcesRemoved > 0 {
+			s.SendResourcesListChangedNotification()
+		}
+	}
+}
+
+// CleanupBridgeConfig removes the bridge configuration file for a game
+func (s *Server) CleanupBridgeConfig(gameId string) {
+	bridgePath := config.GetBridgeConfigPath(gameId)
+	if err := os.Remove(bridgePath); err != nil {
+		// Don't log as error since file might not exist
+		s.log.Debugw("bridge config cleanup", "gameId", gameId, "path", bridgePath, "result", err.Error())
+	} else {
+		s.log.Debugw("cleaned up bridge config", "gameId", gameId, "path", bridgePath)
+	}
+}
+
 func (s *Server) Serve(r io.Reader, w io.Writer) error {
 	// Implement newline-delimited JSON-RPC over stdio per MCP stdio transport
 	reader := util.NewNewlineFrameReader(r)
 	writer := util.NewNewlineFrameWriter(w)
+
+	// Track this writer for notifications
+	s.writersMu.Lock()
+	s.writers = append(s.writers, writer)
+	writerIndex := len(s.writers) - 1
+	s.writersMu.Unlock()
+
+	// Clean up writer on exit
+	defer func() {
+		s.writersMu.Lock()
+		// Remove writer from slice
+		if writerIndex < len(s.writers) {
+			s.writers = append(s.writers[:writerIndex], s.writers[writerIndex+1:]...)
+		}
+		s.writersMu.Unlock()
+	}()
 
 	for {
 		var msg Message
