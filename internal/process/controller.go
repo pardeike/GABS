@@ -96,22 +96,20 @@ func (c *Controller) Start() error {
 		c.cmd.Dir = c.spec.WorkingDir
 	}
 	
-	// Set environment variables to help mods find the bridge file
-	// Hybrid approach: pass both file path and essential connection info directly
+	// Set environment variables for GABP server configuration
+	// The mod acts as GABP server, GABS acts as GABP client
 	bridgePath := c.getBridgePath()
 	bridgeEnvVars := []string{
 		fmt.Sprintf("GABS_GAME_ID=%s", c.spec.GameId),
-		fmt.Sprintf("GABS_BRIDGE_PATH=%s", bridgePath),
+		fmt.Sprintf("GABS_BRIDGE_PATH=%s", bridgePath), // Fallback for compatibility/debugging
 	}
 	
-	// If bridge connection info is available, also pass it directly in environment variables
-	// This provides immediate access without file I/O and handles cases where file access might fail
+	// Pass essential GABP server configuration directly to mod
+	// Mod will start GABP server on this port and use this token for auth
 	if c.bridgeInfo != nil {
 		bridgeEnvVars = append(bridgeEnvVars,
-			fmt.Sprintf("GABS_HOST=%s", c.bridgeInfo.Host),
-			fmt.Sprintf("GABS_PORT=%d", c.bridgeInfo.Port),
-			fmt.Sprintf("GABS_TOKEN=%s", c.bridgeInfo.Token),
-			fmt.Sprintf("GABS_MODE=%s", c.bridgeInfo.Mode),
+			fmt.Sprintf("GABP_SERVER_PORT=%d", c.bridgeInfo.Port), // Port for mod to listen on
+			fmt.Sprintf("GABP_TOKEN=%s", c.bridgeInfo.Token),      // Auth token for GABS to use
 		)
 	}
 	

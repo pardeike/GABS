@@ -6,66 +6,85 @@ This guide helps you add GABP support to your game mods so they can work with GA
 
 [GABP](https://github.com/pardeike/GABP) (Game Agent Bridge Protocol) is a simple way for AI tools to talk to your game mods. Think of it like a translator between AI assistants and your game.
 
+## Architecture Overview
+
+**IMPORTANT: Understanding Client-Server Roles**
+
+In GABP architecture:
+- **Your mod = GABP Server** (listens for connections on a port)
+- **GABS = GABP Client** (connects to your mod)
+
+This is different from how GABS operates as an MCP server. The communication flow is:
+
+```
+AI Agent ← MCP → GABS ← GABP Client → GABP Server (Your Mod) ← Game API → Game
+```
+
+**Why this architecture?**
+- GABS has better knowledge of which ports are available  
+- Communication is always local (127.0.0.1) since GABS must launch the game
+- GABS can connect to mods when they're ready, not the other way around
+- Multiple game instances can run concurrently with unique ports
+
 ## Quick Overview
 
 To work with GABS, your mod needs to:
 
-1. **Read bridge config** when the game starts
+1. **Read GABP server config** when the game starts (port to listen on, auth token)
 2. **Act as GABP server** - listen for connections from GABS
 3. **Expose your features** as tools, resources, and events
 
-## Step 1: Reading Bridge Config
+## Step 1: Reading GABP Server Configuration
 
-When GABS starts your game, it provides bridge connection information in two ways for maximum compatibility and reliability:
+When GABS starts your game, it passes GABP server configuration via environment variables:
 
-### Method 1: Environment Variables (Recommended)
-
-GABS passes essential connection information directly via environment variables:
+### Essential Environment Variables
 
 - `GABS_GAME_ID` - Your game's identifier 
-- `GABS_HOST` - Server host address (e.g., "127.0.0.1")
-- `GABS_PORT` - Server port number (e.g., 12345)
-- `GABS_TOKEN` - Authentication token
-- `GABS_MODE` - Connection mode ("local", "remote", or "connect")
+- `GABP_SERVER_PORT` - Port number your mod should listen on (e.g., 12345)
+- `GABP_TOKEN` - Authentication token for GABS connections
 
-This method is **recommended** because it:
-- ✅ Works reliably in concurrent game launches
-- ✅ No file I/O required
+### Optional Environment Variables
+
+- `GABS_BRIDGE_PATH` - Path to bridge.json file (for debugging/fallback only)
+
+**Why Environment Variables?**
+- ✅ Works reliably in concurrent game launches (each gets unique port)
+- ✅ No file I/O required for essential configuration
 - ✅ No permission or path issues
-- ✅ Atomic - all info available instantly
+- ✅ Atomic - all info available instantly when game starts
 
-### Method 2: Bridge File (Backup)
+### Bridge File (Optional Fallback)
 
-GABS also creates a bridge configuration file:
-
-- `GABS_BRIDGE_PATH` - Full path to the bridge configuration file
-
-The bridge file contains the same information as a JSON structure:
+If present, `GABS_BRIDGE_PATH` points to a JSON file with the same information:
 ```json
 {
   "port": 12345,
   "token": "secret-auth-token", 
   "gameId": "your-game-id",
   "agentName": "gabs-v0.1.0",
-  "host": "127.0.0.1",
-  "mode": "local"
+  "host": "127.0.0.1"
 }
 ```
 
-**Note:** For concurrent launches of the same game, GABS creates unique bridge files to avoid conflicts.
+**Note:** The bridge file is primarily for debugging. Always prioritize environment variables.
 
 ## Step 2: Acting as GABP Server
 
-Your mod needs to start a server that listens on the port specified in the bridge config. GABS will connect to this server to control your game.
+Your mod acts as a GABP server and needs to:
 
-### Basic Server Setup
+1. **Start a TCP server** on `127.0.0.1:GABP_SERVER_PORT`
+2. **Wait for GABS to connect** (GABS acts as the client)
+3. **Authenticate** using `GABP_TOKEN`
+4. **Handle GABP protocol messages** (JSON-RPC format)
+5. **Respond to tool calls** and **send events**
 
-Here's what your mod needs to do:
+### Why Your Mod is the Server
 
-1. Start a TCP server on `host:port` from the bridge config
-2. Use the `token` for authentication
-3. Handle GABP protocol messages (JSON-RPC format)
-4. Respond to tool calls and send events
+- **Port Management**: GABS knows which ports are available and assigns unique ones
+- **Concurrency**: Multiple game instances can run with different ports
+- **Local Only**: Communication is always localhost (127.0.0.1) 
+- **Lifecycle**: GABS launches your game, then connects when mod is ready
 
 ## Step 3: Exposing Your Features
 
@@ -124,27 +143,24 @@ public class GABPMod : Mod
     
     private BridgeConfig ReadBridgeConfig()
     {
-        // Method 1: Use environment variables directly (recommended)
-        var host = Environment.GetEnvironmentVariable("GABS_HOST");
-        var portStr = Environment.GetEnvironmentVariable("GABS_PORT");
-        var token = Environment.GetEnvironmentVariable("GABS_TOKEN");
-        var mode = Environment.GetEnvironmentVariable("GABS_MODE");
+        // Method 1: Use environment variables (recommended)
         var gameId = Environment.GetEnvironmentVariable("GABS_GAME_ID");
+        var portStr = Environment.GetEnvironmentVariable("GABP_SERVER_PORT");
+        var token = Environment.GetEnvironmentVariable("GABP_TOKEN");
         
-        if (!string.IsNullOrEmpty(host) && !string.IsNullOrEmpty(portStr) && 
-            !string.IsNullOrEmpty(token) && int.TryParse(portStr, out int port))
+        if (!string.IsNullOrEmpty(portStr) && !string.IsNullOrEmpty(token) && 
+            int.TryParse(portStr, out int port))
         {
             return new BridgeConfig
             {
-                Host = host,
-                Port = port,
-                Token = token,
-                Mode = mode ?? "local",
+                Host = "127.0.0.1", // Always localhost for GABP
+                Port = port,        // Port to listen on as GABP server
+                Token = token,      // Token for authenticating GABS connections
                 GameId = gameId ?? "unknown"
             };
         }
         
-        // Method 2: Use bridge file path (fallback)
+        // Method 2: Use bridge file path (fallback for debugging)
         var bridgePath = Environment.GetEnvironmentVariable("GABS_BRIDGE_PATH");
         if (!string.IsNullOrEmpty(bridgePath) && File.Exists(bridgePath))
         {
@@ -152,7 +168,7 @@ public class GABPMod : Mod
             return JsonConvert.DeserializeObject<BridgeConfig>(json);
         }
         
-        // Method 3: Construct path from game ID (legacy support)
+        // Legacy fallback methods for backwards compatibility
         if (!string.IsNullOrEmpty(gameId))
         {
             var homeDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -164,15 +180,7 @@ public class GABPMod : Mod
             }
         }
         
-        // Method 4: Legacy behavior (for backwards compatibility)
-        var legacyPath = Path.Combine(Application.dataPath, "bridge.json");
-        if (File.Exists(legacyPath))
-        {
-            var json = File.ReadAllText(legacyPath);
-            return JsonConvert.DeserializeObject<BridgeConfig>(json);
-        }
-        
-        throw new Exception("Bridge config not found. Ensure GABS is running and game was started via GABS.");
+        throw new Exception("GABP server config not found. Ensure GABS is running and game was started via GABS.");
     }
     
     private object GetPlayerInventory(object args)
@@ -205,12 +213,10 @@ public class GABPMod : Mod
 
 public class BridgeConfig
 {
-    public int Port { get; set; }
-    public string Token { get; set; }
-    public string GameId { get; set; }
-    public string AgentName { get; set; }
-    public string Host { get; set; }
-    public string Mode { get; set; }
+    public int Port { get; set; }      // Port to listen on as GABP server
+    public string Token { get; set; }  // Token for authenticating GABS connections
+    public string GameId { get; set; } // Game identifier
+    public string Host { get; set; }   // Always "127.0.0.1" for GABP
 }
 ```
 
@@ -246,21 +252,18 @@ public class GABPMod {
     }
     
     private BridgeConfig readBridgeConfig() throws IOException {
-        // Method 1: Use environment variables directly (recommended)
-        String host = System.getenv("GABS_HOST");
-        String portStr = System.getenv("GABS_PORT");
-        String token = System.getenv("GABS_TOKEN");
-        String mode = System.getenv("GABS_MODE");
+        // Method 1: Use environment variables (recommended)
         String gameId = System.getenv("GABS_GAME_ID");
+        String portStr = System.getenv("GABP_SERVER_PORT");
+        String token = System.getenv("GABP_TOKEN");
         
-        if (host != null && portStr != null && token != null) {
+        if (portStr != null && token != null) {
             try {
                 int port = Integer.parseInt(portStr);
                 BridgeConfig config = new BridgeConfig();
-                config.host = host;
-                config.port = port;
-                config.token = token;
-                config.mode = mode != null ? mode : "local";
+                config.host = "127.0.0.1"; // Always localhost for GABP
+                config.port = port;         // Port to listen on as GABP server
+                config.token = token;       // Token for authenticating GABS connections
                 config.gameId = gameId != null ? gameId : "unknown";
                 return config;
             } catch (NumberFormatException e) {
@@ -268,7 +271,7 @@ public class GABPMod {
             }
         }
         
-        // Method 2: Use bridge file path (fallback)
+        // Method 2: Use bridge file path (fallback for debugging)
         String bridgePath = System.getenv("GABS_BRIDGE_PATH");
         if (bridgePath != null && !bridgePath.isEmpty()) {
             Path path = Paths.get(bridgePath);
@@ -278,7 +281,7 @@ public class GABPMod {
             }
         }
         
-        // Method 3: Construct path from game ID (legacy support)
+        // Legacy fallback methods for backwards compatibility
         if (gameId != null && !gameId.isEmpty()) {
             String homeDir = System.getProperty("user.home");
             Path configPath = Paths.get(homeDir, ".gabs", gameId, "bridge.json");
@@ -288,14 +291,7 @@ public class GABPMod {
             }
         }
         
-        // Method 4: Legacy behavior (for backwards compatibility)
-        File legacyFile = new File("bridge.json");
-        if (legacyFile.exists()) {
-            String json = Files.readString(legacyFile.toPath());
-            return new Gson().fromJson(json, BridgeConfig.class);
-        }
-        
-        throw new IOException("Bridge config not found. Ensure GABS is running and game was started via GABS.");
+        throw new IOException("GABP server config not found. Ensure GABS is running and game was started via GABS.");
     }
     
     private Object getInventory(Object args) {
@@ -353,34 +349,31 @@ class GABPMod:
         print(f"GABP server started on {config['host']}:{config['port']}")
         
     def read_bridge_config(self):
-        # Method 1: Use environment variables directly (recommended)
-        host = os.environ.get('GABS_HOST')
-        port_str = os.environ.get('GABS_PORT')
-        token = os.environ.get('GABS_TOKEN')
-        mode = os.environ.get('GABS_MODE')
+        # Method 1: Use environment variables (recommended)
         game_id = os.environ.get('GABS_GAME_ID')
+        port_str = os.environ.get('GABP_SERVER_PORT')
+        token = os.environ.get('GABP_TOKEN')
         
-        if host and port_str and token:
+        if port_str and token:
             try:
                 port = int(port_str)
                 return {
-                    'host': host,
-                    'port': port,
-                    'token': token,
-                    'mode': mode or 'local',
+                    'host': '127.0.0.1',  # Always localhost for GABP
+                    'port': port,         # Port to listen on as GABP server
+                    'token': token,       # Token for authenticating GABS connections
                     'gameId': game_id or 'unknown'
                 }
             except ValueError:
                 # Fall through to file-based methods
                 pass
         
-        # Method 2: Use bridge file path (fallback)
+        # Method 2: Use bridge file path (fallback for debugging)
         bridge_path = os.environ.get('GABS_BRIDGE_PATH')
         if bridge_path and os.path.exists(bridge_path):
             with open(bridge_path, 'r') as f:
                 return json.load(f)
         
-        # Method 3: Construct path from game ID (legacy support)
+        # Legacy fallback methods for backwards compatibility
         if game_id:
             home_dir = Path.home()
             config_path = home_dir / '.gabs' / game_id / 'bridge.json'
@@ -388,13 +381,7 @@ class GABPMod:
                 with open(config_path, 'r') as f:
                     return json.load(f)
         
-        # Method 4: Legacy behavior (for backwards compatibility)
-        legacy_path = Path('bridge.json')
-        if legacy_path.exists():
-            with open(legacy_path, 'r') as f:
-                return json.load(f)
-        
-        raise FileNotFoundError("Bridge config not found. Ensure GABS is running and game was started via GABS.")
+        raise FileNotFoundError("GABP server config not found. Ensure GABS is running and game was started via GABS.")
             
     def get_inventory(self, args):
         """Return current player inventory"""
@@ -473,12 +460,17 @@ GABP uses JSON-RPC 2.0 over TCP. Here are the main message types:
 
 ### Environment Variables Set by GABS
 
-When GABS starts your game, it sets these environment variables:
+When GABS starts your game, it sets these environment variables for GABP server configuration:
 
 - `GABS_GAME_ID`: The game ID used by GABS (e.g., "minecraft", "rimworld")
-- `GABS_BRIDGE_PATH`: Full path to the bridge.json file (e.g., "/home/user/.gabs/minecraft/bridge.json")
+- `GABP_SERVER_PORT`: Port number your mod should listen on as GABP server
+- `GABP_TOKEN`: Authentication token for validating GABS connections
+- `GABS_BRIDGE_PATH`: Path to bridge.json file (for debugging/compatibility only)
 
-Your mod should use these to locate the bridge configuration instead of assuming it's in the working directory.
+**Key Points:**
+- Your mod listens on `127.0.0.1:GABP_SERVER_PORT` 
+- GABS connects to your mod as a GABP client
+- Use `GABP_TOKEN` to authenticate incoming connections from GABS
 
 ## Common Patterns
 

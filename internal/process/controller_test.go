@@ -103,15 +103,11 @@ func TestEnvironmentVariables(t *testing.T) {
 	// The environment variables that would be set are:
 	// GABS_GAME_ID=minecraft
 	// GABS_BRIDGE_PATH=<bridgePath>
-	// GABS_HOST=127.0.0.1
-	// GABS_PORT=12345
-	// GABS_TOKEN=test-token-1234567890abcdef
-	// GABS_MODE=local
+	// GABP_SERVER_PORT=12345
+	// GABP_TOKEN=test-token-1234567890abcdef
 	
 	t.Logf("GABS_GAME_ID would be set to: %s", expectedGameId)
 	t.Logf("GABS_BRIDGE_PATH would be set to: %s", bridgePath)
-	t.Logf("GABS_HOST would be set to: %s", controller.bridgeInfo.Host)
-	t.Logf("GABS_PORT would be set to: %d", controller.bridgeInfo.Port)
-	t.Logf("GABS_TOKEN would be set to: %s", controller.bridgeInfo.Token)
-	t.Logf("GABS_MODE would be set to: %s", controller.bridgeInfo.Mode)
+	t.Logf("GABP_SERVER_PORT would be set to: %d", controller.bridgeInfo.Port)
+	t.Logf("GABP_TOKEN would be set to: %s", controller.bridgeInfo.Token)
 }
