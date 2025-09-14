@@ -210,6 +210,7 @@ Game mods should:
 
 2. **"failed to read bridge.json"** 
    - Ensure game mod has started and is GABP-compliant
+   - Check that mod is reading from `~/.gabs/{gameId}/bridge.json` or using `GABS_BRIDGE_PATH` environment variable
    - Check file permissions on config directory
    - Verify gameId matches between GABS and mod
 
@@ -236,7 +237,7 @@ Game mods should:
 
 1. **Read bridge.json on mod startup:**
    ```csharp
-   var config = ReadBridgeConfig(); // Read from standard GAB config location
+   var config = ReadBridgeConfig(); // Read from GABS_BRIDGE_PATH env var or ~/.gabs/{gameId}/bridge.json
    var server = new GABPServer(config.Host, config.Port, config.Token);
    ```
 

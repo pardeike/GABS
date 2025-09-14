@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -76,6 +77,12 @@ func (c *Controller) Start() error {
 	if c.spec.WorkingDir != "" {
 		c.cmd.Dir = c.spec.WorkingDir
 	}
+	
+	// Set environment variables to help mods find the bridge file
+	c.cmd.Env = append(os.Environ(),
+		fmt.Sprintf("GABS_GAME_ID=%s", c.spec.GameId),
+		fmt.Sprintf("GABS_BRIDGE_PATH=%s", c.getBridgePath()),
+	)
 
 	// For Steam/Epic launchers, we need different handling since the launcher
 	// process exits quickly but the game continues running independently
@@ -456,4 +463,14 @@ func terminateProcess(pid int, grace time.Duration) error {
 
 		return nil
 	}
+}
+
+// getBridgePath returns the path to the bridge.json file for this game
+func (c *Controller) getBridgePath() string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		// Fallback to relative path if we can't get home directory
+		return filepath.Join(".gabs", c.spec.GameId, "bridge.json")
+	}
+	return filepath.Join(homeDir, ".gabs", c.spec.GameId, "bridge.json")
 }

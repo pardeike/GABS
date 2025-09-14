@@ -16,7 +16,12 @@ To work with GABS, your mod needs to:
 
 ## Step 1: Reading Bridge Config
 
-When GABS starts your game, it creates a file called `bridge.json` in your game's working directory. Your mod should read this file to know how to connect.
+When GABS starts your game, it creates a file called `bridge.json` in the GABS configuration directory (`~/.gabs/{gameId}/bridge.json`) and sets environment variables to help your mod find it. Your mod should read this file to know how to connect.
+
+The bridge file location can be discovered in two ways:
+
+1. **Environment Variable (Recommended)**: Read the `GABS_BRIDGE_PATH` environment variable
+2. **Environment + Home Directory**: Use `GABS_GAME_ID` environment variable and construct the path as `~/.gabs/{GABS_GAME_ID}/bridge.json`
 
 The config looks like this:
 ```json
@@ -100,9 +105,33 @@ public class GABPMod : Mod
     
     private BridgeConfig ReadBridgeConfig()
     {
-        var configPath = Path.Combine(Application.dataPath, "bridge.json");
-        var json = File.ReadAllText(configPath);
-        return JsonConvert.DeserializeObject<BridgeConfig>(json);
+        // Method 1: Use environment variable (recommended)
+        var bridgePath = Environment.GetEnvironmentVariable("GABS_BRIDGE_PATH");
+        if (!string.IsNullOrEmpty(bridgePath))
+        {
+            var json = File.ReadAllText(bridgePath);
+            return JsonConvert.DeserializeObject<BridgeConfig>(json);
+        }
+        
+        // Method 2: Construct path from game ID
+        var gameId = Environment.GetEnvironmentVariable("GABS_GAME_ID");
+        if (!string.IsNullOrEmpty(gameId))
+        {
+            var homeDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            var configPath = Path.Combine(homeDir, ".gabs", gameId, "bridge.json");
+            var json = File.ReadAllText(configPath);
+            return JsonConvert.DeserializeObject<BridgeConfig>(json);
+        }
+        
+        // Fallback: Legacy behavior (for backwards compatibility)
+        var legacyPath = Path.Combine(Application.dataPath, "bridge.json");
+        if (File.Exists(legacyPath))
+        {
+            var json = File.ReadAllText(legacyPath);
+            return JsonConvert.DeserializeObject<BridgeConfig>(json);
+        }
+        
+        throw new Exception("Bridge config not found. Ensure GABS is running and game was started via GABS.");
     }
     
     private object GetPlayerInventory(object args)
@@ -176,9 +205,30 @@ public class GABPMod {
     }
     
     private BridgeConfig readBridgeConfig() throws IOException {
-        File configFile = new File("bridge.json");
-        String json = Files.readString(configFile.toPath());
-        return new Gson().fromJson(json, BridgeConfig.class);
+        // Method 1: Use environment variable (recommended)
+        String bridgePath = System.getenv("GABS_BRIDGE_PATH");
+        if (bridgePath != null && !bridgePath.isEmpty()) {
+            String json = Files.readString(Paths.get(bridgePath));
+            return new Gson().fromJson(json, BridgeConfig.class);
+        }
+        
+        // Method 2: Construct path from game ID
+        String gameId = System.getenv("GABS_GAME_ID");
+        if (gameId != null && !gameId.isEmpty()) {
+            String homeDir = System.getProperty("user.home");
+            Path configPath = Paths.get(homeDir, ".gabs", gameId, "bridge.json");
+            String json = Files.readString(configPath);
+            return new Gson().fromJson(json, BridgeConfig.class);
+        }
+        
+        // Fallback: Legacy behavior (for backwards compatibility)
+        File legacyFile = new File("bridge.json");
+        if (legacyFile.exists()) {
+            String json = Files.readString(legacyFile.toPath());
+            return new Gson().fromJson(json, BridgeConfig.class);
+        }
+        
+        throw new IOException("Bridge config not found. Ensure GABS is running and game was started via GABS.");
     }
     
     private Object getInventory(Object args) {
@@ -211,6 +261,7 @@ public class GABPMod {
 ### Python (Game Scripting)
 ```python
 import json
+import os
 import socket
 import threading
 from pathlib import Path
@@ -235,9 +286,27 @@ class GABPMod:
         print(f"GABP server started on {config['host']}:{config['port']}")
         
     def read_bridge_config(self):
-        config_path = Path('bridge.json')
-        with open(config_path, 'r') as f:
-            return json.load(f)
+        # Method 1: Use environment variable (recommended)
+        bridge_path = os.environ.get('GABS_BRIDGE_PATH')
+        if bridge_path:
+            with open(bridge_path, 'r') as f:
+                return json.load(f)
+        
+        # Method 2: Construct path from game ID
+        game_id = os.environ.get('GABS_GAME_ID')
+        if game_id:
+            home_dir = Path.home()
+            config_path = home_dir / '.gabs' / game_id / 'bridge.json'
+            with open(config_path, 'r') as f:
+                return json.load(f)
+        
+        # Fallback: Legacy behavior (for backwards compatibility)
+        legacy_path = Path('bridge.json')
+        if legacy_path.exists():
+            with open(legacy_path, 'r') as f:
+                return json.load(f)
+        
+        raise FileNotFoundError("Bridge config not found. Ensure GABS is running and game was started via GABS.")
             
     def get_inventory(self, args):
         """Return current player inventory"""
@@ -308,11 +377,20 @@ GABP uses JSON-RPC 2.0 over TCP. Here are the main message types:
 
 ## Testing Your Implementation
 
-1. **Test config reading**: Make sure your mod can read `bridge.json`
+1. **Test config reading**: Make sure your mod can read the bridge config from the correct location using the environment variables
 2. **Test server startup**: Verify your mod starts a server on the right port
 3. **Test with GABS**: Run `gabs games start your-game` and see if GABS can connect
 4. **Test tools**: Use AI to call your tools and verify they work
 5. **Test events**: Make sure events are sent when things happen in your game
+
+### Environment Variables Set by GABS
+
+When GABS starts your game, it sets these environment variables:
+
+- `GABS_GAME_ID`: The game ID used by GABS (e.g., "minecraft", "rimworld")
+- `GABS_BRIDGE_PATH`: Full path to the bridge.json file (e.g., "/home/user/.gabs/minecraft/bridge.json")
+
+Your mod should use these to locate the bridge configuration instead of assuming it's in the working directory.
 
 ## Common Patterns
 
