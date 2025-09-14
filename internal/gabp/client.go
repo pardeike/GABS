@@ -3,6 +3,8 @@ package gabp
 import (
 	"encoding/json"
 	"fmt"
+	"math"
+	"math/rand"
 	"net"
 	"runtime"
 	"sync"
@@ -100,17 +102,46 @@ func (c *Client) Connect(addr string, token string, backoffMin, backoffMax time.
 	var conn net.Conn
 	var err error
 
-	// TODO: Implement proper exponential backoff with jitter
-	// Should respect backoffMin and backoffMax parameters and use exponential growth
-	// with randomized jitter to avoid thundering herd problems when multiple games
-	// try to connect simultaneously. Current implementation uses fixed backoffMin delay.
+	// Implement proper exponential backoff with jitter
+	// Respects backoffMin and backoffMax parameters with exponential growth
+	// and randomized jitter to avoid thundering herd problems when multiple games
+	// try to connect simultaneously.
 	for attempts := 0; attempts < 5; attempts++ {
 		conn, err = net.Dial("tcp", addr)
 		if err == nil {
 			break
 		}
 		c.log.Warnw("connection attempt failed", "attempt", attempts+1, "error", err)
-		time.Sleep(backoffMin)
+		
+		// Don't wait after the last attempt
+		if attempts == 4 {
+			break
+		}
+		
+		// Calculate exponential backoff: backoffMin * 2^attempts
+		multiplier := math.Pow(2, float64(attempts))
+		backoffDelay := time.Duration(float64(backoffMin) * multiplier)
+		
+		// Cap at backoffMax
+		if backoffDelay > backoffMax {
+			backoffDelay = backoffMax
+		}
+		
+		// Add jitter: ±25% randomization to prevent thundering herd
+		jitterRange := float64(backoffDelay) * 0.25
+		jitter := time.Duration(rand.Float64()*2*jitterRange - jitterRange)
+		finalDelay := backoffDelay + jitter
+		
+		// Ensure we never go below backoffMin or above backoffMax
+		if finalDelay < backoffMin {
+			finalDelay = backoffMin
+		}
+		if finalDelay > backoffMax {
+			finalDelay = backoffMax
+		}
+		
+		c.log.Debugw("backing off before retry", "attempt", attempts+1, "delay", finalDelay, "baseDelay", backoffDelay)
+		time.Sleep(finalDelay)
 	}
 
 	if err != nil {
