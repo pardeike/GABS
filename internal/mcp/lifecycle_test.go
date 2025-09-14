@@ -66,7 +66,7 @@ func TestApplicationLifecycleManagement(t *testing.T) {
 			Method:  "tools/call",
 			ID:      json.RawMessage(`"start-direct"`),
 			Params: map[string]interface{}{
-				"name": "games_start",
+				"name": "games.start",
 				"arguments": map[string]interface{}{
 					"gameId": "test-direct",
 				},
@@ -75,7 +75,7 @@ func TestApplicationLifecycleManagement(t *testing.T) {
 
 		response := server.HandleMessage(startMsg)
 		if response == nil {
-			t.Fatal("Expected response from games_start")
+			t.Fatal("Expected response from games.start")
 		}
 
 		respBytes, _ := json.Marshal(response)
@@ -92,7 +92,7 @@ func TestApplicationLifecycleManagement(t *testing.T) {
 			Method:  "tools/call",
 			ID:      json.RawMessage(`"status-direct"`),
 			Params: map[string]interface{}{
-				"name": "games_status",
+				"name": "games.status",
 				"arguments": map[string]interface{}{
 					"gameId": "test-direct",
 				},
@@ -131,7 +131,7 @@ func TestApplicationLifecycleManagement(t *testing.T) {
 			Method:  "tools/call",
 			ID:      json.RawMessage(`"start-steam-correct"`),
 			Params: map[string]interface{}{
-				"name": "games_start",
+				"name": "games.start",
 				"arguments": map[string]interface{}{
 					"gameId": "test-steam",
 				},
@@ -149,7 +149,7 @@ func TestApplicationLifecycleManagement(t *testing.T) {
 			Method:  "tools/call",
 			ID:      json.RawMessage(`"start-steam-target"`),
 			Params: map[string]interface{}{
-				"name": "games_start",
+				"name": "games.start",
 				"arguments": map[string]interface{}{
 					"gameId": "123456", // Using Steam App ID directly
 				},
@@ -172,7 +172,7 @@ func TestApplicationLifecycleManagement(t *testing.T) {
 			Method:  "tools/call",
 			ID:      json.RawMessage(`"status-steam"`),
 			Params: map[string]interface{}{
-				"name": "games_status",
+				"name": "games.status",
 				"arguments": map[string]interface{}{
 					"gameId": "123456", // Should resolve via target
 				},
@@ -198,7 +198,7 @@ func TestApplicationLifecycleManagement(t *testing.T) {
 			Method:  "tools/call",
 			ID:      json.RawMessage(`"start-for-bridge"`),
 			Params: map[string]interface{}{
-				"name": "games_start",
+				"name": "games.start",
 				"arguments": map[string]interface{}{
 					"gameId": "test-direct",
 				},

@@ -81,7 +81,7 @@ Content-Type: application/json
   "id": 1,
   "method": "tools/call",
   "params": {
-    "name": "games_list",
+    "name": "games.list",
     "arguments": {}
   }
 }
@@ -100,12 +100,12 @@ Returns server status and configured games.
 # List games
 curl -X POST http://localhost:8080/mcp \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"games_list","arguments":{}}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"games.list","arguments":{}}}'
 
 # Start a game
 curl -X POST http://localhost:8080/mcp \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"games_start","arguments":{"gameId":"minecraft"}}}'
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"games.start","arguments":{"gameId":"minecraft"}}}'
 ```
 
 #### Python Integration
@@ -137,13 +137,13 @@ class GABSClient:
         return response.json()
     
     def list_games(self):
-        return self.call_tool("games_list")
+        return self.call_tool("games.list")
     
     def start_game(self, game_id):
-        return self.call_tool("games_start", {"gameId": game_id})
+        return self.call_tool("games.start", {"gameId": game_id})
     
     def stop_game(self, game_id):
-        return self.call_tool("games_stop", {"gameId": game_id})
+        return self.call_tool("games.stop", {"gameId": game_id})
 
 # Usage
 client = GABSClient()
@@ -185,19 +185,19 @@ class GABSClient {
     }
     
     async listGames() {
-        return await this.callTool('games_list');
+        return await this.callTool('games.list');
     }
     
     async startGame(gameId) {
-        return await this.callTool('games_start', { gameId });
+        return await this.callTool('games.start', { gameId });
     }
     
     async stopGame(gameId) {
-        return await this.callTool('games_stop', { gameId });
+        return await this.callTool('games.stop', { gameId });
     }
     
     async getGameStatus(gameId) {
-        return await this.callTool('games_status', { gameId });
+        return await this.callTool('games.status', { gameId });
     }
 }
 
@@ -324,11 +324,11 @@ sleep 5
 # Start games via API
 curl -X POST http://localhost:8080/mcp \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"games_start","arguments":{"gameId":"minecraft"}}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"games.start","arguments":{"gameId":"minecraft"}}}'
 
 curl -X POST http://localhost:8080/mcp \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"games_start","arguments":{"gameId":"rimworld"}}}'
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"games.start","arguments":{"gameId":"rimworld"}}}'
 
 echo "Game servers started. GABS PID: $GABS_PID"
 ```
@@ -435,7 +435,7 @@ jobs:
           # Test API endpoints
           curl -X POST http://localhost:8080/mcp \
             -H "Content-Type: application/json" \
-            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"games_list","arguments":{}}}'
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"games.list","arguments":{}}}'
 ```
 
 This advanced guide covers the more complex features of GABS. For basic usage, start with the main README and other guides first.

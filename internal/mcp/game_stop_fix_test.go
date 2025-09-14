@@ -66,7 +66,7 @@ func TestGameStopFix(t *testing.T) {
 			Method:  "tools/call",
 			ID:      json.RawMessage(`"start-direct"`),
 			Params: map[string]interface{}{
-				"name": "games_start",
+				"name": "games.start",
 				"arguments": map[string]interface{}{
 					"gameId": "direct-game",
 				},
@@ -75,7 +75,7 @@ func TestGameStopFix(t *testing.T) {
 
 		response := server.HandleMessage(startMsg)
 		if response == nil {
-			t.Fatal("Expected response from games_start")
+			t.Fatal("Expected response from games.start")
 		}
 
 		// Stop direct game
@@ -84,7 +84,7 @@ func TestGameStopFix(t *testing.T) {
 			Method:  "tools/call",
 			ID:      json.RawMessage(`"stop-direct"`),
 			Params: map[string]interface{}{
-				"name": "games_stop",
+				"name": "games.stop",
 				"arguments": map[string]interface{}{
 					"gameId": "direct-game",
 				},
@@ -111,7 +111,7 @@ func TestGameStopFix(t *testing.T) {
 			Method:  "tools/call",
 			ID:      json.RawMessage(`"start-steam"`),
 			Params: map[string]interface{}{
-				"name": "games_start",
+				"name": "games.start",
 				"arguments": map[string]interface{}{
 					"gameId": "steam-game",
 				},
@@ -120,7 +120,7 @@ func TestGameStopFix(t *testing.T) {
 
 		response := server.HandleMessage(startMsg)
 		if response == nil {
-			t.Fatal("Expected response from games_start")
+			t.Fatal("Expected response from games.start")
 		}
 
 		// Stop Steam game - this is where the fix applies
@@ -129,7 +129,7 @@ func TestGameStopFix(t *testing.T) {
 			Method:  "tools/call",
 			ID:      json.RawMessage(`"stop-steam"`),
 			Params: map[string]interface{}{
-				"name": "games_stop",
+				"name": "games.stop",
 				"arguments": map[string]interface{}{
 					"gameId": "steam-game",
 				},
@@ -169,7 +169,7 @@ func TestGameStopFix(t *testing.T) {
 			Method:  "tools/call",
 			ID:      json.RawMessage(`"start-steam-status"`),
 			Params: map[string]interface{}{
-				"name": "games_start",
+				"name": "games.start",
 				"arguments": map[string]interface{}{
 					"gameId": "steam-game",
 				},
@@ -184,7 +184,7 @@ func TestGameStopFix(t *testing.T) {
 			Method:  "tools/call",
 			ID:      json.RawMessage(`"status-steam"`),
 			Params: map[string]interface{}{
-				"name": "games_status",
+				"name": "games.status",
 				"arguments": map[string]interface{}{
 					"gameId": "steam-game",
 				},
@@ -219,7 +219,7 @@ func TestGameStopFix(t *testing.T) {
 			Method:  "tools/call",
 			ID:      json.RawMessage(`"list-games"`),
 			Params: map[string]interface{}{
-				"name": "games_list",
+				"name": "games.list",
 				"arguments": map[string]interface{}{},
 			},
 		}

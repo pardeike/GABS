@@ -10,11 +10,11 @@ GABS works as an MCP (Model Context Protocol) server. This means AI assistants c
 
 Once GABS is running, AI can use these tools:
 
-- **`games_list`** - Show all configured games and their status
-- **`games_start`** - Start a game: `{"gameId": "minecraft"}`
-- **`games_stop`** - Stop a game gracefully: `{"gameId": "minecraft"}`  
-- **`games_kill`** - Force quit a game: `{"gameId": "minecraft"}`
-- **`games_status`** - Check if games are running: `{"gameId": "minecraft"}` or all games
+- **`games.list`** - Show all configured games and their status
+- **`games.start`** - Start a game: `{"gameId": "minecraft"}`
+- **`games.stop`** - Stop a game gracefully: `{"gameId": "minecraft"}`  
+- **`games.kill`** - Force quit a game: `{"gameId": "minecraft"}`
+- **`games.status`** - Check if games are running: `{"gameId": "minecraft"}` or all games
 
 **Pro tip**: You can use either the game ID (`"rimworld"`) or the launch target (`"294100"` for Steam) in any tool.
 
@@ -61,15 +61,15 @@ import mcp_client
 client = mcp_client.connect_stdio(["/path/to/gabs", "server"])
 
 # List all games
-games = client.call_tool("games_list", {})
+games = client.call_tool("games.list", {})
 print("Available games:", games)
 
 # Start a specific game
-result = client.call_tool("games_start", {"gameId": "minecraft"})
+result = client.call_tool("games.start", {"gameId": "minecraft"})
 print("Start result:", result)
 
 # Check status
-status = client.call_tool("games_status", {"gameId": "minecraft"})
+status = client.call_tool("games.status", {"gameId": "minecraft"})
 print("Game status:", status)
 ```
 
@@ -151,7 +151,7 @@ curl -X POST http://localhost:8080/mcp \
     "id": 1, 
     "method": "tools/call", 
     "params": {
-      "name": "games_list", 
+      "name": "games.list", 
       "arguments": {}
     }
   }'

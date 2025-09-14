@@ -90,29 +90,29 @@ Add GABS to your AI's MCP settings:
 Once connected, your AI can use these tools:
 
 ### Core Game Management Tools
-- **`games_list`** - Show all configured games and their status
-- **`games_start`** - Start a game: `{"gameId": "minecraft"}`
-- **`games_stop`** - Stop a game gracefully: `{"gameId": "minecraft"}`  
-- **`games_kill`** - Force stop a game: `{"gameId": "minecraft"}`
-- **`games_status`** - Check game status: `{"gameId": "minecraft"}`
-- **`games_tools`** - List game-specific tools from connected mods
+- **`games.list`** - Show all configured games and their status
+- **`games.start`** - Start a game: `{"gameId": "minecraft"}`
+- **`games.stop`** - Stop a game gracefully: `{"gameId": "minecraft"}`  
+- **`games.kill`** - Force stop a game: `{"gameId": "minecraft"}`
+- **`games.status`** - Check game status: `{"gameId": "minecraft"}`
+- **`games.tools`** - List game-specific tools from connected mods
 
 ### Game-Specific Tools from Mods
 
 **The real power comes from GABP-compliant mods that expose their own tools!**
 
 When your games have GABP mods installed, they add game-specific tools like:
-- **`minecraft_inventory_get`** - Get player inventory in Minecraft
-- **`minecraft_world_place_block`** - Place blocks in Minecraft world  
-- **`rimworld_inventory_get`** - Get colonist inventory in RimWorld
-- **`rimworld_crafting_build`** - Build items in RimWorld
+- **`minecraft.inventory.get`** - Get player inventory in Minecraft
+- **`minecraft.world.place_block`** - Place blocks in Minecraft world  
+- **`rimworld.inventory.get`** - Get colonist inventory in RimWorld
+- **`rimworld.crafting.build`** - Build items in RimWorld
 
-**Game ID Prefixing**: To avoid conflicts when multiple games are running, mod tools are automatically prefixed with the game ID (e.g., `minecraft_`, `rimworld_`). This lets AI clearly specify which game to control.
+**Game ID Prefixing**: To avoid conflicts when multiple games are running, mod tools are automatically prefixed with the game ID (e.g., `minecraft.`, `rimworld.`). This lets AI clearly specify which game to control.
 
-**Discovering Tools**: Use `games_tools` to see what tools each running game provides:
+**Discovering Tools**: Use `games.tools` to see what tools each running game provides:
 ```
 AI: "List available tools for Minecraft"
-GABS: Shows minecraft_inventory_get, minecraft_world_place_block, etc.
+GABS: Shows minecraft.inventory.get, minecraft.world.place_block, etc.
 ```
 
 **Pro tip**: You can use game names (`"minecraft"`) or launch IDs (`"294100"` for Steam) interchangeably.

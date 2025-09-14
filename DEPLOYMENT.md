@@ -40,9 +40,9 @@ gabs server --http localhost:8080
 
 ### 3. AI Control
 AI uses MCP tools to control games:
-- `games_start {"gameId": "minecraft"}` - Start game and create GABP bridge
-- `games_status {"gameId": "minecraft"}` - Check game status
-- `games_stop {"gameId": "minecraft"}` - Stop game gracefully
+- `games.start {"gameId": "minecraft"}` - Start game and create GABP bridge
+- `games.status {"gameId": "minecraft"}` - Check game status
+- `games.stop {"gameId": "minecraft"}` - Stop game gracefully
 
 ## Configuration Modes
 

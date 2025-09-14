@@ -58,7 +58,7 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 			Method:  "tools/call",
 			ID:      json.RawMessage(`"test-list"`),
 			Params: map[string]interface{}{
-				"name":      "games_list",
+				"name":      "games.list",
 				"arguments": map[string]interface{}{},
 			},
 		}
@@ -90,7 +90,7 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 			Method:  "tools/call",
 			ID:      json.RawMessage(`"test-start-correct"`),
 			Params: map[string]interface{}{
-				"name": "games_start",
+				"name": "games.start",
 				"arguments": map[string]interface{}{
 					"gameId": "rimworld",
 				},
@@ -120,7 +120,7 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 			Method:  "tools/call",
 			ID:      json.RawMessage(`"test-start-wrong"`),
 			Params: map[string]interface{}{
-				"name": "games_start",
+				"name": "games.start",
 				"arguments": map[string]interface{}{
 					"gameId": "294100", // AI tries this after seeing it in games.list
 				},
@@ -234,7 +234,7 @@ func TestGameIdResolution(t *testing.T) {
 				Method:  "tools/call",
 				ID:      json.RawMessage(`"test-resolution"`),
 				Params: map[string]interface{}{
-					"name": "games_status",
+					"name": "games.status",
 					"arguments": map[string]interface{}{
 						"gameId": tc.gameIdInput,
 					},
