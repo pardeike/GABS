@@ -84,6 +84,48 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 			t.Error("Output should not contain launch mode details - should be simplified")
 		}
 	})
+
+	// Test games.show - detailed output with validation status
+	t.Run("GamesShow", func(t *testing.T) {
+		showMsg := &Message{
+			JSONRPC: "2.0",
+			Method:  "tools/call",
+			ID:      json.RawMessage(`"test-show"`),
+			Params: map[string]interface{}{
+				"name": "games.show",
+				"arguments": map[string]interface{}{
+					"gameId": "rimworld",
+				},
+			},
+		}
+		
+		response := server.HandleMessage(showMsg)
+		if response == nil {
+			t.Fatal("Expected response from games.show")
+		}
+		
+		// Check that response contains detailed game information with validation indicators
+		respBytes, _ := json.Marshal(response)
+		responseStr := string(respBytes)
+		t.Logf("games.show output: %s", responseStr)
+		
+		// The output should contain the game ID and all configuration details
+		if !strings.Contains(responseStr, "rimworld") {
+			t.Error("Expected to see game ID 'rimworld' in output")
+		}
+		// Should contain validation warnings for games missing stopProcessName
+		if !strings.Contains(responseStr, "Missing stopProcessName") {
+			t.Error("Expected validation warning for SteamAppId game without stopProcessName")
+		}
+		// Should show launch mode to provide context for the validation
+		if !strings.Contains(responseStr, "SteamAppId") {
+			t.Error("Expected launch mode to be shown for context")
+		}
+		// Should show Steam App ID in detailed view
+		if !strings.Contains(responseStr, "294100") {
+			t.Error("Expected Steam App ID '294100' to be shown in detailed view")
+		}
+	})
 	
 	// Test games.start with correct ID (should work)
 	t.Run("GamesStartWithCorrectId", func(t *testing.T) {

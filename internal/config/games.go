@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // GameConfig represents a single game configuration
@@ -108,12 +109,54 @@ func (c *GamesConfig) GetGame(gameID string) (*GameConfig, bool) {
 	return &game, exists
 }
 
-// AddGame adds or updates a game configuration
-func (c *GamesConfig) AddGame(game GameConfig) {
+// AddGame adds or updates a game configuration after validation
+func (c *GamesConfig) AddGame(game GameConfig) error {
+	if err := game.Validate(); err != nil {
+		return err
+	}
 	if c.Games == nil {
 		c.Games = make(map[string]GameConfig)
 	}
 	c.Games[game.ID] = game
+	return nil
+}
+
+// Validate checks if the game configuration is valid
+func (g *GameConfig) Validate() error {
+	if g.ID == "" {
+		return fmt.Errorf("game ID is required")
+	}
+	if g.Name == "" {
+		return fmt.Errorf("game name is required")
+	}
+	if g.LaunchMode == "" {
+		return fmt.Errorf("launch mode is required")
+	}
+	if g.Target == "" {
+		return fmt.Errorf("target is required")
+	}
+
+	// Validate launch mode
+	validModes := []string{"DirectPath", "SteamAppId", "EpicAppId", "CustomCommand"}
+	isValidMode := false
+	for _, mode := range validModes {
+		if g.LaunchMode == mode {
+			isValidMode = true
+			break
+		}
+	}
+	if !isValidMode {
+		return fmt.Errorf("invalid launch mode '%s', must be one of: %s", g.LaunchMode, strings.Join(validModes, ", "))
+	}
+
+	// For launcher-based games (Steam/Epic), require stopProcessName for proper game control
+	if g.LaunchMode == "SteamAppId" || g.LaunchMode == "EpicAppId" {
+		if g.StopProcessName == "" {
+			return fmt.Errorf("stopProcessName is required for %s games to enable proper game termination. Without it, GABS can only stop the launcher process, not the actual game", g.LaunchMode)
+		}
+	}
+
+	return nil
 }
 
 // RemoveGame removes a game configuration

@@ -139,25 +139,21 @@ func TestGameStopFix(t *testing.T) {
 		responseStr := string(respBytes)
 		t.Logf("Steam game stop result: %s", responseStr)
 
-		// Should not be marked as error but should show warning
-		if strings.Contains(responseStr, "isError") && strings.Contains(responseStr, "true") {
-			t.Error("Steam game stop should not be marked as error with fix")
+		// Should be marked as error because stopProcessName is missing
+		if !strings.Contains(responseStr, "isError") || !strings.Contains(responseStr, "true") {
+			t.Error("Steam game stop should be marked as error when stopProcessName is missing")
 		}
 
-		// Should contain the warning about limitation
-		if !strings.Contains(responseStr, "launcher process stopped") {
-			t.Error("Should warn that only launcher process was stopped")
-		}
-
-		if !strings.Contains(responseStr, "may still be running independently") {
-			t.Error("Should warn that actual game may still be running")
+		// Should contain the warning about missing configuration
+		if !strings.Contains(responseStr, "Configure 'stopProcessName'") {
+			t.Error("Should warn about missing stopProcessName configuration")
 		}
 
 		if !strings.Contains(responseStr, "SteamAppId") {
 			t.Error("Should mention SteamAppId specifically")
 		}
 
-		t.Log("✓ Steam game stop shows proper warning about limitations")
+		t.Log("✓ Steam game stop shows proper warning about missing configuration")
 	})
 
 	t.Run("SteamGameStatusIsInformative", func(t *testing.T) {
@@ -227,6 +223,11 @@ func TestGameStopFix(t *testing.T) {
 		responseStr := string(respBytes)
 		t.Logf("Games list: %s", responseStr)
 
+		// Should NOT mention validation details - that's now in games.show
+		if strings.Contains(responseStr, "Missing stopProcessName") {
+			t.Error("games.list should be simplified - validation warnings should be in games.show")
+		}
+		
 		// Should NOT contain limitation warnings - that's for games.status
 		if strings.Contains(responseStr, "cannot directly stop SteamAppId games") {
 			t.Error("games.list should be simplified and not show stop limitations")
@@ -235,7 +236,7 @@ func TestGameStopFix(t *testing.T) {
 			t.Error("games.list should not contain verbose notes - should be simplified")
 		}
 		
-		// Should contain game IDs
+		// Should contain game IDs only
 		if !strings.Contains(responseStr, "direct-game") {
 			t.Error("Expected to see game ID 'direct-game' in simplified output")
 		}
@@ -244,6 +245,41 @@ func TestGameStopFix(t *testing.T) {
 		}
 
 		t.Log("✓ Games list is now simplified to just game IDs")
+	})
+
+	t.Run("GamesShowValidation", func(t *testing.T) {
+		// Show details for Steam game to check validation
+		showMsg := &Message{
+			JSONRPC: "2.0",
+			Method:  "tools/call",
+			ID:      json.RawMessage(`"show-steam-game"`),
+			Params: map[string]interface{}{
+				"name": "games.show",
+				"arguments": map[string]interface{}{
+					"gameId": "steam-game",
+				},
+			},
+		}
+
+		response := server.HandleMessage(showMsg)
+		respBytes, _ := json.Marshal(response)
+		responseStr := string(respBytes)
+		t.Logf("Games show steam-game: %s", responseStr)
+
+		// Should mention missing stopProcessName for Steam games in detailed view
+		if !strings.Contains(responseStr, "Missing stopProcessName") {
+			t.Error("games.show should warn about SteamAppId stop limitations")
+		}
+
+		// Should show detailed configuration
+		if !strings.Contains(responseStr, "steam-game") {
+			t.Error("Expected to see game ID in detailed view")
+		}
+		if !strings.Contains(responseStr, "SteamAppId") {
+			t.Error("Expected to see launch mode in detailed view")
+		}
+
+		t.Log("✓ Games show provides detailed validation information")
 	})
 }
 
