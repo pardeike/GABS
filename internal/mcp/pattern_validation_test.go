@@ -9,15 +9,15 @@ import (
 
 // TestToolNamePatternCompliance verifies that all registered tool names comply with MCP pattern requirements
 func TestToolNamePatternCompliance(t *testing.T) {
-	// MCP tool name pattern: only allows letters, numbers, underscores, and hyphens
-	mcpPattern := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+	// MCP tool name pattern: allows letters, numbers, underscores, hyphens, and dots
+	mcpPattern := regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
 	logger := util.NewLogger("info")
 	server := NewServer(logger)
 
 	// Register built-in tools (simulates what happens during server startup)
 	server.RegisterTool(Tool{
-		Name:        "games_list",
+		Name:        "games.list",
 		Description: "Test tool",
 		InputSchema: map[string]interface{}{},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
@@ -25,7 +25,7 @@ func TestToolNamePatternCompliance(t *testing.T) {
 	})
 
 	server.RegisterTool(Tool{
-		Name:        "games_start", 
+		Name:        "games.start", 
 		Description: "Test tool",
 		InputSchema: map[string]interface{}{},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
@@ -33,7 +33,7 @@ func TestToolNamePatternCompliance(t *testing.T) {
 	})
 
 	server.RegisterTool(Tool{
-		Name:        "games_stop",
+		Name:        "games.stop",
 		Description: "Test tool", 
 		InputSchema: map[string]interface{}{},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
@@ -41,7 +41,7 @@ func TestToolNamePatternCompliance(t *testing.T) {
 	})
 
 	server.RegisterTool(Tool{
-		Name:        "games_kill",
+		Name:        "games.kill",
 		Description: "Test tool",
 		InputSchema: map[string]interface{}{},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
@@ -49,7 +49,7 @@ func TestToolNamePatternCompliance(t *testing.T) {
 	})
 
 	server.RegisterTool(Tool{
-		Name:        "games_status",
+		Name:        "games.status",
 		Description: "Test tool",
 		InputSchema: map[string]interface{}{},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
@@ -57,7 +57,7 @@ func TestToolNamePatternCompliance(t *testing.T) {
 	})
 
 	server.RegisterTool(Tool{
-		Name:        "games_tools",
+		Name:        "games.tools",
 		Description: "Test tool", 
 		InputSchema: map[string]interface{}{},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
@@ -66,12 +66,12 @@ func TestToolNamePatternCompliance(t *testing.T) {
 
 	// Register some game-specific tools (simulates what Mirror would register)
 	gameSpecificTools := []Tool{
-		{Name: "minecraft_inventory_get", Description: "Test tool"},
-		{Name: "minecraft_world_place_block", Description: "Test tool"},
-		{Name: "rimworld_inventory_get", Description: "Test tool"},
-		{Name: "rimworld_crafting_build", Description: "Test tool"},
-		{Name: "mymod_complex_tool_name_123", Description: "Test tool"},
-		{Name: "game-with-hyphens_tool-name", Description: "Test tool"},
+		{Name: "minecraft.inventory.get", Description: "Test tool"},
+		{Name: "minecraft.world.place_block", Description: "Test tool"},
+		{Name: "rimworld.inventory.get", Description: "Test tool"},
+		{Name: "rimworld.crafting.build", Description: "Test tool"},
+		{Name: "mymod.complex.tool.name.123", Description: "Test tool"},
+		{Name: "game-with-hyphens.tool-name", Description: "Test tool"},
 	}
 
 	for _, tool := range gameSpecificTools {
@@ -103,19 +103,19 @@ func TestInvalidToolNames(t *testing.T) {
 		expectedSanitized string
 	}{
 		{
-			name:           "DotsAndSlashes",
+			name:           "SlashesToDots",
 			originalName:   "inventory/get",
-			expectedSanitized: "inventory_get",
+			expectedSanitized: "inventory.get",
 		},
 		{
-			name:           "MultipleDotsAndSlashes", 
+			name:           "MultipleSlashesToDots", 
 			originalName:   "world/blocks/place",
-			expectedSanitized: "world_blocks_place",
+			expectedSanitized: "world.blocks.place",
 		},
 		{
 			name:           "MixedSeparators",
 			originalName:   "player.stats/get",
-			expectedSanitized: "player_stats_get",
+			expectedSanitized: "player.stats.get",
 		},
 	}
 
@@ -129,7 +129,7 @@ func TestInvalidToolNames(t *testing.T) {
 			}
 
 			// Verify the sanitized name is MCP compliant
-			mcpPattern := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+			mcpPattern := regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 			if !mcpPattern.MatchString(sanitized) {
 				t.Errorf("Sanitized name '%s' is still not MCP compliant", sanitized)
 			}
@@ -142,8 +142,8 @@ func TestInvalidToolNames(t *testing.T) {
 // Helper function to test the sanitization logic
 func sanitizeToolName(toolName string) string {
 	// This matches the logic in mirror.go
+	// Convert slashes to dots to follow reverse domain notation
 	result := toolName
-	result = regexp.MustCompile(`\.`).ReplaceAllString(result, "_")
-	result = regexp.MustCompile(`/`).ReplaceAllString(result, "_")
+	result = regexp.MustCompile(`/`).ReplaceAllString(result, ".")
 	return result
 }
