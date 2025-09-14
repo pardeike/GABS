@@ -137,14 +137,14 @@ GABS: Shows minecraft.inventory.get, minecraft.world.place_block, etc.
 
 ## Documentation
 
-- **[Configuration Guide](CONFIGURATION.md)** - Detailed setup for different game types and tool normalization
-- **[AI Integration Guide](INTEGRATION.md)** - Connect GABS to different AI tools and deployment scenarios  
-- **[Mod Development Guide](MOD_DEVELOPMENT.md)** - Add GABP support to your game mods
-- **[Advanced Usage Guide](ADVANCED_USAGE.md)** - Multiple instances, HTTP mode, scripting, and more
-- **[Deployment Guide](DEPLOYMENT.md)** - Production deployments and cloud setups
-- **[OpenAI Tool Normalization](OPENAI_TOOL_NORMALIZATION.md)** - Configure tool name compatibility for OpenAI API
-- **[Dynamic Tools Guide](DYNAMIC_TOOLS_GUIDE.md)** - How AI agents handle expanding tool sets
-- **[AI Dynamic Tools FAQ](AI_DYNAMIC_TOOLS_FAQ.md)** - Common questions about dynamic tool discovery
+- **[Configuration Guide](docs/CONFIGURATION.md)** - Detailed setup for different game types and tool normalization
+- **[AI Integration Guide](docs/INTEGRATION.md)** - Connect GABS to different AI tools and deployment scenarios  
+- **[Mod Development Guide](docs/MOD_DEVELOPMENT.md)** - Add GABP support to your game mods
+- **[Advanced Usage Guide](docs/ADVANCED_USAGE.md)** - Multiple instances, HTTP mode, scripting, and more
+- **[Deployment Guide](docs/DEPLOYMENT.md)** - Production deployments and cloud setups
+- **[OpenAI Tool Normalization](docs/OPENAI_TOOL_NORMALIZATION.md)** - Configure tool name compatibility for OpenAI API
+- **[Dynamic Tools Guide](docs/DYNAMIC_TOOLS_GUIDE.md)** - How AI agents handle expanding tool sets
+- **[AI Dynamic Tools FAQ](docs/AI_DYNAMIC_TOOLS_FAQ.md)** - Common questions about dynamic tool discovery
 
 ## For Mod Developers
 
@@ -157,7 +157,7 @@ Want your game to work with GABS? Add GABP support to your mod:
 2. **Start a GABP server** to listen for GABS connections (your mod = server, GABS = client)
 3. **Expose game features** as tools, resources, and events
 
-See the [Mod Development Guide](MOD_DEVELOPMENT.md) for complete examples in C#, Java, and Python.
+See the [Mod Development Guide](docs/MOD_DEVELOPMENT.md) for complete examples in C#, Java, and Python.
 
 ## Build from Source
 
