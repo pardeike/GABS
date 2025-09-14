@@ -225,11 +225,14 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			statusDesc := s.getStatusDescription(game.ID, game)
 			content.WriteString(fmt.Sprintf("**%s** (%s): %s\n", game.ID, game.Name, statusDesc))
 
-			// Add helpful info for launcher games
+			// Add helpful info for launcher games ONLY when we cannot track them
 			if game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId" {
 				status := s.checkGameStatus(game.ID)
 				if status == "launcher-triggered" {
-					content.WriteString(fmt.Sprintf("\nNote: %s game was launched, but GABS cannot track whether it's still running.\nCheck Steam/Epic or your system processes to verify the actual game status.\n", game.LaunchMode))
+					// Only show the warning if we don't have stopProcessName configured
+					if game.StopProcessName == "" {
+						content.WriteString(fmt.Sprintf("\nNote: %s game was launched, but GABS cannot track whether it's still running because no 'stopProcessName' is configured.\nCheck Steam/Epic or your system processes to verify the actual game status.\n", game.LaunchMode))
+					}
 				}
 			}
 		} else {
@@ -476,7 +479,20 @@ func (s *Server) RegisterBridgeTools(ctrl interface{}, client interface{}) {
 	// In the new architecture, game management is done through games.* tools
 }
 
-// Game process management methods
+// getGameFromController extracts game config from controller - helper for status checking
+func (s *Server) getGameFromController(controller *process.Controller) *config.GameConfig {
+	// This is a temporary helper. In a proper refactor, we'd store the game config 
+	// alongside the controller, but for minimal changes, we'll work with what we have.
+	// We can check the controller's spec to get the StopProcessName
+	if controller == nil {
+		return nil
+	}
+	
+	// Create a minimal game config with the info we need
+	return &config.GameConfig{
+		StopProcessName: controller.GetStopProcessName(),
+	}
+}
 
 // resolveGameId tries to find a game by ID or by target (for better UX)
 // Returns the actual game config and whether it was found
@@ -520,13 +536,19 @@ func (s *Server) getStatusDescription(gameID string, gameConfig *config.GameConf
 
 	switch status {
 	case "running":
+		// Check if this is a launcher-based game with process tracking
+		if gameConfig.LaunchMode == "SteamAppId" || gameConfig.LaunchMode == "EpicAppId" {
+			if gameConfig.StopProcessName != "" {
+				return "running (GABS is tracking the game process)"
+			}
+		}
 		return "running (GABS controls the process)"
 	case "stopped":
 		return "stopped"
 	case "launcher-running":
 		return fmt.Sprintf("launcher active (game may be starting via %s)", gameConfig.LaunchMode)
 	case "launcher-triggered":
-		return fmt.Sprintf("launched via %s (GABS cannot track the game process)", gameConfig.LaunchMode)
+		return fmt.Sprintf("launched via %s (GABS cannot track the game process - no stopProcessName configured)", gameConfig.LaunchMode)
 	default:
 		return status
 	}
@@ -543,16 +565,26 @@ func (s *Server) checkGameStatus(gameID string) string {
 
 	launchMode := controller.GetLaunchMode()
 
-	// For Steam/Epic launcher games, we can't easily track the actual game process
-	// So we use a different status model with clearer messaging
+	// For Steam/Epic launcher games, we use different status reporting
 	if launchMode == "SteamAppId" || launchMode == "EpicAppId" {
-		// For launcher-based games, we only know if we triggered the launcher
-		// The actual game process runs independently
+		// Check if we can track the actual game process
 		if controller.IsRunning() {
-			return "launcher-running" // Launcher process is still active
+			return "running" // We can track it and it's running
 		} else {
-			// Launcher has exited - this is normal, but we don't know about the game
-			return "launcher-triggered" // We started the launcher, but can't track the game
+			// Check if the launcher process is still active (shouldn't normally happen)
+			if controller.IsLauncherProcessRunning() {
+				return "launcher-running" // Launcher process is still active
+			}
+			
+			// Launcher has exited (normal) - determine if we have tracking capability
+			game := s.getGameFromController(controller)
+			if game != nil && game.StopProcessName != "" {
+				// We have tracking capability but game is not running
+				return "stopped"
+			} else {
+				// We don't have tracking capability, so we can't know the real status
+				return "launcher-triggered" // We started the launcher, but can't track the game
+			}
 		}
 	}
 
