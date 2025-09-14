@@ -117,11 +117,9 @@ The `add` command will interactively prompt you for:
 
 ### Configuration File
 
-Games are stored in platform-specific locations:
+Games are stored in the user's home directory:
 
-- **Windows**: `%APPDATA%/GABS/config.json`
-- **macOS**: `~/Library/Application Support/GABS/config.json`  
-- **Linux**: `~/.config/gabs/config.json`
+- **All platforms**: `~/.gabs/config.json`
 
 Example configuration:
 ```json
