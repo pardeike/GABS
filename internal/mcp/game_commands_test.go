@@ -50,7 +50,7 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 	server := NewServer(logger)
 	server.RegisterGameManagementTools(loadedConfig, 0, 0)
 	
-	// Test games.list - see what output AI gets
+	// Test games.list - simplified output for AI
 	t.Run("GamesList", func(t *testing.T) {
 		listMsg := &Message{
 			JSONRPC: "2.0",
@@ -67,18 +67,21 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 			t.Fatal("Expected response from games.list")
 		}
 		
-		// Check if response contains the confusing format
+		// Check that response contains only game IDs (simplified format)
 		respBytes, _ := json.Marshal(response)
 		responseStr := string(respBytes)
 		t.Logf("games.list output: %s", responseStr)
 		
-		// The output should contain both "rimworld" and "294100"
-		// This is what confuses AI
+		// The output should only contain the game ID
 		if !strings.Contains(responseStr, "rimworld") {
 			t.Error("Expected to see game ID 'rimworld' in output")
 		}
-		if !strings.Contains(responseStr, "294100") {
-			t.Error("Expected to see Steam App ID '294100' in output")
+		// Should NOT contain verbose details like Steam App ID or launch mode
+		if strings.Contains(responseStr, "294100") {
+			t.Error("Output should not contain Steam App ID '294100' - should be simplified")
+		}
+		if strings.Contains(responseStr, "SteamAppId") {
+			t.Error("Output should not contain launch mode details - should be simplified")
 		}
 	})
 	
