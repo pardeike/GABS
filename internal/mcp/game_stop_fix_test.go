@@ -223,9 +223,9 @@ func TestGameStopFix(t *testing.T) {
 		responseStr := string(respBytes)
 		t.Logf("Games list: %s", responseStr)
 
-		// Should mention missing stopProcessName for Steam games
-		if !strings.Contains(responseStr, "Missing stopProcessName") {
-			t.Error("Should warn about SteamAppId stop limitations in games list")
+		// Should NOT mention validation details - that's now in games.show
+		if strings.Contains(responseStr, "Missing stopProcessName") {
+			t.Error("games.list should be simplified - validation warnings should be in games.show")
 		}
 		
 		// Should NOT contain limitation warnings - that's for games.status
@@ -236,7 +236,7 @@ func TestGameStopFix(t *testing.T) {
 			t.Error("games.list should not contain verbose notes - should be simplified")
 		}
 		
-		// Should contain game IDs
+		// Should contain game IDs only
 		if !strings.Contains(responseStr, "direct-game") {
 			t.Error("Expected to see game ID 'direct-game' in simplified output")
 		}
@@ -245,6 +245,41 @@ func TestGameStopFix(t *testing.T) {
 		}
 
 		t.Log("✓ Games list is now simplified to just game IDs")
+	})
+
+	t.Run("GamesShowValidation", func(t *testing.T) {
+		// Show details for Steam game to check validation
+		showMsg := &Message{
+			JSONRPC: "2.0",
+			Method:  "tools/call",
+			ID:      json.RawMessage(`"show-steam-game"`),
+			Params: map[string]interface{}{
+				"name": "games.show",
+				"arguments": map[string]interface{}{
+					"gameId": "steam-game",
+				},
+			},
+		}
+
+		response := server.HandleMessage(showMsg)
+		respBytes, _ := json.Marshal(response)
+		responseStr := string(respBytes)
+		t.Logf("Games show steam-game: %s", responseStr)
+
+		// Should mention missing stopProcessName for Steam games in detailed view
+		if !strings.Contains(responseStr, "Missing stopProcessName") {
+			t.Error("games.show should warn about SteamAppId stop limitations")
+		}
+
+		// Should show detailed configuration
+		if !strings.Contains(responseStr, "steam-game") {
+			t.Error("Expected to see game ID in detailed view")
+		}
+		if !strings.Contains(responseStr, "SteamAppId") {
+			t.Error("Expected to see launch mode in detailed view")
+		}
+
+		t.Log("✓ Games show provides detailed validation information")
 	})
 }
 

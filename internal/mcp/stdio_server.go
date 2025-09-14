@@ -86,20 +86,74 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				if i > 0 {
 					content.WriteString("\n")
 				}
-				content.WriteString(fmt.Sprintf("  ID: %s (%s)\n", game.ID, game.Name))
-				content.WriteString(fmt.Sprintf("  Use gameId: '%s' (or target: '%s')\n", game.ID, game.Target))
-				content.WriteString(fmt.Sprintf("  Launch: %s\n", game.LaunchMode))
-				if game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId" {
-					if game.StopProcessName != "" {
-						content.WriteString(fmt.Sprintf("  ✓ Configured for proper game termination (process: %s)\n", game.StopProcessName))
-					} else {
-						content.WriteString(fmt.Sprintf("  ⚠️  Missing stopProcessName - GABS can start but cannot properly stop %s games\n", game.LaunchMode))
-					}
-				}
-				if game.Description != "" {
-					content.WriteString(fmt.Sprintf("  %s\n", game.Description))
-				}
+				content.WriteString(game.ID)
 			}
+		}
+		
+		return &ToolResult{
+			Content: []Content{{Type: "text", Text: content.String()}},
+		}, nil
+	})
+
+	// games.show tool
+	s.RegisterTool(Tool{
+		Name:        "games.show",
+		Description: "Show detailed configuration and validation status for a specific game",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"gameId": map[string]interface{}{
+					"type":        "string",
+					"description": "Game ID or launch target to show details for",
+				},
+			},
+			"required": []string{"gameId"},
+		},
+	}, func(args map[string]interface{}) (*ToolResult, error) {
+		gameIdOrTarget, ok := args["gameId"].(string)
+		if !ok {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: "gameId parameter is required"}},
+				IsError: true,
+			}, nil
+		}
+
+		game, exists := s.resolveGameId(gamesConfig, gameIdOrTarget)
+		if !exists {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games.list to see available games.", gameIdOrTarget)}},
+				IsError: true,
+			}, nil
+		}
+
+		var content strings.Builder
+		content.WriteString(fmt.Sprintf("Game Configuration: %s\n\n", game.ID))
+		content.WriteString(fmt.Sprintf("  ID: %s (%s)\n", game.ID, game.Name))
+		content.WriteString(fmt.Sprintf("  Use gameId: '%s' (or target: '%s')\n", game.ID, game.Target))
+		content.WriteString(fmt.Sprintf("  Launch: %s\n", game.LaunchMode))
+		
+		if game.WorkingDir != "" {
+			content.WriteString(fmt.Sprintf("  Working Directory: %s\n", game.WorkingDir))
+		}
+		if len(game.Args) > 0 {
+			content.WriteString(fmt.Sprintf("  Arguments: %s\n", strings.Join(game.Args, " ")))
+		}
+		
+		// Validation status for launcher-based games
+		if game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId" {
+			content.WriteString("\nGame Termination Configuration:\n")
+			if game.StopProcessName != "" {
+				content.WriteString(fmt.Sprintf("  ✓ Configured for proper game termination (process: %s)\n", game.StopProcessName))
+			} else {
+				content.WriteString(fmt.Sprintf("  ⚠️  Missing stopProcessName - GABS can start but cannot properly stop %s games\n", game.LaunchMode))
+				content.WriteString(fmt.Sprintf("     Add stopProcessName to your game configuration for proper termination.\n"))
+			}
+		} else if game.StopProcessName != "" {
+			content.WriteString(fmt.Sprintf("  Stop Process Name: %s\n", game.StopProcessName))
+		}
+		
+		if game.Description != "" {
+			content.WriteString(fmt.Sprintf("\nDescription: %s\n", game.Description))
 		}
 		
 		return &ToolResult{
