@@ -171,7 +171,14 @@ See the [Mod Development Guide](docs/MOD_DEVELOPMENT.md) for complete examples i
 Requirements: Go 1.22+
 
 ```bash
+# Simple build
 go build ./cmd/gabs
+
+# Build with version information (recommended)
+make build
+
+# Build with custom version
+go build -ldflags "-X github.com/pardeike/gabs/internal/version.Version=v1.0.0" ./cmd/gabs
 ```
 
 ## Contributing & Support
