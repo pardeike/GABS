@@ -3,6 +3,8 @@
 ## The Question
 > "At the start of the GABS server, it offers a basic set of mcp tools to an AI. This includes starting games for example. Once a game is started, GABS will try to connect to the games GABP server and will (hopefully) start mirroring the games mcp tools. Since I have yet to write such a mod (I am still developing GABS) it is unclear to me if at that point the amount of mcp tools will increase and if an AI will figure this out. How do you think this will work out in the real world when the amount of mcp tools is dynamic?"
 
+> **See also:** [Dynamic Tools Guide](DYNAMIC_TOOLS_GUIDE.md) for technical implementation details, [AI Integration Guide](INTEGRATION.md) for connecting AI agents.
+
 ## The Answer: It Will Work Excellently! 
 
 **TL;DR**: AI agents will handle GABS's dynamic tool expansion beautifully because GABS is specifically designed for this workflow with clear namespacing, discovery tools, and predictable patterns.

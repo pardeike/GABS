@@ -2,6 +2,8 @@
 
 This guide shows you how to connect GABS to different AI assistants and tools.
 
+> **See also:** [Configuration Guide](CONFIGURATION.md) for setting up games, [OpenAI Tool Normalization](OPENAI_TOOL_NORMALIZATION.md) for OpenAI API compatibility, and [Deployment Guide](DEPLOYMENT.md) for production setups.
+
 ## MCP Integration
 
 GABS works as an MCP (Model Context Protocol) server. This means AI assistants can control your games through standard MCP tools.
@@ -19,6 +21,22 @@ Once GABS is running, AI can use these tools:
 **Pro tip**: You can use either the game ID (`"rimworld"`) or the launch target (`"294100"` for Steam) in any tool.
 
 ## Setting Up AI Assistants
+
+### OpenAI API Integration
+
+For OpenAI API compatibility, you may need to enable tool name normalization. Add this to your configuration:
+
+```json
+{
+  "toolNormalization": {
+    "enableOpenAINormalization": true,
+    "maxToolNameLength": 64,
+    "preserveOriginalName": true
+  }
+}
+```
+
+This converts tool names like `minecraft.inventory.get` to `minecraft_inventory_get` for OpenAI compatibility. See [OpenAI Tool Normalization Guide](OPENAI_TOOL_NORMALIZATION.md) for complete details.
 
 ### Claude Desktop
 
