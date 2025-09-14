@@ -88,6 +88,18 @@ func (m *Mirror) SyncTools() error {
 	}
 
 	m.log.Infow("synced GABP tools to MCP with game namespacing", "gameId", m.gameId, "count", len(gabpTools))
+	
+	// TODO: Future enhancement - send tools/list_changed notification to AI agents
+	// This would automatically alert AI agents that new tools are available without
+	// them needing to poll. AI agents would then use games.tools to discover the
+	// new capabilities.
+	//
+	// Notification format:
+	// {"method": "notifications/tools/list_changed", "params": {}}
+	//
+	// This follows MCP specification for server-initiated notifications and ensures
+	// AI agents are immediately aware of dynamic tool expansion.
+	
 	return nil
 }
 
