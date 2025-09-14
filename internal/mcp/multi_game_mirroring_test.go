@@ -141,14 +141,12 @@ func TestGamesToolsCommand(t *testing.T) {
 				Name:       "Minecraft",
 				LaunchMode: "DirectPath",
 				Target:     "/opt/minecraft/start.sh",
-				GabpMode:   "local",
 			},
 			"rimworld": {
 				ID:         "rimworld",
 				Name:       "RimWorld", 
 				LaunchMode: "SteamAppId",
 				Target:     "294100",
-				GabpMode:   "local",
 			},
 		},
 	}

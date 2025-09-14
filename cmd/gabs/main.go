@@ -344,18 +344,6 @@ func addGame(log util.Logger, gameID string) int {
 		}
 	}
 
-	gabpMode := promptChoice("GABP Mode", "local", []string{"local", "remote", "connect"})
-	if gabpMode != "" {
-		game.GabpMode = gabpMode
-	}
-
-	if gabpMode == "remote" {
-		gabpHost := promptString("GABP Host (for remote access)", "127.0.0.1")
-		if gabpHost != "" {
-			game.GabpHost = gabpHost
-		}
-	}
-
 	// Ask for optional stop process name for better game termination control
 	stopProcessName := promptString("Stop Process Name (optional - for better game stopping)", "")
 	if stopProcessName != "" {
@@ -424,12 +412,6 @@ func showGame(log util.Logger, gameID string) int {
 	}
 	if game.StopProcessName != "" {
 		fmt.Printf("  Stop Process Name: %s\n", game.StopProcessName)
-	}
-	if game.GabpMode != "" {
-		fmt.Printf("  GABP Mode: %s\n", game.GabpMode)
-	}
-	if game.GabpHost != "" {
-		fmt.Printf("  GABP Host: %s\n", game.GabpHost)
 	}
 	if game.Description != "" {
 		fmt.Printf("  Description: %s\n", game.Description)

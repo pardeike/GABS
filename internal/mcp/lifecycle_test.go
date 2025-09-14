@@ -32,14 +32,12 @@ func TestApplicationLifecycleManagement(t *testing.T) {
 				LaunchMode: "DirectPath",
 				Target:     "/bin/sleep",
 				Args:       []string{"0.01"}, // Very short sleep for testing
-				GabpMode:   "local",
 			},
 			"test-steam": {
 				ID:         "test-steam",
 				Name:       "Test Steam Game",
 				LaunchMode: "SteamAppId",
 				Target:     "123456",
-				GabpMode:   "local",
 			},
 		},
 	}

@@ -27,18 +27,18 @@ func TestWriteBridgeJSONWithConfig(t *testing.T) {
 			expectMode:   "local",
 		},
 		{
-			name:         "remote config",
+			name:         "local config (same as default)",
 			gameID:       "minecraft",
-			config:       BridgeConfig{Host: "192.168.1.100", Mode: "remote"},
-			expectHost:   "192.168.1.100",
-			expectMode:   "remote",
+			config:       BridgeConfig{},
+			expectHost:   "127.0.0.1",
+			expectMode:   "local",
 		},
 		{
-			name:         "connect mode",
+			name:         "another local config",
 			gameID:       "rimworld",
-			config:       BridgeConfig{Mode: "connect"},
+			config:       BridgeConfig{},
 			expectHost:   "127.0.0.1",
-			expectMode:   "connect",
+			expectMode:   "local",
 		},
 	}
 	
@@ -131,8 +131,8 @@ func TestReadBridgeJSON(t *testing.T) {
 	tempDir := t.TempDir()
 	gameDir := filepath.Join(tempDir, "testread")
 	
-	// First create a bridge.json file
-	config := BridgeConfig{Host: "10.0.0.1", Mode: "remote"}
+	// First create a bridge.json file (always local for GABS)
+	config := BridgeConfig{}
 	port, token, _, err := WriteBridgeJSONWithConfig("testread", gameDir, config)
 	if err != nil {
 		t.Fatalf("Setup failed: %v", err)
@@ -144,9 +144,9 @@ func TestReadBridgeJSON(t *testing.T) {
 		t.Fatalf("ReadBridgeJSON failed: %v", err)
 	}
 	
-	// Verify values match
-	if readHost != "10.0.0.1" {
-		t.Errorf("Read host %s, expected 10.0.0.1", readHost)
+	// Verify values match (always local for GABS)
+	if readHost != "127.0.0.1" {
+		t.Errorf("Read host %s, expected 127.0.0.1", readHost)
 	}
 	if readPort != port {
 		t.Errorf("Read port %d, expected %d", readPort, port)

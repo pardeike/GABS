@@ -32,14 +32,12 @@ func TestGameStopFix(t *testing.T) {
 				LaunchMode: "DirectPath",
 				Target:     "sleep",
 				Args:       []string{"0.1"}, // Very short sleep for testing
-				GabpMode:   "local",
 			},
 			"steam-game": {
 				ID:         "steam-game",
 				Name:       "Steam Game",
 				LaunchMode: "SteamAppId",
 				Target:     "123456",
-				GabpMode:   "local",
 			},
 		},
 	}
@@ -264,14 +262,12 @@ func TestImprovedStatusReporting(t *testing.T) {
 					LaunchMode: "DirectPath",
 					Target:     "sleep",
 					Args:       []string{"0.01"},
-					GabpMode:   "local",
 				},
 				"steam-test": {
 					ID:         "steam-test",
 					Name:       "Steam Test Game",
 					LaunchMode: "SteamAppId",
 					Target:     "999999",
-					GabpMode:   "local",
 				},
 			},
 		}
