@@ -581,10 +581,11 @@ func TestRealWorldScenarios(t *testing.T) {
 		Target:     "/opt/minecraft/server.jar",
 	})
 	gamesConfig.AddGame(config.GameConfig{
-		ID:         "rimworld",
-		Name:       "RimWorld",
-		LaunchMode: "SteamAppId",
-		Target:     "294100",
+		ID:              "rimworld",
+		Name:            "RimWorld",
+		LaunchMode:      "SteamAppId",
+		Target:          "294100",
+		StopProcessName: "RimWorldWin64.exe",
 	})
 
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, 5*time.Second)
