@@ -107,7 +107,12 @@ func (m *Mirror) SyncTools() error {
 }
 
 func (m *Mirror) ExposeResources() error {
-	// TODO: Expose GABP event channels as MCP resources
+	// TODO: Implement comprehensive GABP resource mirroring
+	// - Expose actual GABP event channels as MCP resources with streaming support
+	// - Mirror game state resources (world data, player stats, etc.)
+	// - Add real-time GABP event streaming via MCP resource updates
+	// - Support filtering and historical event querying
+	// Current implementation only provides a placeholder logs resource
 	// For now, expose a basic logs resource with game-specific naming
 	logsResource := mcp.Resource{
 		URI:         fmt.Sprintf("gab://%s/events/logs", m.gameId),

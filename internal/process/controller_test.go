@@ -69,7 +69,7 @@ func TestEnvironmentVariables(t *testing.T) {
 	}
 
 	// Set bridge info for testing
-	controller.SetBridgeInfo("127.0.0.1", 12345, "test-token-1234567890abcdef", "local")
+	controller.SetBridgeInfo(12345, "test-token-1234567890abcdef")
 
 	// Verify the bridge path generation
 	bridgePath := controller.getBridgePath()
@@ -84,20 +84,13 @@ func TestEnvironmentVariables(t *testing.T) {
 		t.Fatal("Bridge info should be set")
 	}
 
-	if controller.bridgeInfo.Host != "127.0.0.1" {
-		t.Errorf("Expected host 127.0.0.1, got %s", controller.bridgeInfo.Host)
-	}
-
+	// Host is always 127.0.0.1 for GABS - no need to store it in bridgeInfo
 	if controller.bridgeInfo.Port != 12345 {
 		t.Errorf("Expected port 12345, got %d", controller.bridgeInfo.Port)
 	}
 
 	if controller.bridgeInfo.Token != "test-token-1234567890abcdef" {
 		t.Errorf("Expected token test-token-1234567890abcdef, got %s", controller.bridgeInfo.Token)
-	}
-
-	if controller.bridgeInfo.Mode != "local" {
-		t.Errorf("Expected mode local, got %s", controller.bridgeInfo.Mode)
 	}
 
 	// The environment variables that would be set are:

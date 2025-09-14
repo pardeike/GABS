@@ -15,26 +15,11 @@ type BridgeJSON struct {
 	Port   int    `json:"port"`
 	Token  string `json:"token"`
 	GameId string `json:"gameId"`
-	Agent  string `json:"agentName"`
-	Host   string `json:"host,omitempty"` // Always 127.0.0.1 for local communication
-	Mode   string `json:"mode,omitempty"` // Always "local" for GABS
-	// PROMPT: Optional extra fields for mod consumption.
-}
-
-// BridgeConfig contains configuration for GABP connection (simplified for local-only use)
-type BridgeConfig struct {
-	// Reserved for future extensions - currently GABS only supports local communication
 }
 
 // WriteBridgeJSON generates a random port and token, writes bridge.json atomically to the config dir
 // Returns (port, token, configPath, error)
 func WriteBridgeJSON(gameID, configDir string) (int, string, string, error) {
-	return WriteBridgeJSONWithConfig(gameID, configDir, BridgeConfig{})
-}
-
-// WriteBridgeJSONWithConfig generates bridge.json (simplified for local-only use)
-// Returns (port, token, configPath, error)
-func WriteBridgeJSONWithConfig(gameID, configDir string, config BridgeConfig) (int, string, string, error) {
 	// Generate available port with conflict detection
 	port, err := findAvailablePort(49152, 65535)
 	if err != nil {
@@ -58,18 +43,11 @@ func WriteBridgeJSONWithConfig(gameID, configDir string, config BridgeConfig) (i
 		return 0, "", "", fmt.Errorf("failed to create config dir: %w", err)
 	}
 
-	// GABS always communicates locally
-	host := "127.0.0.1"
-	mode := "local"
-
 	// Create bridge config
 	bridge := BridgeJSON{
 		Port:   port,
 		Token:  token,
 		GameId: gameID,
-		Agent:  "gabs-v0.1.0",
-		Host:   host,
-		Mode:   mode,
 	}
 
 	// Create unique filename with timestamp to avoid conflicts in concurrent launches

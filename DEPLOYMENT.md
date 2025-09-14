@@ -249,10 +249,7 @@ Potential improvements being considered:
 {
   "port": 49234,
   "token": "a1b2c3d4e5f6...",
-  "gameId": "minecraft", 
-  "agentName": "gabs-v0.1.0",
-  "host": "192.168.1.100",
-  "mode": "remote"
+  "gameId": "minecraft"
 }
 ```
 

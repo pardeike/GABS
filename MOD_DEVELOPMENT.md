@@ -63,9 +63,7 @@ If present, `GABS_BRIDGE_PATH` points to a JSON file with the same information:
 {
   "port": 12345,
   "token": "secret-auth-token", 
-  "gameId": "your-game-id",
-  "agentName": "gabs-v0.1.0",
-  "host": "127.0.0.1"
+  "gameId": "your-game-id"
 }
 ```
 
@@ -155,7 +153,6 @@ public class GABPMod : Mod
         {
             return new BridgeConfig
             {
-                Host = "127.0.0.1", // Always localhost for GABP
                 Port = port,        // Port to listen on as GABP server
                 Token = token,      // Token for authenticating GABS connections
                 GameId = gameId ?? "unknown"
@@ -218,7 +215,6 @@ public class BridgeConfig
     public int Port { get; set; }      // Port to listen on as GABP server
     public string Token { get; set; }  // Token for authenticating GABS connections
     public string GameId { get; set; } // Game identifier
-    public string Host { get; set; }   // Always "127.0.0.1" for GABP
 }
 ```
 
@@ -263,7 +259,6 @@ public class GABPMod {
             try {
                 int port = Integer.parseInt(portStr);
                 BridgeConfig config = new BridgeConfig();
-                config.host = "127.0.0.1"; // Always localhost for GABP
                 config.port = port;         // Port to listen on as GABP server
                 config.token = token;       // Token for authenticating GABS connections
                 config.gameId = gameId != null ? gameId : "unknown";
@@ -360,7 +355,6 @@ class GABPMod:
             try:
                 port = int(port_str)
                 return {
-                    'host': '127.0.0.1',  # Always localhost for GABP
                     'port': port,         # Port to listen on as GABP server
                     'token': token,       # Token for authenticating GABS connections
                     'gameId': game_id or 'unknown'
