@@ -22,13 +22,10 @@ import (
 	"github.com/pardeike/gabs/internal/config"
 	"github.com/pardeike/gabs/internal/mcp"
 	"github.com/pardeike/gabs/internal/util"
+	"github.com/pardeike/gabs/internal/version"
 )
 
-var (
-	Version   = "0.1.0"
-	BuildDate = "unknown"
-	Commit    = "unknown"
-)
+
 
 const defaultBackoff = "100ms..5s"
 
@@ -100,7 +97,7 @@ func main() {
 
 	// Suppress startup log for "games" commands to keep output clean for terminal usage
 	if subcmd != "games" {
-		log.Infow("starting gabs", "version", Version, "commit", Commit, "built", BuildDate, "subcmd", subcmd)
+		log.Infow("starting gabs", "version", version.Get(), "commit", version.GetCommit(), "built", version.GetBuildDate(), "subcmd", subcmd)
 	}
 
 	// Context with OS signals
@@ -114,7 +111,7 @@ func main() {
 	case "games":
 		exitCode = manageGames(ctx, log, opts, fs.Args())
 	case "version":
-		fmt.Printf("%s %s (%s)\n", "gabs", Version, Commit)
+		fmt.Printf("%s %s (%s)\n", "gabs", version.Get(), version.GetCommit())
 		return
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", subcmd)
@@ -171,7 +168,7 @@ Once the server is running, use MCP tools to manage games:
   games.start       Start a game
   games.stop        Gracefully stop a game  
   games.kill        Force terminate a game
-`, Version, defaultBackoff)
+`, version.Get(), defaultBackoff)
 }
 
 // === Server Command ===

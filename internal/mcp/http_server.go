@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/pardeike/gabs/internal/version"
 )
 
 // HTTPClient represents an HTTP client connection for SSE
@@ -31,7 +33,7 @@ func (s *Server) ServeHTTP(ctx context.Context, addr string) error {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, `{"status":"ok","server":"gabs","version":"0.1.0"}`)
+		fmt.Fprintf(w, `{"status":"ok","server":"gabs","version":"%s"}`, version.Get())
 	})
 
 	// MCP JSON-RPC endpoint - handles all MCP method calls
@@ -167,7 +169,7 @@ func (s *Server) handleSSEConnection(w http.ResponseWriter, r *http.Request, cli
 
 	// Send initial connection event
 	fmt.Fprintf(w, "event: connected\n")
-	fmt.Fprintf(w, "data: {\"clientId\":\"%s\",\"server\":\"gabs\",\"version\":\"0.1.0\"}\n\n", clientID)
+	fmt.Fprintf(w, "data: {\"clientId\":\"%s\",\"server\":\"gabs\",\"version\":\"%s\"}\n\n", clientID, version.Get())
 	flusher.Flush()
 
 	// Keep connection alive and wait for disconnect

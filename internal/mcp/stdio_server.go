@@ -13,6 +13,7 @@ import (
 	"github.com/pardeike/gabs/internal/config"
 	"github.com/pardeike/gabs/internal/process"
 	"github.com/pardeike/gabs/internal/util"
+	"github.com/pardeike/gabs/internal/version"
 )
 
 // Server runs MCP over stdio.
@@ -931,7 +932,7 @@ func (s *Server) handleInitialize(msg *Message) *Message {
 		},
 		ServerInfo: ServerInfo{
 			Name:    "gabs",
-			Version: "0.1.0",
+			Version: version.Get(),
 		},
 	}
 	return NewResponse(msg.ID, result)

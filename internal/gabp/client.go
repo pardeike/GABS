@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/pardeike/gabs/internal/util"
+	"github.com/pardeike/gabs/internal/version"
 )
 
 // Client speaks GABP over TCP NDJSON.
@@ -170,7 +171,7 @@ func (c *Client) handshake() error {
 		LaunchId:      launchId,
 		ClientInfo: &ClientInfo{
 			Name:    "gabs",
-			Version: "0.1.0",
+			Version: version.Get(),
 		},
 	}
 
