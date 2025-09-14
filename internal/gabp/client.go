@@ -3,6 +3,8 @@ package gabp
 import (
 	"encoding/json"
 	"fmt"
+	"math"
+	"math/rand"
 	"net"
 	"runtime"
 	"sync"
@@ -96,21 +98,24 @@ func NewClient(log util.Logger) *Client {
 func (c *Client) Connect(addr string, token string, backoffMin, backoffMax time.Duration) error {
 	c.token = token
 
-	// Connect with retry/backoff
+	// Connect with retry/backoff using proper exponential backoff with jitter
 	var conn net.Conn
 	var err error
 
-	// TODO: Implement proper exponential backoff with jitter
-	// Should respect backoffMin and backoffMax parameters and use exponential growth
-	// with randomized jitter to avoid thundering herd problems when multiple games
-	// try to connect simultaneously. Current implementation uses fixed backoffMin delay.
 	for attempts := 0; attempts < 5; attempts++ {
 		conn, err = net.Dial("tcp", addr)
 		if err == nil {
 			break
 		}
+		
 		c.log.Warnw("connection attempt failed", "attempt", attempts+1, "error", err)
-		time.Sleep(backoffMin)
+		
+		// Don't sleep after the last attempt
+		if attempts < 4 {
+			delay := calculateExponentialBackoffWithJitter(attempts, backoffMin, backoffMax, true)
+			c.log.Debugw("backing off before retry", "attempt", attempts+1, "delay", delay)
+			time.Sleep(delay)
+		}
 	}
 
 	if err != nil {
@@ -323,4 +328,39 @@ func mapToStruct(src interface{}, dst interface{}) error {
 		return err
 	}
 	return json.Unmarshal(data, dst)
+}
+
+// calculateExponentialBackoffWithJitter computes the delay for exponential backoff with jitter
+// Implements exponential backoff: delay = backoffMin * 2^attempt, capped at backoffMax
+// With jitter: adds randomness between 50%-150% of calculated delay to avoid thundering herd
+func calculateExponentialBackoffWithJitter(attempt int, backoffMin, backoffMax time.Duration, enableJitter bool) time.Duration {
+	// Calculate exponential delay: backoffMin * 2^attempt
+	exponentialDelay := float64(backoffMin) * math.Pow(2, float64(attempt))
+	
+	// Cap at maximum
+	if exponentialDelay > float64(backoffMax) {
+		exponentialDelay = float64(backoffMax)
+	}
+	
+	if !enableJitter {
+		return time.Duration(exponentialDelay)
+	}
+	
+	// Apply jitter: random value between 50% and 150% of exponential delay
+	// This helps avoid thundering herd when multiple clients retry simultaneously
+	jitterMin := 0.5
+	jitterMax := 1.5
+	jitterFactor := jitterMin + rand.Float64()*(jitterMax-jitterMin)
+	
+	jitteredDelay := exponentialDelay * jitterFactor
+	
+	// Ensure we don't go below backoffMin or above backoffMax after jitter
+	if jitteredDelay < float64(backoffMin) {
+		jitteredDelay = float64(backoffMin)
+	}
+	if jitteredDelay > float64(backoffMax) {
+		jitteredDelay = float64(backoffMax)
+	}
+	
+	return time.Duration(jitteredDelay)
 }
