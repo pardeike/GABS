@@ -47,14 +47,21 @@ The name of the actual game process to stop when using games.stop or games.kill.
 
 ### 6. Game Configuration Complete
 
-All games configured through GABS use **local GABP mode** for maximum security and simplicity. When you start a game, GABS automatically creates bridge configuration that:
+All games configured through GABS use **local GABP mode** for maximum security and simplicity. 
 
-- Uses localhost (127.0.0.1) for communication
-- Generates secure random tokens for each session
-- Creates unique ports for each game instance
-- Stores connection details in `~/.gabs/{gameId}/bridge.json`
+#### What is "Bridge Configuration"?
+When you start a game via AI commands, GABS automatically creates **bridge configuration** - connection details that tell your game mod how to communicate with GABS:
 
-Your game mods read this bridge configuration file to connect with GABS.
+- **Port**: Unique port number your mod should listen on (e.g., 12345)
+- **Token**: Secure authentication token to verify connections
+- **Game ID**: Your game's identifier for namespacing
+- **Host**: Always localhost (127.0.0.1) for security
+
+This configuration is provided to your game via:
+1. **Environment variables** (recommended): `GABP_SERVER_PORT`, `GABP_TOKEN`, `GABS_GAME_ID`
+2. **Bridge file** (fallback): `~/.gabs/{gameId}/bridge-{timestamp}.json`
+
+**Key Point**: Your game mod acts as the GABP server (listening), while GABS acts as the GABP client (connecting).
 
 ## Managing Your Games
 

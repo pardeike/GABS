@@ -1,0 +1,36 @@
+{
+  "version": "1.0",
+  "toolNormalization": {
+    "enableOpenAINormalization": true,
+    "maxToolNameLength": 64,
+    "preserveOriginalName": true
+  },
+  "games": {
+    "minecraft": {
+      "id": "minecraft",
+      "name": "Minecraft Server",
+      "launchMode": "DirectPath",
+      "target": "/path/to/minecraft/server.jar",
+      "workingDir": "/path/to/minecraft",
+      "args": ["-Xmx4G", "-Xms2G", "-jar", "server.jar", "nogui"],
+      "description": "Minecraft server with GABP mod for AI control"
+    },
+    "rimworld": {
+      "id": "rimworld",
+      "name": "RimWorld",
+      "launchMode": "SteamAppId",
+      "target": "294100",
+      "stopProcessName": "RimWorldWin64.exe",
+      "description": "RimWorld colony simulation via Steam with GABP mod"
+    },
+    "valheim": {
+      "id": "valheim",
+      "name": "Valheim Dedicated Server",
+      "launchMode": "CustomCommand",
+      "target": "valheim_server.exe -nographics -batchmode -name \"My GABS Server\" -port 2456 -world \"Dedicated\" -password \"mypassword\"",
+      "workingDir": "/path/to/valheim/server",
+      "stopProcessName": "valheim_server.exe",
+      "description": "Valheim dedicated server with custom launch parameters"
+    }
+  }
+}

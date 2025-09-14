@@ -269,6 +269,9 @@ func (c *Controller) Restart() error {
 // Platform-specific helpers
 
 func (c *Controller) getSteamLauncher() string {
+	// TODO: Add direct Steam executable detection for better reliability
+	// Could check common Steam installation paths and use steam.exe directly
+	// instead of relying on system URL handlers, which provides better error handling
 	switch runtime.GOOS {
 	case "windows":
 		return "cmd"

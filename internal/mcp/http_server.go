@@ -9,8 +9,9 @@ import (
 
 // ServeHTTP starts the MCP server on HTTP (Streamable HTTP transport)
 func (s *Server) ServeHTTP(ctx context.Context, addr string) error {
-	// For now, just a placeholder - Streamable HTTP is more complex
-	// It requires SSE (Server-Sent Events) for bi-directional communication
+	// TODO: Implement full MCP over HTTP transport with SSE (Server-Sent Events)
+	// This requires bi-directional communication support and proper MCP protocol handling
+	// Current implementation is a basic placeholder with health check only
 
 	mux := http.NewServeMux()
 
@@ -21,7 +22,8 @@ func (s *Server) ServeHTTP(ctx context.Context, addr string) error {
 		fmt.Fprintf(w, `{"status":"ok","server":"gabs","version":"0.1.0"}`)
 	})
 
-	// Placeholder for MCP endpoint
+	// TODO: Implement MCP endpoint with proper JSON-RPC handling over HTTP
+	// Should support all MCP methods: initialize, tools/list, tools/call, resources/list, etc.
 	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotImplemented)

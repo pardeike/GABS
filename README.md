@@ -24,6 +24,18 @@ GABS uses a **configuration-first approach**. You set up your games once, then A
 
 ![GABS Architecture](docs/architecture-flow.svg)
 
+### Key Architecture Concepts
+
+**Communication Flow:**
+```
+AI Agent ← MCP → GABS ← GABP → Game Mod ← Game API → Game
+```
+
+**Important:** In the GABP layer, **your game mod acts as the server** (listening on a port) while **GABS acts as the client** (connecting to your mod). This design ensures:
+- GABS manages port allocation for multiple games
+- All communication stays local (127.0.0.1) 
+- Games can start independently and GABS connects when ready
+
 **Key Features:**
 - **Configure once**: Add games with `gabs games add`
 - **Control with AI**: Natural commands through MCP tools
@@ -51,7 +63,13 @@ gabs games add rimworld
 gabs games list
 ```
 
-GABS will ask simple questions to set up each game (where it's installed, how to launch it, etc.).
+GABS will ask simple questions to set up each game:
+- **Game Name**: Friendly display name
+- **Launch Mode**: How to start the game (Direct executable, Steam App ID, Epic, or Custom command)
+- **Target**: Path to executable or Steam/Epic App ID
+- **Stop Process Name**: For Steam/Epic games, the actual game process name for proper stopping
+
+**Important for Steam/Epic users:** GABS needs the actual game process name (like `RimWorldWin64.exe`) to properly stop games, not just the launcher process.
 
 ### 3. Start the Server
 
@@ -132,8 +150,11 @@ GABS: Shows minecraft.inventory.get, minecraft.world.place_block, etc.
 
 Want your game to work with GABS? Add GABP support to your mod:
 
-1. **Read bridge config** when your game starts
-2. **Start a GABP server** to listen for GABS connections  
+1. **Read GABP configuration** from environment variables when your game starts:
+   - `GABP_SERVER_PORT` - Port your mod should listen on
+   - `GABP_TOKEN` - Authentication token for GABS connections
+   - `GABS_GAME_ID` - Your game's identifier
+2. **Start a GABP server** to listen for GABS connections (your mod = server, GABS = client)
 3. **Expose game features** as tools, resources, and events
 
 See the [Mod Development Guide](MOD_DEVELOPMENT.md) for complete examples in C#, Java, and Python.
@@ -150,7 +171,7 @@ go build ./cmd/gabs
 
 - **Issues & Ideas**: [GitHub Issues](../../issues)
 - **GABP Protocol**: [GABP Repository](https://github.com/pardeike/GABP)
-- **Examples**: Check the `examples/` directory
+- **Example Configuration**: See `example-config.json` for sample configurations
 
 ## License
 

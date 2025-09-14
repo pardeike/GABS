@@ -100,8 +100,10 @@ func (c *Client) Connect(addr string, token string, backoffMin, backoffMax time.
 	var conn net.Conn
 	var err error
 
-	// For now, simple connection without full backoff implementation
-	// TODO: Implement proper exponential backoff
+	// TODO: Implement proper exponential backoff with jitter
+	// Should respect backoffMin and backoffMax parameters and use exponential growth
+	// with randomized jitter to avoid thundering herd problems when multiple games
+	// try to connect simultaneously. Current implementation uses fixed backoffMin delay.
 	for attempts := 0; attempts < 5; attempts++ {
 		conn, err = net.Dial("tcp", addr)
 		if err == nil {
