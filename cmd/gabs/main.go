@@ -97,7 +97,11 @@ func main() {
 
 	// Initialize structured logger to stderr only
 	log := util.NewLogger(opts.logLevel)
-	log.Infow("starting gabs", "version", Version, "commit", Commit, "built", BuildDate, "subcmd", subcmd)
+	
+	// Suppress startup log for "games list" command to keep output clean for AI parsing
+	if !(subcmd == "games" && len(fs.Args()) > 0 && fs.Args()[0] == "list") {
+		log.Infow("starting gabs", "version", Version, "commit", Commit, "built", BuildDate, "subcmd", subcmd)
+	}
 
 	// Context with OS signals
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -143,7 +147,7 @@ Server flags:
   --grace <dur>                 Graceful stop timeout (default 3s)
 
 Game management:
-  gabs games list               List all configured games
+  gabs games list               List configured game IDs (simplified output)
   gabs games add <id>           Add a new game configuration (interactive)
   gabs games remove <id>        Remove a game configuration
   gabs games show <id>          Show details for a game
@@ -158,11 +162,11 @@ Examples:
   # Add a new game configuration
   gabs games add minecraft
   
-  # List configured games
+  # List configured games (shows only game IDs)
   gabs games list
 
 Once the server is running, use MCP tools to manage games:
-  games.list        List all configured games and their status
+  games.list        List configured game IDs (simplified for AI)
   games.status      Check status of specific games
   games.start       Start a game
   games.stop        Gracefully stop a game  
@@ -264,13 +268,8 @@ func listGames(log util.Logger) int {
 		return 0
 	}
 
-	fmt.Printf("Configured Games (%d):\n", len(games))
 	for _, game := range games {
-		fmt.Printf("  %s - %s (%s via %s)\n", 
-			game.ID, game.Name, game.LaunchMode, game.Target)
-		if game.Description != "" {
-			fmt.Printf("    %s\n", game.Description)
-		}
+		fmt.Println(game.ID)
 	}
 	return 0
 }
@@ -442,13 +441,13 @@ func showGame(log util.Logger, gameID string) int {
 
 func showGamesUsage() {
 	fmt.Fprintf(os.Stderr, `Game Management Commands:
-  gabs games list               List all configured games
+  gabs games list               List configured game IDs (simplified output)
   gabs games add <id>           Add a new game configuration (interactive)
   gabs games remove <id>        Remove a game configuration
   gabs games show <id>          Show details for a game
 
 Examples:
-  gabs games list               # See all your configured games
+  gabs games list               # See game IDs only (AI-friendly)
   gabs games add minecraft      # Add a new game called 'minecraft'
   gabs games show minecraft     # View configuration for 'minecraft'
   gabs games remove minecraft   # Remove the 'minecraft' configuration

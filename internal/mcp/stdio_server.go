@@ -70,7 +70,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 	// games.list tool
 	s.RegisterTool(Tool{
 		Name:        "games.list",
-		Description: "List all configured games and their current status",
+		Description: "List all configured game IDs",
 		InputSchema: map[string]interface{}{
 			"type":       "object",
 			"properties": map[string]interface{}{},
@@ -82,23 +82,11 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		if len(games) == 0 {
 			content.WriteString("No games configured. Use the CLI to add games: gabs games add <id>")
 		} else {
-			content.WriteString(fmt.Sprintf("Configured Games (%d):\n\n", len(games)))
-			for _, game := range games {
-				statusDesc := s.getStatusDescription(game.ID, &game)
-				content.WriteString(fmt.Sprintf("• **%s** - %s (%s)\n", game.ID, game.Name, statusDesc))
-				content.WriteString(fmt.Sprintf("  Use gameId: '%s' (or target: '%s')\n", game.ID, game.Target))
-				content.WriteString(fmt.Sprintf("  Launch: %s\n", game.LaunchMode))
-				if game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId" {
-					if game.StopProcessName != "" {
-						content.WriteString(fmt.Sprintf("  ✓ Configured for proper game termination (process: %s)\n", game.StopProcessName))
-					} else {
-						content.WriteString(fmt.Sprintf("  ⚠️  Missing stopProcessName - GABS can start but cannot properly stop %s games\n", game.LaunchMode))
-					}
+			for i, game := range games {
+				if i > 0 {
+					content.WriteString("\n")
 				}
-				if game.Description != "" {
-					content.WriteString(fmt.Sprintf("  %s\n", game.Description))
-				}
-				content.WriteString("\n")
+				content.WriteString(game.ID)
 			}
 		}
 		

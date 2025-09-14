@@ -206,7 +206,7 @@ func TestGameStopFix(t *testing.T) {
 		t.Log("✓ Steam game status provides clear explanation of limitations")
 	})
 
-	t.Run("GamesListShowsLimitations", func(t *testing.T) {
+	t.Run("GamesListIsSimplified", func(t *testing.T) {
 		// List all games
 		listMsg := &Message{
 			JSONRPC: "2.0",
@@ -226,9 +226,24 @@ func TestGameStopFix(t *testing.T) {
 		// Should mention missing stopProcessName for Steam games
 		if !strings.Contains(responseStr, "Missing stopProcessName") {
 			t.Error("Should warn about SteamAppId stop limitations in games list")
+		
+		// Should NOT contain limitation warnings - that's for games.status
+		if strings.Contains(responseStr, "cannot directly stop SteamAppId games") {
+			t.Error("games.list should be simplified and not show stop limitations")
+		}
+		if strings.Contains(responseStr, "Note:") {
+			t.Error("games.list should not contain verbose notes - should be simplified")
+		}
+		
+		// Should contain game IDs
+		if !strings.Contains(responseStr, "direct-game") {
+			t.Error("Expected to see game ID 'direct-game' in simplified output")
+		}
+		if !strings.Contains(responseStr, "steam-game") {
+			t.Error("Expected to see game ID 'steam-game' in simplified output")
 		}
 
-		t.Log("✓ Games list clearly indicates Steam/Epic limitations")
+		t.Log("✓ Games list is now simplified to just game IDs")
 	})
 }
 
