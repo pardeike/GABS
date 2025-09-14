@@ -97,6 +97,16 @@ func ReadBridgeJSON(gameID, configDir string) (string, int, string, error) {
 	return host, bridge.Port, bridge.Token, nil
 }
 
+// GetBridgeConfigPath returns the path to the bridge.json file for a given game
+func GetBridgeConfigPath(gameID string) string {
+	cfgDir, err := getConfigDir(gameID, "")
+	if err != nil {
+		// Fallback - should not happen in normal operation
+		return filepath.Join(os.TempDir(), gameID, "bridge.json")
+	}
+	return filepath.Join(cfgDir, "bridge.json")
+}
+
 // getConfigDir computes per-OS config directory
 func getConfigDir(gameID, override string) (string, error) {
 	if override != "" {
