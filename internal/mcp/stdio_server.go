@@ -529,8 +529,13 @@ func (s *Server) startGame(game config.GameConfig, backoffMin, backoffMax time.D
 	
 	s.log.Infow("game started with GABP bridge", "gameId", game.ID, "mode", game.LaunchMode, "pid", controller.GetPID(), "gabpPort", port)
 	
-	// TODO: In a future enhancement, we could start monitoring for GABP connections
-	// and automatically set up mirroring when the game mod connects
+	// Future Enhancement: When GABP mirroring is implemented, the workflow would be:
+	// 1. Game starts with bridge config
+	// 2. GABP client connects to game mod's server 
+	// 3. Mirror system syncs tools and sends tools/list_changed notification
+	// 4. AI agents automatically discover new capabilities via games.tools
+	//
+	// This ensures AI agents are notified when tool sets expand dynamically
 	
 	return nil
 }
