@@ -20,20 +20,9 @@ type BridgeJSON struct {
 	// PROMPT: Optional extra fields for mod consumption.
 }
 
-// BridgeConfig contains configuration for GABP connection (simplified for local-only use)
-type BridgeConfig struct {
-	// Reserved for future extensions - currently GABS only supports local communication
-}
-
 // WriteBridgeJSON generates a random port and token, writes bridge.json atomically to the config dir
 // Returns (port, token, configPath, error)
 func WriteBridgeJSON(gameID, configDir string) (int, string, string, error) {
-	return WriteBridgeJSONWithConfig(gameID, configDir, BridgeConfig{})
-}
-
-// WriteBridgeJSONWithConfig generates bridge.json (simplified for local-only use)
-// Returns (port, token, configPath, error)
-func WriteBridgeJSONWithConfig(gameID, configDir string, config BridgeConfig) (int, string, string, error) {
 	// Generate available port with conflict detection
 	port, err := findAvailablePort(49152, 65535)
 	if err != nil {

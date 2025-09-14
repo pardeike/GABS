@@ -615,9 +615,7 @@ func (s *Server) startGame(game config.GameConfig, backoffMin, backoffMax time.D
 	delete(s.games, game.ID)
 
 	// Create GABP bridge configuration (always local for GABS)
-	var bridgeConfig config.BridgeConfig
-
-	port, token, bridgePath, err := config.WriteBridgeJSONWithConfig(game.ID, "", bridgeConfig)
+	port, token, bridgePath, err := config.WriteBridgeJSON(game.ID, "")
 	if err != nil {
 		return fmt.Errorf("failed to create bridge config: %w", err)
 	}

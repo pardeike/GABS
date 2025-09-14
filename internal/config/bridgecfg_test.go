@@ -8,32 +8,28 @@ import (
 	"testing"
 )
 
-func TestWriteBridgeJSONWithConfig(t *testing.T) {
+func TestWriteBridgeJSON(t *testing.T) {
 	// Create temporary directory for testing
 	tempDir := t.TempDir()
 
 	tests := []struct {
 		name       string
 		gameID     string
-		config     BridgeConfig
 		expectHost string
 	}{
 		{
 			name:       "default config",
 			gameID:     "testgame",
-			config:     BridgeConfig{},
 			expectHost: "127.0.0.1",
 		},
 		{
 			name:       "local config (same as default)",
 			gameID:     "minecraft",
-			config:     BridgeConfig{},
 			expectHost: "127.0.0.1",
 		},
 		{
 			name:       "another local config",
 			gameID:     "rimworld",
-			config:     BridgeConfig{},
 			expectHost: "127.0.0.1",
 		},
 	}
@@ -47,9 +43,9 @@ func TestWriteBridgeJSONWithConfig(t *testing.T) {
 			}
 
 			// Write bridge.json with game-specific directory
-			port, token, cfgPath, err := WriteBridgeJSONWithConfig(tt.gameID, gameDir, tt.config)
+			port, token, cfgPath, err := WriteBridgeJSON(tt.gameID, gameDir)
 			if err != nil {
-				t.Fatalf("WriteBridgeJSONWithConfig failed: %v", err)
+				t.Fatalf("WriteBridgeJSON failed: %v", err)
 			}
 
 			// Verify return values
@@ -125,8 +121,7 @@ func TestReadBridgeJSON(t *testing.T) {
 	gameDir := filepath.Join(tempDir, "testread")
 
 	// First create a bridge.json file (always local for GABS)
-	config := BridgeConfig{}
-	port, token, _, err := WriteBridgeJSONWithConfig("testread", gameDir, config)
+	port, token, _, err := WriteBridgeJSON("testread", gameDir)
 	if err != nil {
 		t.Fatalf("Setup failed: %v", err)
 	}
