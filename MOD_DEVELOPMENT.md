@@ -4,7 +4,7 @@ This guide helps you add GABP support to your game mods so they can work with GA
 
 ## What is GABP?
 
-GABP (Game Agent Bridge Protocol) is a simple way for AI tools to talk to your game mods. Think of it like a translator between AI assistants and your game.
+[GABP](https://github.com/pardeike/GABP) (Game Agent Bridge Protocol) is a simple way for AI tools to talk to your game mods. Think of it like a translator between AI assistants and your game.
 
 ## Quick Overview
 
