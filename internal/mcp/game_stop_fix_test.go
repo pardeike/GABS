@@ -217,7 +217,7 @@ func TestGameStopFix(t *testing.T) {
 			Method:  "tools/call",
 			ID:      json.RawMessage(`"list-games"`),
 			Params: map[string]interface{}{
-				"name": "games.list",
+				"name":      "games.list",
 				"arguments": map[string]interface{}{},
 			},
 		}
@@ -234,7 +234,7 @@ func TestGameStopFix(t *testing.T) {
 		if strings.Contains(responseStr, "Note:") {
 			t.Error("games.list should not contain verbose notes - should be simplified")
 		}
-		
+
 		// Should contain game IDs
 		if !strings.Contains(responseStr, "direct-game") {
 			t.Error("Expected to see game ID 'direct-game' in simplified output")
@@ -251,10 +251,10 @@ func TestGameStopFix(t *testing.T) {
 func TestImprovedStatusReporting(t *testing.T) {
 	logger := util.NewLogger("info")
 	server := NewServer(logger)
-	
+
 	// Test the status description logic by checking actual behavior
 	// rather than trying to mock internal state
-	
+
 	t.Run("DirectGameStatusDescriptions", func(t *testing.T) {
 		// Create a temporary config for testing
 		tempDir, err := os.MkdirTemp("", "gabs_status_test")

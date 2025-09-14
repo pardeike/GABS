@@ -39,13 +39,13 @@ func (m *Mirror) SyncTools() error {
 		// Convert slashes to dots for reverse domain notation, keep dots as-is
 		sanitizedToolName := strings.ReplaceAll(tool.Name, "/", ".")
 		gameSpecificName := fmt.Sprintf("%s.%s", m.gameId, sanitizedToolName)
-		
+
 		mcpTool := mcp.Tool{
 			Name:        gameSpecificName,
 			Description: fmt.Sprintf("%s (Game: %s)", tool.Description, m.gameId),
 			InputSchema: tool.InputSchema,
 		}
-		
+
 		// Create handler that forwards to GABP with original tool name
 		originalToolName := tool.Name // Capture original name for GABP call
 		handler := func(toolName string) func(args map[string]interface{}) (*mcp.ToolResult, error) {
@@ -88,7 +88,7 @@ func (m *Mirror) SyncTools() error {
 	}
 
 	m.log.Infow("synced GABP tools to MCP with game namespacing", "gameId", m.gameId, "count", len(gabpTools))
-	
+
 	// TODO: Future enhancement - send tools/list_changed notification to AI agents
 	// This would automatically alert AI agents that new tools are available without
 	// them needing to poll. AI agents would then use games.tools to discover the
@@ -99,7 +99,7 @@ func (m *Mirror) SyncTools() error {
 	//
 	// This follows MCP specification for server-initiated notifications and ensures
 	// AI agents are immediately aware of dynamic tool expansion.
-	
+
 	return nil
 }
 

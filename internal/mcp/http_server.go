@@ -11,9 +11,9 @@ import (
 func (s *Server) ServeHTTP(ctx context.Context, addr string) error {
 	// For now, just a placeholder - Streamable HTTP is more complex
 	// It requires SSE (Server-Sent Events) for bi-directional communication
-	
+
 	mux := http.NewServeMux()
-	
+
 	// Basic health check endpoint
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -34,7 +34,7 @@ func (s *Server) ServeHTTP(ctx context.Context, addr string) error {
 	}
 
 	s.log.Infow("starting HTTP server", "addr", addr)
-	
+
 	// Start server in goroutine
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -44,10 +44,10 @@ func (s *Server) ServeHTTP(ctx context.Context, addr string) error {
 
 	// Wait for context cancellation
 	<-ctx.Done()
-	
+
 	// Graceful shutdown
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	
+
 	return server.Shutdown(shutdownCtx)
 }

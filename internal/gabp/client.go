@@ -14,18 +14,18 @@ import (
 
 // Client speaks GABP over TCP NDJSON.
 type Client struct {
-	conn           net.Conn
-	writer         *util.LSPFrameWriter
-	reader         *util.LSPFrameReader
-	token          string
-	agentId        string
-	capabilities   Capabilities
-	pendingReqs    map[string]chan *util.GABPMessage
-	mu             sync.RWMutex
-	log            util.Logger
-	eventHandlers  map[string][]EventHandler
-	sequences      map[string]int
-	connected      bool
+	conn          net.Conn
+	writer        *util.LSPFrameWriter
+	reader        *util.LSPFrameReader
+	token         string
+	agentId       string
+	capabilities  Capabilities
+	pendingReqs   map[string]chan *util.GABPMessage
+	mu            sync.RWMutex
+	log           util.Logger
+	eventHandlers map[string][]EventHandler
+	sequences     map[string]int
+	connected     bool
 }
 
 // EventHandler is a function that handles events
@@ -33,10 +33,10 @@ type EventHandler func(channel string, seq int, payload interface{})
 
 // Capabilities represents server capabilities from welcome response
 type Capabilities struct {
-	Methods   []string     `json:"methods"`
-	Events    []string     `json:"events"`
-	Resources []string     `json:"resources"`
-	Limits    *Limits      `json:"limits,omitempty"`
+	Methods   []string `json:"methods"`
+	Events    []string `json:"events"`
+	Resources []string `json:"resources"`
+	Limits    *Limits  `json:"limits,omitempty"`
 }
 
 // Limits represents server limits
@@ -95,11 +95,11 @@ func NewClient(log util.Logger) *Client {
 
 func (c *Client) Connect(addr string, token string, backoffMin, backoffMax time.Duration) error {
 	c.token = token
-	
+
 	// Connect with retry/backoff
 	var conn net.Conn
 	var err error
-	
+
 	// For now, simple connection without full backoff implementation
 	// TODO: Implement proper exponential backoff
 	for attempts := 0; attempts < 5; attempts++ {
@@ -110,7 +110,7 @@ func (c *Client) Connect(addr string, token string, backoffMin, backoffMax time.
 		c.log.Warnw("connection attempt failed", "attempt", attempts+1, "error", err)
 		time.Sleep(backoffMin)
 	}
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to connect after retries: %w", err)
 	}
@@ -223,7 +223,7 @@ func (c *Client) handleEvent(msg *util.GABPMessage) {
 
 func (c *Client) sendRequest(method string, params interface{}) (interface{}, error) {
 	req := util.NewGABPRequest(method, params)
-	
+
 	// Register response channel
 	respCh := make(chan *util.GABPMessage, 1)
 	c.mu.Lock()

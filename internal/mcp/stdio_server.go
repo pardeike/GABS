@@ -77,7 +77,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
 		games := gamesConfig.ListGames()
-		
+
 		var content strings.Builder
 		if len(games) == 0 {
 			content.WriteString("No games configured. Use the CLI to add games: gabs games add <id>")
@@ -89,7 +89,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				content.WriteString(game.ID)
 			}
 		}
-		
+
 		return &ToolResult{
 			Content: []Content{{Type: "text", Text: content.String()}},
 		}, nil
@@ -110,7 +110,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
 		gameIdOrTarget, hasGameID := args["gameId"].(string)
-		
+
 		var content strings.Builder
 		if hasGameID {
 			// Check specific game
@@ -121,10 +121,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 					IsError: true,
 				}, nil
 			}
-			
+
 			statusDesc := s.getStatusDescription(game.ID, game)
 			content.WriteString(fmt.Sprintf("**%s** (%s): %s\n", game.ID, game.Name, statusDesc))
-			
+
 			// Add helpful info for launcher games
 			if game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId" {
 				status := s.checkGameStatus(game.ID)
@@ -141,7 +141,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				content.WriteString(fmt.Sprintf("• **%s**: %s\n", game.ID, statusDesc))
 			}
 		}
-		
+
 		return &ToolResult{
 			Content: []Content{{Type: "text", Text: content.String()}},
 		}, nil
@@ -225,15 +225,15 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		err := s.stopGame(*game, false)
 		if err != nil {
 			// Check if this is a launcher-specific limitation
-			if strings.Contains(err.Error(), "launcher process stopped") || 
-			   strings.Contains(err.Error(), "may still be running independently") {
+			if strings.Contains(err.Error(), "launcher process stopped") ||
+				strings.Contains(err.Error(), "may still be running independently") {
 				// This is expected behavior for Steam/Epic games - not a failure
 				return &ToolResult{
 					Content: []Content{{Type: "text", Text: fmt.Sprintf("⚠️ %s\n\nNote: For Steam/Epic games, GABS can only stop the launcher process, not the actual game. To fully stop the game, use Steam/Epic's interface or the game's own quit option.", err.Error())}},
 					IsError: false,
 				}, nil
 			}
-			
+
 			return &ToolResult{
 				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to stop %s: %v", game.ID, err)}},
 				IsError: true,
@@ -279,15 +279,15 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		err := s.stopGame(*game, true)
 		if err != nil {
 			// Check if this is a launcher-specific limitation
-			if strings.Contains(err.Error(), "launcher process stopped") || 
-			   strings.Contains(err.Error(), "may still be running independently") {
+			if strings.Contains(err.Error(), "launcher process stopped") ||
+				strings.Contains(err.Error(), "may still be running independently") {
 				// This is expected behavior for Steam/Epic games - not a failure
 				return &ToolResult{
 					Content: []Content{{Type: "text", Text: fmt.Sprintf("⚠️ %s\n\nNote: For Steam/Epic games, GABS can only kill the launcher process, not the actual game. To fully terminate the game, use Steam/Epic's interface or the game's own quit option.", err.Error())}},
 					IsError: false,
 				}, nil
 			}
-			
+
 			return &ToolResult{
 				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to kill %s: %v", game.ID, err)}},
 				IsError: true,
@@ -301,22 +301,22 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 
 	// games.tools tool - List tools available for specific games
 	s.RegisterTool(Tool{
-		Name:        "games.tools", 
+		Name:        "games.tools",
 		Description: "List game-specific tools available from running games with GABP connections",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
-					"type":        "string", 
+					"type":        "string",
 					"description": "Game ID to list tools for (optional, lists all if not provided)",
 				},
 			},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
 		gameId, hasGameID := args["gameId"].(string)
-		
+
 		var content strings.Builder
-		
+
 		if hasGameID {
 			// List tools for specific game
 			game, exists := s.resolveGameId(gamesConfig, gameId)
@@ -326,7 +326,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 					IsError: true,
 				}, nil
 			}
-			
+
 			content.WriteString(fmt.Sprintf("Tools for game '%s':\n\n", game.ID))
 			// Get tools that start with this game's prefix
 			gameTools := s.getGameSpecificTools(game.ID)
@@ -345,7 +345,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			// List tools for all games
 			content.WriteString("Game-Specific Tools Available:\n\n")
 			games := gamesConfig.ListGames()
-			
+
 			hasAnyTools := false
 			for _, game := range games {
 				gameTools := s.getGameSpecificTools(game.ID)
@@ -359,15 +359,15 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 					content.WriteString("\n")
 				}
 			}
-			
+
 			if !hasAnyTools {
 				content.WriteString("No game-specific tools available.\n")
 				content.WriteString("Start games with GABP-compliant mods to see their tools.\n")
 			}
-			
+
 			content.WriteString("\nNote: Tools are prefixed with game ID (e.g., 'minecraft.inventory.get') to avoid conflicts between games.\n")
 		}
-		
+
 		return &ToolResult{
 			Content: []Content{{Type: "text", Text: content.String()}},
 		}, nil
@@ -389,14 +389,14 @@ func (s *Server) resolveGameId(gamesConfig *config.GamesConfig, gameIdOrTarget s
 	if game, exists := gamesConfig.GetGame(gameIdOrTarget); exists {
 		return game, true
 	}
-	
+
 	// If not found, try to find by target (Steam App ID, path, etc.)
 	for _, game := range gamesConfig.ListGames() {
 		if game.Target == gameIdOrTarget {
 			return &game, true
 		}
 	}
-	
+
 	return nil, false
 }
 
@@ -404,16 +404,16 @@ func (s *Server) resolveGameId(gamesConfig *config.GamesConfig, gameIdOrTarget s
 func (s *Server) getGameSpecificTools(gameID string) []Tool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	var gameTools []Tool
 	prefix := gameID + "."
-	
+
 	for toolName, handler := range s.tools {
 		if strings.HasPrefix(toolName, prefix) {
 			gameTools = append(gameTools, handler.Tool)
 		}
 	}
-	
+
 	return gameTools
 }
 
@@ -421,7 +421,7 @@ func (s *Server) getGameSpecificTools(gameID string) []Tool {
 // getStatusDescription provides a user-friendly description of the game status
 func (s *Server) getStatusDescription(gameID string, gameConfig *config.GameConfig) string {
 	status := s.checkGameStatus(gameID)
-	
+
 	switch status {
 	case "running":
 		return "running (GABS controls the process)"
@@ -439,14 +439,14 @@ func (s *Server) getStatusDescription(gameID string, gameConfig *config.GameConf
 func (s *Server) checkGameStatus(gameID string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	controller, exists := s.games[gameID]
 	if !exists {
 		return "stopped"
 	}
 
 	launchMode := controller.GetLaunchMode()
-	
+
 	// For Steam/Epic launcher games, we can't easily track the actual game process
 	// So we use a different status model with clearer messaging
 	if launchMode == "SteamAppId" || launchMode == "EpicAppId" {
@@ -469,7 +469,7 @@ func (s *Server) checkGameStatus(gameID string) string {
 	delete(s.games, gameID)
 	// TODO: Also cleanup any GABP connections and mirrored tools for this game
 	s.log.Debugw("cleaned up dead game process", "gameId", gameID)
-	
+
 	return "stopped"
 }
 
@@ -526,17 +526,17 @@ func (s *Server) startGame(game config.GameConfig, backoffMin, backoffMax time.D
 
 	// Track the running game
 	s.games[game.ID] = controller
-	
+
 	s.log.Infow("game started with GABP bridge", "gameId", game.ID, "mode", game.LaunchMode, "pid", controller.GetPID(), "gabpPort", port)
-	
+
 	// Future Enhancement: When GABP mirroring is implemented, the workflow would be:
 	// 1. Game starts with bridge config
-	// 2. GABP client connects to game mod's server 
+	// 2. GABP client connects to game mod's server
 	// 3. Mirror system syncs tools and sends tools/list_changed notification
 	// 4. AI agents automatically discover new capabilities via games.tools
 	//
 	// This ensures AI agents are notified when tool sets expand dynamically
-	
+
 	return nil
 }
 
@@ -550,7 +550,7 @@ func (s *Server) stopGame(game config.GameConfig, force bool) error {
 	}
 
 	launchMode := controller.GetLaunchMode()
-	
+
 	// Remove from tracking immediately to prevent double-stops
 	delete(s.games, game.ID)
 	s.mu.Unlock()
@@ -565,13 +565,13 @@ func (s *Server) stopGame(game config.GameConfig, force bool) error {
 		} else {
 			err = controller.Stop(3 * time.Second)
 		}
-		
+
 		if err != nil {
 			s.log.Infow("launcher process stop failed (may have already exited)", "gameId", game.ID, "mode", launchMode, "error", err)
 		} else {
 			s.log.Infow("launcher process stopped", "gameId", game.ID, "mode", launchMode, "pid", controller.GetPID())
 		}
-		
+
 		// Return a specific message for launcher-based games
 		return fmt.Errorf("launcher process stopped, but actual %s game may still be running independently. GABS cannot directly control %s-launched games. Please stop the game through %s or the game's own interface", launchMode, launchMode, launchMode)
 	}
@@ -690,7 +690,7 @@ func (s *Server) handleToolsCall(msg *Message) *Message {
 	if err != nil {
 		return NewError(msg.ID, -32602, "Invalid params", err.Error())
 	}
-	
+
 	if err := json.Unmarshal(paramsBytes, &params); err != nil {
 		return NewError(msg.ID, -32602, "Invalid params", err.Error())
 	}
@@ -730,7 +730,7 @@ func (s *Server) handleResourcesRead(msg *Message) *Message {
 	if err != nil {
 		return NewError(msg.ID, -32602, "Invalid params", err.Error())
 	}
-	
+
 	if err := json.Unmarshal(paramsBytes, &params); err != nil {
 		return NewError(msg.ID, -32602, "Invalid params", err.Error())
 	}
