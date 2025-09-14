@@ -1,0 +1,54 @@
+<svg width="800" height="200" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .box { fill: #f8f9fa; stroke: #2563eb; stroke-width: 2; rx: 8; }
+      .text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px; text-anchor: middle; dominant-baseline: middle; fill: #1f2937; }
+      .arrow { stroke: #059669; stroke-width: 3; fill: none; marker-end: url(#arrowhead); }
+      .protocol { font-size: 12px; fill: #6b7280; text-anchor: middle; dominant-baseline: middle; }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#059669"/>
+    </marker>
+  </defs>
+  
+  <!-- AI Assistant Box -->
+  <rect x="20" y="70" width="120" height="60" class="box"/>
+  <text x="80" y="100" class="text">AI Assistant</text>
+  
+  <!-- MCP Tools Connection -->
+  <line x1="140" y1="100" x2="200" y2="100" class="arrow"/>
+  <text x="170" y="90" class="protocol">MCP Tools</text>
+  
+  <!-- GABS Box -->
+  <rect x="220" y="70" width="120" height="60" class="box"/>
+  <text x="280" y="100" class="text">GABS</text>
+  
+  <!-- GABP Connection -->
+  <line x1="340" y1="100" x2="400" y2="100" class="arrow"/>
+  <text x="370" y="90" class="protocol">GABP</text>
+  
+  <!-- Game Mod Box -->
+  <rect x="420" y="70" width="120" height="60" class="box"/>
+  <text x="480" y="100" class="text">Game Mod</text>
+  
+  <!-- Game Connection -->
+  <line x1="540" y1="100" x2="600" y2="100" class="arrow"/>
+  <text x="570" y="90" class="protocol">Game API</text>
+  
+  <!-- Your Game Box -->
+  <rect x="620" y="70" width="120" height="60" class="box"/>
+  <text x="680" y="100" class="text">Your Game</text>
+  
+  <!-- Tool examples -->
+  <text x="80" y="40" class="protocol">games_start</text>
+  <text x="80" y="25" class="protocol">games_stop</text>
+  <text x="80" y="10" class="protocol">games_list</text>
+  
+  <!-- Bidirectional arrows for real-time communication -->
+  <line x1="200" y1="110" x2="140" y2="110" class="arrow"/>
+  <line x1="400" y1="110" x2="340" y2="110" class="arrow"/>
+  <line x1="600" y1="110" x2="540" y2="110" class="arrow"/>
+  
+  <!-- Info text -->
+  <text x="400" y="170" class="protocol">Real-time bidirectional communication enables AI to control games and receive live updates</text>
+</svg>
