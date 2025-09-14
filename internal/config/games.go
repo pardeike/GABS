@@ -20,10 +20,22 @@ type GameConfig struct {
 	Description     string   `json:"description,omitempty"`
 }
 
+// ToolNormalizationConfig configures how MCP tool names are normalized for different clients
+type ToolNormalizationConfig struct {
+	// EnableOpenAINormalization converts tool names to be OpenAI API compatible
+	// Replaces dots with underscores and enforces 64-character limit
+	EnableOpenAINormalization bool `json:"enableOpenAINormalization,omitempty"`
+	// MaxToolNameLength restricts tool names to this length (default: 64 for OpenAI compatibility)
+	MaxToolNameLength int `json:"maxToolNameLength,omitempty"`
+	// PreserveOriginalName preserves the original MCP name in tool description or metadata
+	PreserveOriginalName bool `json:"preserveOriginalName,omitempty"`
+}
+
 // GamesConfig represents the main GABS configuration
 type GamesConfig struct {
-	Version string                `json:"version"`
-	Games   map[string]GameConfig `json:"games"`
+	Version            string                   `json:"version"`
+	Games              map[string]GameConfig    `json:"games"`
+	ToolNormalization  *ToolNormalizationConfig `json:"toolNormalization,omitempty"`
 }
 
 // LoadGamesConfig loads the games configuration from the standard location
@@ -41,11 +53,16 @@ func LoadGamesConfigFromPath(configPath string) (*GamesConfig, error) {
 		}
 	}
 
-	// If config doesn't exist, return empty config
+	// If config doesn't exist, return empty config with defaults
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		return &GamesConfig{
 			Version: "1.0",
 			Games:   make(map[string]GameConfig),
+			ToolNormalization: &ToolNormalizationConfig{
+				EnableOpenAINormalization: false, // Off by default for backward compatibility
+				MaxToolNameLength:         64,    // OpenAI limit
+				PreserveOriginalName:      true,  // Always preserve original name
+			},
 		}, nil
 	}
 
@@ -57,6 +74,20 @@ func LoadGamesConfigFromPath(configPath string) (*GamesConfig, error) {
 	var config GamesConfig
 	if err := json.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	// Ensure tool normalization defaults are set if not present in config
+	if config.ToolNormalization == nil {
+		config.ToolNormalization = &ToolNormalizationConfig{
+			EnableOpenAINormalization: false, // Off by default for backward compatibility
+			MaxToolNameLength:         64,    // OpenAI limit
+			PreserveOriginalName:      true,  // Always preserve original name
+		}
+	} else {
+		// Set defaults for missing fields
+		if config.ToolNormalization.MaxToolNameLength == 0 {
+			config.ToolNormalization.MaxToolNameLength = 64
+		}
 	}
 
 	return &config, nil
@@ -175,6 +206,18 @@ func (c *GamesConfig) ListGames() []GameConfig {
 		games = append(games, game)
 	}
 	return games
+}
+
+// GetToolNormalization returns tool normalization settings with defaults
+func (c *GamesConfig) GetToolNormalization() *ToolNormalizationConfig {
+	if c.ToolNormalization == nil {
+		return &ToolNormalizationConfig{
+			EnableOpenAINormalization: false,
+			MaxToolNameLength:         64,
+			PreserveOriginalName:      true,
+		}
+	}
+	return c.ToolNormalization
 }
 
 // getGamesConfigPath returns the path to the main GABS config file
