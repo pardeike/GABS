@@ -1,7 +1,9 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -151,6 +153,59 @@ func TestGamesConfig(t *testing.T) {
 			if !gameIds[expectedId] {
 				t.Errorf("Expected to find game %s in list", expectedId)
 			}
+		}
+	})
+}
+
+func TestNewGabsDirectoryStructure(t *testing.T) {
+	t.Run("ConfigPathUsesHomeGabsDirectory", func(t *testing.T) {
+		configPath, err := getGamesConfigPath()
+		if err != nil {
+			t.Fatalf("Failed to get config path: %v", err)
+		}
+		
+		// Verify the path ends with .gabs/config.json
+		if !strings.Contains(configPath, ".gabs") {
+			t.Errorf("Expected config path to contain '.gabs', got: %s", configPath)
+		}
+		
+		if !strings.HasSuffix(configPath, "config.json") {
+			t.Errorf("Expected config path to end with 'config.json', got: %s", configPath)
+		}
+		
+		// Get home directory to verify the full path structure
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			t.Fatalf("Failed to get home directory: %v", err)
+		}
+		
+		expectedPath := filepath.Join(homeDir, ".gabs", "config.json")
+		if configPath != expectedPath {
+			t.Errorf("Expected config path '%s', got '%s'", expectedPath, configPath)
+		}
+	})
+	
+	t.Run("BridgeConfigUsesGabsDirectory", func(t *testing.T) {
+		gameID := "test-game"
+		configDir, err := getConfigDir(gameID, "")
+		if err != nil {
+			t.Fatalf("Failed to get config directory: %v", err)
+		}
+		
+		// Verify the path contains .gabs
+		if !strings.Contains(configDir, ".gabs") {
+			t.Errorf("Expected config directory to contain '.gabs', got: %s", configDir)
+		}
+		
+		// Get home directory to verify the full path structure
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			t.Fatalf("Failed to get home directory: %v", err)
+		}
+		
+		expectedPath := filepath.Join(homeDir, ".gabs", gameID)
+		if configDir != expectedPath {
+			t.Errorf("Expected config directory '%s', got '%s'", expectedPath, configDir)
 		}
 	})
 }

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 )
 
 // GameConfig represents a single game configuration
@@ -138,34 +137,12 @@ func (c *GamesConfig) ListGames() []GameConfig {
 
 // getGamesConfigPath returns the path to the main GABS config file
 func getGamesConfigPath() (string, error) {
-	var baseDir string
-	switch runtime.GOOS {
-	case "windows":
-		// %APPDATA%\GABS\config.json
-		appData := os.Getenv("APPDATA")
-		if appData == "" {
-			return "", fmt.Errorf("APPDATA environment variable not set")
-		}
-		baseDir = filepath.Join(appData, "GABS")
-	case "darwin":
-		// ~/Library/Application Support/GABS/config.json
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("failed to get home directory: %w", err)
-		}
-		baseDir = filepath.Join(homeDir, "Library", "Application Support", "GABS")
-	default:
-		// Linux: $XDG_CONFIG_HOME/gabs/config.json or ~/.config/gabs/config.json
-		configHome := os.Getenv("XDG_CONFIG_HOME")
-		if configHome == "" {
-			homeDir, err := os.UserHomeDir()
-			if err != nil {
-				return "", fmt.Errorf("failed to get home directory: %w", err)
-			}
-			configHome = filepath.Join(homeDir, ".config")
-		}
-		baseDir = filepath.Join(configHome, "gabs")
+	// Use ~/.gabs/ directory on all platforms as requested in the issue
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
 	}
-
+	
+	baseDir := filepath.Join(homeDir, ".gabs")
 	return filepath.Join(baseDir, "config.json"), nil
 }

@@ -683,11 +683,9 @@ public class MinecraftMod : GABPMod {
 
 ### Platform-Specific Config Locations
 
-GABS creates configuration in standard locations:
+GABS creates configuration in the user's home directory:
 
-- **Windows**: `%APPDATA%\GAB\{gameId}\bridge.json`
-- **macOS**: `~/Library/Application Support/GAB/{gameId}/bridge.json`
-- **Linux**: `~/.local/state/gab/{gameId}/bridge.json`
+- **All platforms**: `~/.gabs/{gameId}/bridge.json`
 
 ### Environment Variables
 
