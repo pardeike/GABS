@@ -20,23 +20,31 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 	logger := util.NewLogger("info")
 	server := NewServer(logger)
 
+	// Create shared games config for all phases
+	gamesConfig := &config.GamesConfig{}
+	err1 := gamesConfig.AddGame(config.GameConfig{
+		ID:         "minecraft",
+		Name:       "Minecraft Server",
+		LaunchMode: "DirectPath",
+		Target:     "/opt/minecraft/server.jar",
+	})
+	if err1 != nil {
+		t.Fatalf("Failed to add minecraft game: %v", err1)
+	}
+	
+	err2 := gamesConfig.AddGame(config.GameConfig{
+		ID:              "rimworld",
+		Name:            "RimWorld",
+		LaunchMode:      "SteamAppId",
+		Target:          "294100",
+		StopProcessName: "RimWorldWin64.exe", // Required for Steam games
+	})
+	if err2 != nil {
+		t.Fatalf("Failed to add rimworld game: %v", err2)
+	}
+
 	// Step 1: Simulate initial GABS server state - only core game management tools
 	t.Run("Phase1_InitialState", func(t *testing.T) {
-		// Create minimal games config for testing
-		gamesConfig := &config.GamesConfig{}
-		gamesConfig.AddGame(config.GameConfig{
-			ID:         "minecraft",
-			Name:       "Minecraft Server",
-			LaunchMode: "DirectPath",
-			Target:     "/opt/minecraft/server.jar",
-		})
-		gamesConfig.AddGame(config.GameConfig{
-			ID:         "rimworld",
-			Name:       "RimWorld",
-			LaunchMode: "SteamAppId",
-			Target:     "294100",
-		})
-
 		// Register core game management tools (what GABS starts with)
 		server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, 5*time.Second)
 
@@ -172,13 +180,15 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 
 		// Register Minecraft tools (as Mirror would do)
 		for _, tool := range minecraftTools {
-			server.RegisterTool(tool, func(toolName string) func(args map[string]interface{}) (*ToolResult, error) {
+			// Capture tool by value to avoid closure bug
+			currentTool := tool
+			server.RegisterTool(currentTool, func(toolName string) func(args map[string]interface{}) (*ToolResult, error) {
 				return func(args map[string]interface{}) (*ToolResult, error) {
 					return &ToolResult{
 						Content: []Content{{Type: "text", Text: fmt.Sprintf("Executed %s with args: %v", toolName, args)}},
 					}, nil
 				}
-			}(tool.Name))
+			}(currentTool.Name))
 		}
 
 		t.Logf("✅ Registered %d Minecraft tools", len(minecraftTools))
@@ -304,7 +314,8 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 		}
 
 		// Register RimWorld tools
-		for _, tool := range rimworldTools {
+		for i := 0; i < len(rimworldTools); i++ {
+			tool := rimworldTools[i] // Get by index to avoid range loop issues
 			server.RegisterTool(tool, func(toolName string) func(args map[string]interface{}) (*ToolResult, error) {
 				return func(args map[string]interface{}) (*ToolResult, error) {
 					return &ToolResult{
