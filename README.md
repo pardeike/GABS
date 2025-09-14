@@ -97,6 +97,13 @@ Add GABS to your AI's MCP settings:
 }
 ```
 
+**Codex CLI:**
+```toml
+[mcp_servers.gabs]
+command = "gabs"
+args = ["server"]
+```
+
 **Then ask your AI:**
 - "List my games"
 - "Start the Minecraft server"
