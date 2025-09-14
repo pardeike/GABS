@@ -418,9 +418,9 @@ func TestGameConfigValidation(t *testing.T) {
 				expectedErr: "launch mode is required",
 			},
 			{
-				name:        "Missing Target",
-				game:        GameConfig{ID: "test", Name: "Test", LaunchMode: "DirectPath"},
-				expectedErr: "target is required",
+				name:        "Missing Target for SteamAppId",
+				game:        GameConfig{ID: "test", Name: "Test", LaunchMode: "SteamAppId"},
+				expectedErr: "target is required for SteamAppId launch mode",
 			},
 		}
 
@@ -451,6 +451,20 @@ func TestGameConfigValidation(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "invalid launch mode") {
 			t.Errorf("Expected error about invalid launch mode, got: %v", err)
+		}
+	})
+
+	t.Run("AllowEmptyTargetForDirectPath", func(t *testing.T) {
+		game := GameConfig{
+			ID:         "test",
+			Name:       "Test",
+			LaunchMode: "DirectPath",
+			Target:     "", // Empty target should be allowed for DirectPath
+		}
+		
+		err := game.Validate()
+		if err != nil {
+			t.Errorf("Expected validation to pass for DirectPath with empty target, got: %v", err)
 		}
 	})
 }

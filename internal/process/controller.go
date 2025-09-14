@@ -257,7 +257,10 @@ func (c *Controller) IsLauncherProcessRunning() bool {
 func (c *Controller) Restart() error {
 	// Stop then Start, preserving spec
 	if err := c.Stop(3 * time.Second); err != nil {
-		// Continue with restart even if stop fails
+		// Log the stop error but continue with restart
+		// The failure might be because the process was already dead
+		// In that case, starting should still work
+		fmt.Fprintf(os.Stderr, "Warning: Stop failed during restart: %v\n", err)
 	}
 	return c.Start()
 }

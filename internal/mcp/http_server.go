@@ -54,14 +54,25 @@ func (s *Server) ServeHTTP(ctx context.Context, addr string) error {
 	s.log.Infow("starting HTTP server with full MCP support", "addr", addr)
 
 	// Start server in goroutine
+	errCh := make(chan error, 1)
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			s.log.Errorw("HTTP server error", "error", err)
+			errCh <- err
+		} else {
+			errCh <- nil
 		}
 	}()
 
-	// Wait for context cancellation
-	<-ctx.Done()
+	// Wait for context cancellation or server error
+	select {
+	case <-ctx.Done():
+		// Context cancelled, proceed with graceful shutdown
+	case err := <-errCh:
+		if err != nil {
+			return err
+		}
+	}
 
 	// Close all SSE connections
 	httpClientsMu.Lock()
@@ -86,12 +97,20 @@ func (s *Server) handleMCPHTTPRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Limit request body size to prevent memory exhaustion
+	const maxBodySize = 1 << 20 // 1MB
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
+
 	// Read request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintf(w, `{"error":"Failed to read request body"}`)
+		if err.Error() == "http: request body too large" {
+			fmt.Fprintf(w, `{"error":"Request body too large (max %d bytes)"}`, maxBodySize)
+		} else {
+			fmt.Fprintf(w, `{"error":"Failed to read request body"}`)
+		}
 		return
 	}
 	defer r.Body.Close()

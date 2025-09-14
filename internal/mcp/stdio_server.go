@@ -859,15 +859,17 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 	// Track this writer for notifications
 	s.writersMu.Lock()
 	s.writers = append(s.writers, writer)
-	writerIndex := len(s.writers) - 1
 	s.writersMu.Unlock()
 
 	// Clean up writer on exit
 	defer func() {
 		s.writersMu.Lock()
-		// Remove writer from slice
-		if writerIndex < len(s.writers) {
-			s.writers = append(s.writers[:writerIndex], s.writers[writerIndex+1:]...)
+		// Find and remove writer from slice (safer than using index)
+		for i, w := range s.writers {
+			if w == writer {
+				s.writers = append(s.writers[:i], s.writers[i+1:]...)
+				break
+			}
 		}
 		s.writersMu.Unlock()
 	}()

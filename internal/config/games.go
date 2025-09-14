@@ -136,8 +136,13 @@ func SaveGamesConfigToPath(config *GamesConfig, configPath string) error {
 
 // GetGame returns a game configuration by ID
 func (c *GamesConfig) GetGame(gameID string) (*GameConfig, bool) {
-	game, exists := c.Games[gameID]
-	return &game, exists
+	if game, exists := c.Games[gameID]; exists {
+		// We need to create a copy and return a pointer to it
+		// since we can't take the address of a map index directly
+		gameCopy := game
+		return &gameCopy, true
+	}
+	return nil, false
 }
 
 // AddGame adds or updates a game configuration after validation
@@ -163,8 +168,10 @@ func (g *GameConfig) Validate() error {
 	if g.LaunchMode == "" {
 		return fmt.Errorf("launch mode is required")
 	}
-	if g.Target == "" {
-		return fmt.Errorf("target is required")
+	// Allow empty Target for minimal configurations in automated environments
+	// The user can set it manually later if needed
+	if g.Target == "" && g.LaunchMode != "DirectPath" {
+		return fmt.Errorf("target is required for %s launch mode", g.LaunchMode)
 	}
 
 	// Validate launch mode
