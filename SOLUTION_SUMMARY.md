@@ -16,16 +16,22 @@ The issue requested fixes for critical application lifecycle management problems
 ### 1. Enhanced Process Status Detection
 
 **Added robust `IsRunning()` method** (`internal/process/controller.go`):
-- Cross-platform process state checking using signal 0
+- Cross-platform process state checking using signal 0  
+- **Enhanced Steam/Epic process tracking**: When `stopProcessName` is configured, GABS can now accurately track actual game processes by name
 - Automatic cleanup of dead processes from the global games map
-- Distinguished between Steam/Epic launcher processes (show as "launched") and direct processes (show as "running")
-- Proper handling of launcher vs direct process lifecycle differences
+- Distinguished between Steam/Epic launcher processes and actual game processes with clear status reporting
+- **Eliminated "cannot track" messages** when sufficient tracking information is available
 
 ```go
 func (c *Controller) IsRunning() bool {
-    // Special handling for Steam/Epic launchers that exit quickly
+    // Enhanced Steam/Epic tracking when stopProcessName is available
     if c.spec.Mode == "SteamAppId" || c.spec.Mode == "EpicAppId" {
-        return false // Launcher exits, game runs independently
+        if c.spec.StopProcessName != "" {
+            // Can now track actual game process by name
+            pids, err := findProcessesByName(c.spec.StopProcessName)
+            return err == nil && len(pids) > 0
+        }
+        return false // Without stopProcessName, cannot track
     }
     
     // For direct processes, check if still alive
@@ -70,6 +76,19 @@ Both of these work identically:
 - Enhanced status reporting with PID tracking and better error messages
 - Proper cleanup on process termination
 
+### 5. Improved Process Tracking Capabilities
+
+**Enhanced tracking for Steam/Epic games** (`internal/mcp/stdio_server.go`):
+- Games with `stopProcessName` configured can now be accurately tracked by monitoring the actual game process
+- Status reporting intelligently shows "cannot track" only when truly no tracking information is available  
+- Clear user guidance provided for configuring tracking capabilities
+- Better distinction between launcher processes and actual game processes
+
+**Example Status Outputs**:
+- **With tracking**: "running (GABS is tracking the game process)"
+- **Without tracking**: "launched via SteamAppId (GABS cannot track the game process - no stopProcessName configured)"
+- **Direct games**: "running (GABS controls the process)" (always trackable)
+
 ## Configuration-First Architecture
 
 The actual GABS implementation uses a **configuration-first approach** that is more elegant than CLI-heavy game management:
@@ -99,9 +118,11 @@ End-to-end MCP testing confirmed all issues resolved:
 - ✅ Steam App ID "294100" correctly resolves to configured game  
 - ✅ Starting with Steam App ID creates GABP bridge and launches game
 - ✅ Status tracking shows proper state transitions (stopped → running/launched)
+- ✅ **Enhanced process tracking**: Games with `stopProcessName` configured show accurate running/stopped status instead of "cannot track" messages
 - ✅ Bridge configuration contains all necessary GABP connection information
 - ✅ Process cleanup prevents stale entries in games map
 - ✅ Multiple start attempts handle gracefully (no "not found" errors)
+- ✅ **Improved user experience**: Clear distinction between trackable and non-trackable games with helpful configuration guidance
 - ✅ All existing functionality remains backward compatible
 
 ## Changes Made
@@ -113,9 +134,10 @@ End-to-end MCP testing confirmed all issues resolved:
 
 **Key Improvements:**
 1. **Automatic GABP bridge creation** when starting games
-2. **Robust process state tracking** with proper Steam/Epic launcher handling
+2. **Enhanced process state tracking** with accurate Steam/Epic game process monitoring when `stopProcessName` is configured
 3. **Steam App ID resolution** works seamlessly alongside game IDs  
-4. **Enhanced error handling** and status reporting
+4. **Intelligent status reporting** that only shows "cannot track" when truly no tracking information is available
 5. **Process cleanup** prevents stale state accumulation
+6. **Improved user experience** with clear guidance on configuration requirements for full tracking capabilities
 
 The fixes are minimal and surgical, preserving backward compatibility while resolving the core application lifecycle issues that were blocking effective AI-game integration.

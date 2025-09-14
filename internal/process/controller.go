@@ -187,22 +187,30 @@ func (c *Controller) Kill() error {
 
 // IsRunning checks if the controlled process is still running
 func (c *Controller) IsRunning() bool {
+	// Special case: Steam/Epic launchers exit quickly but game continues
+	// If we have a StopProcessName configured, we can track the actual game process
+	if c.spec.Mode == "SteamAppId" || c.spec.Mode == "EpicAppId" {
+		if c.spec.StopProcessName != "" {
+			// We can track the actual game process by name
+			pids, err := findProcessesByName(c.spec.StopProcessName)
+			if err != nil {
+				// If we can't check processes, assume not running
+				return false
+			}
+			// If we found processes with this name, the game is running
+			return len(pids) > 0
+		}
+		
+		// Without StopProcessName, we can't track launcher-based games
+		// The launcher process itself exits quickly, but the game continues independently
+		return false
+	}
+
+	// For direct processes, check the managed process
 	if c.cmd == nil || c.cmd.Process == nil {
 		return false
 	}
 
-	// Special case: Steam/Epic launchers exit quickly but game continues
-	// For these cases, we assume the game is running if we have a recent launch
-	// This is imperfect but matches the reality that we don't track the actual game process
-	if c.spec.Mode == "SteamAppId" || c.spec.Mode == "EpicAppId" {
-		// For launcher-based games, we can't easily track the actual game process
-		// Return true for a reasonable period after launch, then false
-		// This is a limitation of the launcher approach - we don't manage the game directly
-		// TODO: Could improve by trying to find game process by name/other heuristics
-		return false // For now, be conservative and assume launcher games manage themselves
-	}
-
-	// For direct processes, check if the process is still alive
 	// First try to see if the process has already been waited for
 	if c.cmd.ProcessState != nil {
 		// Process has exited
@@ -226,6 +234,28 @@ func (c *Controller) GetPID() int {
 // GetLaunchMode returns the launch mode for this controller
 func (c *Controller) GetLaunchMode() string {
 	return c.spec.Mode
+}
+
+// GetStopProcessName returns the stop process name for this controller
+func (c *Controller) GetStopProcessName() string {
+	return c.spec.StopProcessName
+}
+
+// IsLauncherProcessRunning checks if the launcher process itself is still running
+// This is different from IsRunning() which checks the actual game process
+func (c *Controller) IsLauncherProcessRunning() bool {
+	if c.cmd == nil || c.cmd.Process == nil {
+		return false
+	}
+	
+	// Check if the process has already been waited for
+	if c.cmd.ProcessState != nil {
+		return false
+	}
+	
+	// Try to signal the launcher process
+	err := c.cmd.Process.Signal(syscall.Signal(0))
+	return err == nil
 }
 
 func (c *Controller) Restart() error {
