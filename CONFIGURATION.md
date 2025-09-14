@@ -37,13 +37,19 @@ The specific path, ID, or command based on your launch mode:
 ### 4. Working Directory (Optional)
 Where the game should run from. Leave blank to use the game's default location.
 
-### 5. GABP Mode
+### 5. Stop Process Name (Optional)
+The name of the actual game process to stop when using games.stop or games.kill. This is especially useful for Steam/Epic games where GABS normally can only stop the launcher process. Examples:
+- For RimWorld: `RimWorldWin64.exe` (Windows) or `RimWorld` (Linux/macOS)
+- For Minecraft with Java: `java`
+- For Unity games: often the game name with `.exe` extension
+
+### 6. GABP Mode
 How GABS talks to your game mod:
 - **local**: Game mod runs on the same computer (most common)
 - **remote**: Game mod runs on a different computer
 - **connect**: GABS connects to an existing mod server
 
-### 6. GABP Host (For Remote Mode)
+### 7. GABP Host (For Remote Mode)
 If using remote mode, enter the IP address where your game mod should listen.
 
 ## Managing Your Games
@@ -80,6 +86,7 @@ Your games are saved in `~/.gabs/config.json`. Here's what it looks like:
       "launchMode": "DirectPath",
       "target": "/opt/minecraft/start.sh",
       "workingDir": "/opt/minecraft",
+      "stopProcessName": "java",
       "gabpMode": "local",
       "description": "Main Minecraft server"
     },
@@ -88,6 +95,7 @@ Your games are saved in `~/.gabs/config.json`. Here's what it looks like:
       "name": "RimWorld",
       "launchMode": "SteamAppId",
       "target": "294100",
+      "stopProcessName": "RimWorldWin64.exe",
       "gabpMode": "local"
     }
   }
@@ -151,6 +159,53 @@ Best for: Complex launch setups or special requirements
 - GABS connects to an already-running mod server
 - Useful for persistent game servers
 - Game mod must be started manually first
+
+## Improved Game Stopping
+
+GABS now supports better game stopping through the optional `stopProcessName` configuration. This addresses the limitation where Steam/Epic launcher games could only have their launcher process stopped, not the actual game.
+
+### How It Works
+
+When you configure a `stopProcessName`, GABS will:
+1. First try to find and stop processes with that name
+2. If no processes are found with that name, fall back to stopping the launched process (if any)
+3. Support both graceful termination (games.stop) and force killing (games.kill)
+
+### Platform Support
+
+The process finding works across platforms:
+- **Windows**: Uses `tasklist` and `taskkill` commands
+- **macOS**: Uses `ps` command with process matching
+- **Linux**: Uses `ps` command with process matching
+
+### Common Process Names
+
+| Game | Platform | Process Name |
+|------|----------|-------------|
+| RimWorld | Windows | `RimWorldWin64.exe` |
+| RimWorld | macOS/Linux | `RimWorld` |
+| Minecraft (Java) | All | `java` |
+| Unity Games | Windows | `GameName.exe` |
+| Steam Games | All | Check game's install directory |
+
+### Configuration Examples
+
+```json
+{
+  "games": {
+    "rimworld-steam": {
+      "launchMode": "SteamAppId",
+      "target": "294100", 
+      "stopProcessName": "RimWorldWin64.exe"
+    },
+    "minecraft-server": {
+      "launchMode": "DirectPath",
+      "target": "/opt/minecraft/start.sh",
+      "stopProcessName": "java"
+    }
+  }
+}
+```
 
 ## Troubleshooting
 

@@ -356,6 +356,12 @@ func addGame(log util.Logger, gameID string) int {
 		}
 	}
 
+	// Ask for optional stop process name for better game termination control
+	stopProcessName := promptString("Stop Process Name (optional - for better game stopping)", "")
+	if stopProcessName != "" {
+		game.StopProcessName = stopProcessName
+	}
+
 	description := promptString("Description (optional)", "")
 	if description != "" {
 		game.Description = description
@@ -415,6 +421,9 @@ func showGame(log util.Logger, gameID string) int {
 	}
 	if len(game.Args) > 0 {
 		fmt.Printf("  Arguments: %s\n", strings.Join(game.Args, " "))
+	}
+	if game.StopProcessName != "" {
+		fmt.Printf("  Stop Process Name: %s\n", game.StopProcessName)
 	}
 	if game.GabpMode != "" {
 		fmt.Printf("  GABP Mode: %s\n", game.GabpMode)

@@ -5,16 +5,19 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
 
 type LaunchSpec struct {
-	GameId     string
-	Mode       string // DirectPath|SteamAppId|EpicAppId|CustomCommand
-	PathOrId   string
-	Args       []string
-	WorkingDir string
+	GameId          string
+	Mode            string // DirectPath|SteamAppId|EpicAppId|CustomCommand
+	PathOrId        string
+	Args            []string
+	WorkingDir      string
+	StopProcessName string // Optional process name for stopping the game
 }
 
 type Controller struct {
@@ -98,6 +101,15 @@ func (c *Controller) Stop(grace time.Duration) error {
 		return fmt.Errorf("no process to stop")
 	}
 
+	// If a specific stop process name is configured, try to find and stop that process
+	if c.spec.StopProcessName != "" {
+		if err := c.stopByProcessName(c.spec.StopProcessName, false, grace); err == nil {
+			// Successfully stopped by process name
+			return nil
+		}
+		// If stopping by process name failed, continue with the normal process stopping
+	}
+
 	// Try graceful termination first
 	if err := c.cmd.Process.Signal(getTerminationSignal()); err != nil {
 		// If graceful termination fails, try force kill
@@ -120,6 +132,15 @@ func (c *Controller) Stop(grace time.Duration) error {
 }
 
 func (c *Controller) Kill() error {
+	// If a specific stop process name is configured, try to kill that process first
+	if c.spec.StopProcessName != "" {
+		if err := c.stopByProcessName(c.spec.StopProcessName, true, 0); err == nil {
+			// Successfully killed by process name
+			return nil
+		}
+		// If killing by process name failed, continue with the normal process killing
+	}
+
 	if c.cmd == nil || c.cmd.Process == nil {
 		return fmt.Errorf("no process to kill")
 	}
@@ -207,5 +228,232 @@ func getTerminationSignal() os.Signal {
 		return os.Interrupt
 	default:
 		return syscall.SIGTERM
+	}
+}
+
+// stopByProcessName tries to find and stop a process by its name
+func (c *Controller) stopByProcessName(processName string, force bool, grace time.Duration) error {
+	pids, err := findProcessesByName(processName)
+	if err != nil {
+		return fmt.Errorf("failed to find processes named '%s': %w", processName, err)
+	}
+
+	if len(pids) == 0 {
+		return fmt.Errorf("no processes found with name '%s'", processName)
+	}
+
+	// Try to stop all found processes
+	var lastErr error
+	stopped := 0
+	for _, pid := range pids {
+		if force {
+			if err := killProcess(pid); err != nil {
+				lastErr = err
+			} else {
+				stopped++
+			}
+		} else {
+			if err := terminateProcess(pid, grace); err != nil {
+				lastErr = err
+			} else {
+				stopped++
+			}
+		}
+	}
+
+	if stopped == 0 {
+		if lastErr != nil {
+			return fmt.Errorf("failed to stop any processes named '%s': %w", processName, lastErr)
+		}
+		return fmt.Errorf("failed to stop any processes named '%s'", processName)
+	}
+
+	return nil
+}
+
+// findProcessesByName finds all processes with the given name and returns their PIDs
+func findProcessesByName(processName string) ([]int, error) {
+	switch runtime.GOOS {
+	case "windows":
+		return findProcessesWindows(processName)
+	case "darwin":
+		return findProcessesDarwin(processName)
+	default:
+		return findProcessesLinux(processName)
+	}
+}
+
+// findProcessesWindows finds processes on Windows using tasklist
+func findProcessesWindows(processName string) ([]int, error) {
+	// Add .exe extension if not present
+	if !strings.HasSuffix(strings.ToLower(processName), ".exe") {
+		processName += ".exe"
+	}
+
+	cmd := exec.Command("tasklist", "/FO", "CSV", "/NH")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to run tasklist: %w", err)
+	}
+
+	var pids []int
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// Parse CSV format: "ImageName","PID","SessionName","Session#","MemUsage"
+		parts := strings.Split(line, ",")
+		if len(parts) >= 2 {
+			imageName := strings.Trim(parts[0], "\"")
+			pidStr := strings.Trim(parts[1], "\"")
+
+			if strings.EqualFold(imageName, processName) {
+				if pid, err := strconv.Atoi(pidStr); err == nil {
+					pids = append(pids, pid)
+				}
+			}
+		}
+	}
+
+	return pids, nil
+}
+
+// findProcessesDarwin finds processes on macOS using ps
+func findProcessesDarwin(processName string) ([]int, error) {
+	cmd := exec.Command("ps", "axo", "pid,comm")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to run ps: %w", err)
+	}
+
+	var pids []int
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines[1:] { // Skip header
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		parts := strings.Fields(line)
+		if len(parts) >= 2 {
+			pidStr := parts[0]
+			comm := strings.Join(parts[1:], " ")
+
+			// Match process name (with or without path)
+			if strings.Contains(comm, processName) || strings.HasSuffix(comm, processName) {
+				if pid, err := strconv.Atoi(pidStr); err == nil {
+					pids = append(pids, pid)
+				}
+			}
+		}
+	}
+
+	return pids, nil
+}
+
+// findProcessesLinux finds processes on Linux using ps
+func findProcessesLinux(processName string) ([]int, error) {
+	cmd := exec.Command("ps", "axo", "pid,comm")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to run ps: %w", err)
+	}
+
+	var pids []int
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines[1:] { // Skip header
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		parts := strings.Fields(line)
+		if len(parts) >= 2 {
+			pidStr := parts[0]
+			comm := strings.Join(parts[1:], " ")
+
+			// Match process name
+			if strings.Contains(comm, processName) || strings.HasSuffix(comm, processName) {
+				if pid, err := strconv.Atoi(pidStr); err == nil {
+					pids = append(pids, pid)
+				}
+			}
+		}
+	}
+
+	return pids, nil
+}
+
+// killProcess forcefully terminates a process by PID
+func killProcess(pid int) error {
+	switch runtime.GOOS {
+	case "windows":
+		cmd := exec.Command("taskkill", "/F", "/PID", strconv.Itoa(pid))
+		return cmd.Run()
+	default:
+		// Unix-like systems
+		process, err := os.FindProcess(pid)
+		if err != nil {
+			return err
+		}
+		return process.Kill()
+	}
+}
+
+// terminateProcess gracefully terminates a process by PID with a timeout
+func terminateProcess(pid int, grace time.Duration) error {
+	switch runtime.GOOS {
+	case "windows":
+		// On Windows, try gentle termination first, then force kill if timeout
+		cmd := exec.Command("taskkill", "/PID", strconv.Itoa(pid))
+		if err := cmd.Run(); err != nil {
+			return err
+		}
+
+		// Wait for process to exit gracefully
+		if grace > 0 {
+			time.Sleep(grace)
+			// Check if process still exists
+			checkCmd := exec.Command("tasklist", "/FI", "PID eq "+strconv.Itoa(pid), "/FO", "CSV")
+			output, err := checkCmd.Output()
+			if err == nil && strings.Contains(string(output), strconv.Itoa(pid)) {
+				// Process still exists, force kill it
+				return killProcess(pid)
+			}
+		}
+		return nil
+	default:
+		// Unix-like systems
+		process, err := os.FindProcess(pid)
+		if err != nil {
+			return err
+		}
+
+		// Send SIGTERM
+		if err := process.Signal(syscall.SIGTERM); err != nil {
+			return err
+		}
+
+		// Wait for graceful shutdown with timeout
+		if grace > 0 {
+			done := make(chan error, 1)
+			go func() {
+				_, err := process.Wait()
+				done <- err
+			}()
+
+			select {
+			case <-done:
+				return nil
+			case <-time.After(grace):
+				// Grace period expired, force kill
+				return process.Kill()
+			}
+		}
+
+		return nil
 	}
 }
