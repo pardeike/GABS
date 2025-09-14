@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 )
 
 type BridgeJSON struct {
@@ -129,35 +128,13 @@ func getConfigDir(gameID, override string) (string, error) {
 		return override, nil
 	}
 
-	var baseDir string
-	switch runtime.GOOS {
-	case "windows":
-		// %APPDATA%\GAB\<gameId>\
-		appData := os.Getenv("APPDATA")
-		if appData == "" {
-			return "", fmt.Errorf("APPDATA environment variable not set")
-		}
-		baseDir = filepath.Join(appData, "GAB")
-	case "darwin":
-		// ~/Library/Application Support/GAB/<gameId>/
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("failed to get home directory: %w", err)
-		}
-		baseDir = filepath.Join(homeDir, "Library", "Application Support", "GAB")
-	default:
-		// Linux: $XDG_STATE_HOME/gab/<gameId>/ or ~/.local/state/gab/<gameId>/
-		stateHome := os.Getenv("XDG_STATE_HOME")
-		if stateHome == "" {
-			homeDir, err := os.UserHomeDir()
-			if err != nil {
-				return "", fmt.Errorf("failed to get home directory: %w", err)
-			}
-			stateHome = filepath.Join(homeDir, ".local", "state")
-		}
-		baseDir = filepath.Join(stateHome, "gab")
+	// Use ~/.gabs/ directory on all platforms as requested in the issue
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
 	}
 
+	baseDir := filepath.Join(homeDir, ".gabs")
 	return filepath.Join(baseDir, gameID), nil
 }
 
