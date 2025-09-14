@@ -50,7 +50,7 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 	server := NewServer(logger)
 	server.RegisterGameManagementTools(loadedConfig, 0, 0)
 	
-	// Test games.list - simplified output for AI
+	// Test games.list - shows validation status for proper configuration
 	t.Run("GamesList", func(t *testing.T) {
 		listMsg := &Message{
 			JSONRPC: "2.0",
@@ -67,21 +67,22 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 			t.Fatal("Expected response from games.list")
 		}
 		
-		// Check that response contains only game IDs (simplified format)
+		// Check that response contains game information with validation indicators
 		respBytes, _ := json.Marshal(response)
 		responseStr := string(respBytes)
 		t.Logf("games.list output: %s", responseStr)
 		
-		// The output should only contain the game ID
+		// The output should contain the game ID and validation status
 		if !strings.Contains(responseStr, "rimworld") {
 			t.Error("Expected to see game ID 'rimworld' in output")
 		}
-		// Should NOT contain verbose details like Steam App ID or launch mode
-		if strings.Contains(responseStr, "294100") {
-			t.Error("Output should not contain Steam App ID '294100' - should be simplified")
+		// Should contain validation warnings for games missing stopProcessName
+		if !strings.Contains(responseStr, "Missing stopProcessName") {
+			t.Error("Expected validation warning for SteamAppId game without stopProcessName")
 		}
-		if strings.Contains(responseStr, "SteamAppId") {
-			t.Error("Output should not contain launch mode details - should be simplified")
+		// Should show launch mode to provide context for the validation
+		if !strings.Contains(responseStr, "SteamAppId") {
+			t.Error("Expected launch mode to be shown for context")
 		}
 	})
 	

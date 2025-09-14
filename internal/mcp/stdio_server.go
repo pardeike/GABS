@@ -86,7 +86,19 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				if i > 0 {
 					content.WriteString("\n")
 				}
-				content.WriteString(game.ID)
+				content.WriteString(fmt.Sprintf("  ID: %s (%s)\n", game.ID, game.Name))
+				content.WriteString(fmt.Sprintf("  Use gameId: '%s' (or target: '%s')\n", game.ID, game.Target))
+				content.WriteString(fmt.Sprintf("  Launch: %s\n", game.LaunchMode))
+				if game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId" {
+					if game.StopProcessName != "" {
+						content.WriteString(fmt.Sprintf("  ✓ Configured for proper game termination (process: %s)\n", game.StopProcessName))
+					} else {
+						content.WriteString(fmt.Sprintf("  ⚠️  Missing stopProcessName - GABS can start but cannot properly stop %s games\n", game.LaunchMode))
+					}
+				}
+				if game.Description != "" {
+					content.WriteString(fmt.Sprintf("  %s\n", game.Description))
+				}
 			}
 		}
 		

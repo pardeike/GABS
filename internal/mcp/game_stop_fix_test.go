@@ -226,6 +226,7 @@ func TestGameStopFix(t *testing.T) {
 		// Should mention missing stopProcessName for Steam games
 		if !strings.Contains(responseStr, "Missing stopProcessName") {
 			t.Error("Should warn about SteamAppId stop limitations in games list")
+		}
 		
 		// Should NOT contain limitation warnings - that's for games.status
 		if strings.Contains(responseStr, "cannot directly stop SteamAppId games") {
