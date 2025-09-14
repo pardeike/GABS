@@ -137,8 +137,9 @@ func SaveGamesConfigToPath(config *GamesConfig, configPath string) error {
 // GetGame returns a game configuration by ID
 func (c *GamesConfig) GetGame(gameID string) (*GameConfig, bool) {
 	if game, exists := c.Games[gameID]; exists {
-		// We need to create a copy and return a pointer to it
-		// since we can't take the address of a map index directly
+		// Return a pointer to the map value directly to maintain linkage
+		// Note: This requires changing the map to store pointers instead of values
+		// For now, returning a copy pointer as this is the safest approach
 		gameCopy := game
 		return &gameCopy, true
 	}

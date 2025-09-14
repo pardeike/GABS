@@ -88,6 +88,10 @@ type ServerInfo struct {
 
 // NewClient creates a new GABP client
 func NewClient(log util.Logger) *Client {
+	// Seed the global random number generator for backoff jitter
+	// Use current time with nanosecond precision to avoid identical seeds
+	rand.Seed(time.Now().UnixNano())
+	
 	return &Client{
 		pendingReqs:   make(map[string]chan *util.GABPMessage),
 		eventHandlers: make(map[string][]EventHandler),
@@ -166,7 +170,7 @@ func (c *Client) handshake() error {
 	launchId := uuid.New().String()
 	params := SessionHelloParams{
 		Token:         c.token,
-		BridgeVersion: "1.0.0",
+		BridgeVersion: version.Get(), // Use actual runtime version
 		Platform:      runtime.GOOS, // Detect actual platform
 		LaunchId:      launchId,
 		ClientInfo: &ClientInfo{

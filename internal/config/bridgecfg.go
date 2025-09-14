@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 type BridgeJSON struct {
@@ -167,10 +168,16 @@ func isPortAvailable(port int) bool {
 	return true
 }
 
-// randomInt returns a pseudo-random int for port generation
+// randomInt returns a non-negative pseudo-random int for port generation
 func randomInt() int {
-	// Simple random number for port - not cryptographically secure but sufficient
+	// Use crypto/rand for secure random generation
 	bytes := make([]byte, 4)
-	rand.Read(bytes)
-	return int(bytes[0])<<24 | int(bytes[1])<<16 | int(bytes[2])<<8 | int(bytes[3])
+	if _, err := rand.Read(bytes); err != nil {
+		// Fallback to timestamp-based seed if crypto/rand fails
+		// This shouldn't happen in normal operation but provides resilience
+		return int(time.Now().UnixNano() & 0x7FFFFFFF)
+	}
+	// Ensure result is non-negative by masking the sign bit
+	result := int(bytes[0])<<24 | int(bytes[1])<<16 | int(bytes[2])<<8 | int(bytes[3])
+	return result & 0x7FFFFFFF // Clear sign bit to ensure non-negative
 }

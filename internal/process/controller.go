@@ -412,8 +412,10 @@ func findProcessesDarwin(processName string) ([]int, error) {
 			pidStr := parts[0]
 			comm := strings.Join(parts[1:], " ")
 
-			// Match process name (with or without path)
-			if strings.Contains(comm, processName) || strings.HasSuffix(comm, processName) {
+			// Tighten matching: require exact basename match or exact full path match
+			// This prevents accidental termination of unrelated processes
+			commBasename := filepath.Base(comm)
+			if commBasename == processName || comm == processName {
 				if pid, err := strconv.Atoi(pidStr); err == nil {
 					pids = append(pids, pid)
 				}
@@ -445,8 +447,10 @@ func findProcessesLinux(processName string) ([]int, error) {
 			pidStr := parts[0]
 			comm := strings.Join(parts[1:], " ")
 
-			// Match process name
-			if strings.Contains(comm, processName) || strings.HasSuffix(comm, processName) {
+			// Tighten matching: require exact basename match or exact full path match
+			// This prevents accidental termination of unrelated processes
+			commBasename := filepath.Base(comm)
+			if commBasename == processName || comm == processName {
 				if pid, err := strconv.Atoi(pidStr); err == nil {
 					pids = append(pids, pid)
 				}
