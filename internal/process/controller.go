@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -20,9 +21,17 @@ type LaunchSpec struct {
 	StopProcessName string // Optional process name for stopping the game
 }
 
+type BridgeInfo struct {
+	Host  string
+	Port  int
+	Token string
+	Mode  string
+}
+
 type Controller struct {
-	spec LaunchSpec
-	cmd  *exec.Cmd
+	spec       LaunchSpec
+	cmd        *exec.Cmd
+	bridgeInfo *BridgeInfo
 }
 
 func (c *Controller) Configure(spec LaunchSpec) error {
@@ -46,6 +55,16 @@ func (c *Controller) Configure(spec LaunchSpec) error {
 	
 	c.spec = spec
 	return nil
+}
+
+// SetBridgeInfo sets the bridge connection information that will be passed to the game via environment variables
+func (c *Controller) SetBridgeInfo(host string, port int, token, mode string) {
+	c.bridgeInfo = &BridgeInfo{
+		Host:  host,
+		Port:  port,
+		Token: token,
+		Mode:  mode,
+	}
 }
 
 func (c *Controller) Start() error {
@@ -76,6 +95,25 @@ func (c *Controller) Start() error {
 	if c.spec.WorkingDir != "" {
 		c.cmd.Dir = c.spec.WorkingDir
 	}
+	
+	// Set environment variables for GABP server configuration
+	// The mod acts as GABP server, GABS acts as GABP client
+	bridgePath := c.getBridgePath()
+	bridgeEnvVars := []string{
+		fmt.Sprintf("GABS_GAME_ID=%s", c.spec.GameId),
+		fmt.Sprintf("GABS_BRIDGE_PATH=%s", bridgePath), // Fallback for compatibility/debugging
+	}
+	
+	// Pass essential GABP server configuration directly to mod
+	// Mod will start GABP server on this port and use this token for auth
+	if c.bridgeInfo != nil {
+		bridgeEnvVars = append(bridgeEnvVars,
+			fmt.Sprintf("GABP_SERVER_PORT=%d", c.bridgeInfo.Port), // Port for mod to listen on
+			fmt.Sprintf("GABP_TOKEN=%s", c.bridgeInfo.Token),      // Auth token for GABS to use
+		)
+	}
+	
+	c.cmd.Env = append(os.Environ(), bridgeEnvVars...)
 
 	// For Steam/Epic launchers, we need different handling since the launcher
 	// process exits quickly but the game continues running independently
@@ -456,4 +494,14 @@ func terminateProcess(pid int, grace time.Duration) error {
 
 		return nil
 	}
+}
+
+// getBridgePath returns the path to the bridge.json file for this game
+func (c *Controller) getBridgePath() string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		// Fallback to relative path if we can't get home directory
+		return filepath.Join(".gabs", c.spec.GameId, "bridge.json")
+	}
+	return filepath.Join(homeDir, ".gabs", c.spec.GameId, "bridge.json")
 }

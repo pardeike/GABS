@@ -13,7 +13,7 @@ GABS acts as a translator between AI agents and GABP compliant game modification
 ## Architecture Overview
 
 ```
-AI Agent ← MCP → GABS ← GABP → GABP Compliant Mod ← Game API → Game
+AI Agent ← MCP → GABS ← GABP Client → GABP Server (Your Mod) ← Game API → Game
 ```
 
 - **AI Agent**: Your AI assistant (Claude, ChatGPT, custom tools)
@@ -21,6 +21,28 @@ AI Agent ← MCP → GABS ← GABP → GABP Compliant Mod ← Game API → Game
 - **GABS**: Game Agent Bridge Server (this project)
 - **GABP**: Game Agent Bridge Protocol (JSON-RPC style messaging)
 - **GABP Compliant Mod**: Modification that implements GABP in the target game
+
+## ⚠️ CRITICAL: GABP Client-Server Architecture
+
+**This is essential for all AI agents working on GABS:**
+
+In the GABP protocol layer:
+- **Game Mod = GABP Server** (listens for connections on a port)
+- **GABS = GABP Client** (connects to the mod)
+
+This architecture exists because:
+1. **Port Management**: GABS has better knowledge of available ports
+2. **Concurrency**: Multiple games can run with unique ports assigned by GABS  
+3. **Locality**: Communication is always local (127.0.0.1) since GABS launches games
+4. **Lifecycle**: GABS launches game → mod starts GABP server → GABS connects as client
+
+**Environment Variables for GABP:**
+- `GABP_SERVER_PORT` - Port for mod to listen on (NOT the port GABS listens on)
+- `GABP_TOKEN` - Auth token for GABS to use when connecting to mod
+- `GABS_GAME_ID` - Game identifier for configuration
+- `GABS_BRIDGE_PATH` - Bridge file path (fallback/debugging only)
+
+**Never confuse this with MCP layer where GABS is the server!**
 
 ### GABP Compliant Mod Types
 
