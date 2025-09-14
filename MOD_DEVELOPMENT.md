@@ -16,14 +16,31 @@ To work with GABS, your mod needs to:
 
 ## Step 1: Reading Bridge Config
 
-When GABS starts your game, it creates a file called `bridge.json` in the GABS configuration directory (`~/.gabs/{gameId}/bridge.json`) and sets environment variables to help your mod find it. Your mod should read this file to know how to connect.
+When GABS starts your game, it provides bridge connection information in two ways for maximum compatibility and reliability:
 
-The bridge file location can be discovered in two ways:
+### Method 1: Environment Variables (Recommended)
 
-1. **Environment Variable (Recommended)**: Read the `GABS_BRIDGE_PATH` environment variable
-2. **Environment + Home Directory**: Use `GABS_GAME_ID` environment variable and construct the path as `~/.gabs/{GABS_GAME_ID}/bridge.json`
+GABS passes essential connection information directly via environment variables:
 
-The config looks like this:
+- `GABS_GAME_ID` - Your game's identifier 
+- `GABS_HOST` - Server host address (e.g., "127.0.0.1")
+- `GABS_PORT` - Server port number (e.g., 12345)
+- `GABS_TOKEN` - Authentication token
+- `GABS_MODE` - Connection mode ("local", "remote", or "connect")
+
+This method is **recommended** because it:
+- ✅ Works reliably in concurrent game launches
+- ✅ No file I/O required
+- ✅ No permission or path issues
+- ✅ Atomic - all info available instantly
+
+### Method 2: Bridge File (Backup)
+
+GABS also creates a bridge configuration file:
+
+- `GABS_BRIDGE_PATH` - Full path to the bridge configuration file
+
+The bridge file contains the same information as a JSON structure:
 ```json
 {
   "port": 12345,
@@ -34,6 +51,8 @@ The config looks like this:
   "mode": "local"
 }
 ```
+
+**Note:** For concurrent launches of the same game, GABS creates unique bridge files to avoid conflicts.
 
 ## Step 2: Acting as GABP Server
 
@@ -105,25 +124,47 @@ public class GABPMod : Mod
     
     private BridgeConfig ReadBridgeConfig()
     {
-        // Method 1: Use environment variable (recommended)
+        // Method 1: Use environment variables directly (recommended)
+        var host = Environment.GetEnvironmentVariable("GABS_HOST");
+        var portStr = Environment.GetEnvironmentVariable("GABS_PORT");
+        var token = Environment.GetEnvironmentVariable("GABS_TOKEN");
+        var mode = Environment.GetEnvironmentVariable("GABS_MODE");
+        var gameId = Environment.GetEnvironmentVariable("GABS_GAME_ID");
+        
+        if (!string.IsNullOrEmpty(host) && !string.IsNullOrEmpty(portStr) && 
+            !string.IsNullOrEmpty(token) && int.TryParse(portStr, out int port))
+        {
+            return new BridgeConfig
+            {
+                Host = host,
+                Port = port,
+                Token = token,
+                Mode = mode ?? "local",
+                GameId = gameId ?? "unknown"
+            };
+        }
+        
+        // Method 2: Use bridge file path (fallback)
         var bridgePath = Environment.GetEnvironmentVariable("GABS_BRIDGE_PATH");
-        if (!string.IsNullOrEmpty(bridgePath))
+        if (!string.IsNullOrEmpty(bridgePath) && File.Exists(bridgePath))
         {
             var json = File.ReadAllText(bridgePath);
             return JsonConvert.DeserializeObject<BridgeConfig>(json);
         }
         
-        // Method 2: Construct path from game ID
-        var gameId = Environment.GetEnvironmentVariable("GABS_GAME_ID");
+        // Method 3: Construct path from game ID (legacy support)
         if (!string.IsNullOrEmpty(gameId))
         {
             var homeDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             var configPath = Path.Combine(homeDir, ".gabs", gameId, "bridge.json");
-            var json = File.ReadAllText(configPath);
-            return JsonConvert.DeserializeObject<BridgeConfig>(json);
+            if (File.Exists(configPath))
+            {
+                var json = File.ReadAllText(configPath);
+                return JsonConvert.DeserializeObject<BridgeConfig>(json);
+            }
         }
         
-        // Fallback: Legacy behavior (for backwards compatibility)
+        // Method 4: Legacy behavior (for backwards compatibility)
         var legacyPath = Path.Combine(Application.dataPath, "bridge.json");
         if (File.Exists(legacyPath))
         {
@@ -205,23 +246,49 @@ public class GABPMod {
     }
     
     private BridgeConfig readBridgeConfig() throws IOException {
-        // Method 1: Use environment variable (recommended)
-        String bridgePath = System.getenv("GABS_BRIDGE_PATH");
-        if (bridgePath != null && !bridgePath.isEmpty()) {
-            String json = Files.readString(Paths.get(bridgePath));
-            return new Gson().fromJson(json, BridgeConfig.class);
+        // Method 1: Use environment variables directly (recommended)
+        String host = System.getenv("GABS_HOST");
+        String portStr = System.getenv("GABS_PORT");
+        String token = System.getenv("GABS_TOKEN");
+        String mode = System.getenv("GABS_MODE");
+        String gameId = System.getenv("GABS_GAME_ID");
+        
+        if (host != null && portStr != null && token != null) {
+            try {
+                int port = Integer.parseInt(portStr);
+                BridgeConfig config = new BridgeConfig();
+                config.host = host;
+                config.port = port;
+                config.token = token;
+                config.mode = mode != null ? mode : "local";
+                config.gameId = gameId != null ? gameId : "unknown";
+                return config;
+            } catch (NumberFormatException e) {
+                // Fall through to file-based methods
+            }
         }
         
-        // Method 2: Construct path from game ID
-        String gameId = System.getenv("GABS_GAME_ID");
+        // Method 2: Use bridge file path (fallback)
+        String bridgePath = System.getenv("GABS_BRIDGE_PATH");
+        if (bridgePath != null && !bridgePath.isEmpty()) {
+            Path path = Paths.get(bridgePath);
+            if (Files.exists(path)) {
+                String json = Files.readString(path);
+                return new Gson().fromJson(json, BridgeConfig.class);
+            }
+        }
+        
+        // Method 3: Construct path from game ID (legacy support)
         if (gameId != null && !gameId.isEmpty()) {
             String homeDir = System.getProperty("user.home");
             Path configPath = Paths.get(homeDir, ".gabs", gameId, "bridge.json");
-            String json = Files.readString(configPath);
-            return new Gson().fromJson(json, BridgeConfig.class);
+            if (Files.exists(configPath)) {
+                String json = Files.readString(configPath);
+                return new Gson().fromJson(json, BridgeConfig.class);
+            }
         }
         
-        // Fallback: Legacy behavior (for backwards compatibility)
+        // Method 4: Legacy behavior (for backwards compatibility)
         File legacyFile = new File("bridge.json");
         if (legacyFile.exists()) {
             String json = Files.readString(legacyFile.toPath());
@@ -286,21 +353,42 @@ class GABPMod:
         print(f"GABP server started on {config['host']}:{config['port']}")
         
     def read_bridge_config(self):
-        # Method 1: Use environment variable (recommended)
+        # Method 1: Use environment variables directly (recommended)
+        host = os.environ.get('GABS_HOST')
+        port_str = os.environ.get('GABS_PORT')
+        token = os.environ.get('GABS_TOKEN')
+        mode = os.environ.get('GABS_MODE')
+        game_id = os.environ.get('GABS_GAME_ID')
+        
+        if host and port_str and token:
+            try:
+                port = int(port_str)
+                return {
+                    'host': host,
+                    'port': port,
+                    'token': token,
+                    'mode': mode or 'local',
+                    'gameId': game_id or 'unknown'
+                }
+            except ValueError:
+                # Fall through to file-based methods
+                pass
+        
+        # Method 2: Use bridge file path (fallback)
         bridge_path = os.environ.get('GABS_BRIDGE_PATH')
-        if bridge_path:
+        if bridge_path and os.path.exists(bridge_path):
             with open(bridge_path, 'r') as f:
                 return json.load(f)
         
-        # Method 2: Construct path from game ID
-        game_id = os.environ.get('GABS_GAME_ID')
+        # Method 3: Construct path from game ID (legacy support)
         if game_id:
             home_dir = Path.home()
             config_path = home_dir / '.gabs' / game_id / 'bridge.json'
-            with open(config_path, 'r') as f:
-                return json.load(f)
+            if config_path.exists():
+                with open(config_path, 'r') as f:
+                    return json.load(f)
         
-        # Fallback: Legacy behavior (for backwards compatibility)
+        # Method 4: Legacy behavior (for backwards compatibility)
         legacy_path = Path('bridge.json')
         if legacy_path.exists():
             with open(legacy_path, 'r') as f:

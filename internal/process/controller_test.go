@@ -68,6 +68,9 @@ func TestEnvironmentVariables(t *testing.T) {
 		t.Fatalf("Configure failed: %v", err)
 	}
 	
+	// Set bridge info for testing
+	controller.SetBridgeInfo("127.0.0.1", 12345, "test-token-1234567890abcdef", "local")
+	
 	// Verify the bridge path generation
 	bridgePath := controller.getBridgePath()
 	expectedGameId := "minecraft"
@@ -76,10 +79,39 @@ func TestEnvironmentVariables(t *testing.T) {
 		t.Errorf("Bridge path should contain game ID '%s', got: %s", expectedGameId, bridgePath)
 	}
 	
+	// Test that bridge info is set correctly
+	if controller.bridgeInfo == nil {
+		t.Fatal("Bridge info should be set")
+	}
+	
+	if controller.bridgeInfo.Host != "127.0.0.1" {
+		t.Errorf("Expected host 127.0.0.1, got %s", controller.bridgeInfo.Host)
+	}
+	
+	if controller.bridgeInfo.Port != 12345 {
+		t.Errorf("Expected port 12345, got %d", controller.bridgeInfo.Port)
+	}
+	
+	if controller.bridgeInfo.Token != "test-token-1234567890abcdef" {
+		t.Errorf("Expected token test-token-1234567890abcdef, got %s", controller.bridgeInfo.Token)
+	}
+	
+	if controller.bridgeInfo.Mode != "local" {
+		t.Errorf("Expected mode local, got %s", controller.bridgeInfo.Mode)
+	}
+	
 	// The environment variables that would be set are:
 	// GABS_GAME_ID=minecraft
 	// GABS_BRIDGE_PATH=<bridgePath>
+	// GABS_HOST=127.0.0.1
+	// GABS_PORT=12345
+	// GABS_TOKEN=test-token-1234567890abcdef
+	// GABS_MODE=local
 	
 	t.Logf("GABS_GAME_ID would be set to: %s", expectedGameId)
 	t.Logf("GABS_BRIDGE_PATH would be set to: %s", bridgePath)
+	t.Logf("GABS_HOST would be set to: %s", controller.bridgeInfo.Host)
+	t.Logf("GABS_PORT would be set to: %d", controller.bridgeInfo.Port)
+	t.Logf("GABS_TOKEN would be set to: %s", controller.bridgeInfo.Token)
+	t.Logf("GABS_MODE would be set to: %s", controller.bridgeInfo.Mode)
 }

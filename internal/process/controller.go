@@ -21,9 +21,17 @@ type LaunchSpec struct {
 	StopProcessName string // Optional process name for stopping the game
 }
 
+type BridgeInfo struct {
+	Host  string
+	Port  int
+	Token string
+	Mode  string
+}
+
 type Controller struct {
-	spec LaunchSpec
-	cmd  *exec.Cmd
+	spec       LaunchSpec
+	cmd        *exec.Cmd
+	bridgeInfo *BridgeInfo
 }
 
 func (c *Controller) Configure(spec LaunchSpec) error {
@@ -47,6 +55,16 @@ func (c *Controller) Configure(spec LaunchSpec) error {
 	
 	c.spec = spec
 	return nil
+}
+
+// SetBridgeInfo sets the bridge connection information that will be passed to the game via environment variables
+func (c *Controller) SetBridgeInfo(host string, port int, token, mode string) {
+	c.bridgeInfo = &BridgeInfo{
+		Host:  host,
+		Port:  port,
+		Token: token,
+		Mode:  mode,
+	}
 }
 
 func (c *Controller) Start() error {
@@ -79,10 +97,25 @@ func (c *Controller) Start() error {
 	}
 	
 	// Set environment variables to help mods find the bridge file
-	c.cmd.Env = append(os.Environ(),
+	// Hybrid approach: pass both file path and essential connection info directly
+	bridgePath := c.getBridgePath()
+	bridgeEnvVars := []string{
 		fmt.Sprintf("GABS_GAME_ID=%s", c.spec.GameId),
-		fmt.Sprintf("GABS_BRIDGE_PATH=%s", c.getBridgePath()),
-	)
+		fmt.Sprintf("GABS_BRIDGE_PATH=%s", bridgePath),
+	}
+	
+	// If bridge connection info is available, also pass it directly in environment variables
+	// This provides immediate access without file I/O and handles cases where file access might fail
+	if c.bridgeInfo != nil {
+		bridgeEnvVars = append(bridgeEnvVars,
+			fmt.Sprintf("GABS_HOST=%s", c.bridgeInfo.Host),
+			fmt.Sprintf("GABS_PORT=%d", c.bridgeInfo.Port),
+			fmt.Sprintf("GABS_TOKEN=%s", c.bridgeInfo.Token),
+			fmt.Sprintf("GABS_MODE=%s", c.bridgeInfo.Mode),
+		)
+	}
+	
+	c.cmd.Env = append(os.Environ(), bridgeEnvVars...)
 
 	// For Steam/Epic launchers, we need different handling since the launcher
 	// process exits quickly but the game continues running independently

@@ -5,8 +5,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 type BridgeJSON struct {
@@ -34,8 +36,11 @@ func WriteBridgeJSON(gameID, configDir string) (int, string, string, error) {
 // WriteBridgeJSONWithConfig generates bridge.json with custom configuration
 // Returns (port, token, configPath, error)
 func WriteBridgeJSONWithConfig(gameID, configDir string, config BridgeConfig) (int, string, string, error) {
-	// Generate random port (49152-65535 dynamic range)
-	port := 49152 + (randomInt() % (65535 - 49152 + 1))
+	// Generate available port with conflict detection
+	port, err := findAvailablePort(49152, 65535)
+	if err != nil {
+		return 0, "", "", fmt.Errorf("failed to find available port: %w", err)
+	}
 	
 	// Generate random 64-byte hex token
 	token, err := generateToken()
@@ -74,15 +79,21 @@ func WriteBridgeJSONWithConfig(gameID, configDir string, config BridgeConfig) (i
 		Mode:   mode,
 	}
 
-	// Write atomically (temp file + rename)
-	cfgPath := filepath.Join(cfgDir, "bridge.json")
+	// Create unique filename with timestamp to avoid conflicts in concurrent launches
+	timestamp := time.Now().UnixNano()
+	cfgFilename := fmt.Sprintf("bridge-%d.json", timestamp)
+	cfgPath := filepath.Join(cfgDir, cfgFilename)
 	tempPath := cfgPath + ".tmp"
+
+	// Also create/update the standard bridge.json for backward compatibility
+	standardPath := filepath.Join(cfgDir, "bridge.json")
 
 	data, err := json.MarshalIndent(bridge, "", "  ")
 	if err != nil {
 		return 0, "", "", fmt.Errorf("failed to marshal bridge config: %w", err)
 	}
 
+	// Write unique bridge file atomically
 	if err := os.WriteFile(tempPath, data, 0644); err != nil {
 		return 0, "", "", fmt.Errorf("failed to write temp config: %w", err)
 	}
@@ -90,6 +101,15 @@ func WriteBridgeJSONWithConfig(gameID, configDir string, config BridgeConfig) (i
 	if err := os.Rename(tempPath, cfgPath); err != nil {
 		os.Remove(tempPath) // cleanup
 		return 0, "", "", fmt.Errorf("failed to rename temp config: %w", err)
+	}
+
+	// Also update standard bridge.json for backward compatibility
+	tempStandardPath := standardPath + ".tmp"
+	if err := os.WriteFile(tempStandardPath, data, 0644); err != nil {
+		// Don't fail if we can't write the standard file - the unique one is the important one
+		os.Remove(tempStandardPath)
+	} else if err := os.Rename(tempStandardPath, standardPath); err != nil {
+		os.Remove(tempStandardPath)
 	}
 
 	return port, token, cfgPath, nil
@@ -146,6 +166,40 @@ func generateToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(bytes), nil
+}
+
+// findAvailablePort finds an available port in the given range
+func findAvailablePort(minPort, maxPort int) (int, error) {
+	// Try up to 100 random ports to avoid infinite loops
+	for attempts := 0; attempts < 100; attempts++ {
+		// Generate random port in range
+		port := minPort + (randomInt() % (maxPort - minPort + 1))
+		
+		// Check if port is available
+		if isPortAvailable(port) {
+			return port, nil
+		}
+	}
+	
+	// If random selection failed, try sequential search
+	for port := minPort; port <= maxPort; port++ {
+		if isPortAvailable(port) {
+			return port, nil
+		}
+	}
+	
+	return 0, fmt.Errorf("no available ports in range %d-%d", minPort, maxPort)
+}
+
+// isPortAvailable checks if a port is available by attempting to bind to it
+func isPortAvailable(port int) bool {
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return false
+	}
+	listener.Close()
+	return true
 }
 
 // randomInt returns a pseudo-random int for port generation

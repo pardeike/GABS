@@ -508,7 +508,17 @@ func (s *Server) startGame(game config.GameConfig, backoffMin, backoffMax time.D
 		return fmt.Errorf("failed to create bridge config: %w", err)
 	}
 
-	s.log.Infow("created GABP bridge configuration", "gameId", game.ID, "port", port, "token", token[:8]+"...", "host", bridgeConfig.Host, "mode", bridgeConfig.Mode, "configPath", bridgePath)
+	// Set default host if not specified
+	host := bridgeConfig.Host
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	mode := bridgeConfig.Mode
+	if mode == "" {
+		mode = "local"
+	}
+
+	s.log.Infow("created GABP bridge configuration", "gameId", game.ID, "port", port, "token", token[:8]+"...", "host", host, "mode", mode, "configPath", bridgePath)
 
 	// Convert GameConfig to LaunchSpec
 	launchSpec := process.LaunchSpec{
@@ -525,6 +535,9 @@ func (s *Server) startGame(game config.GameConfig, backoffMin, backoffMax time.D
 	if err := controller.Configure(launchSpec); err != nil {
 		return fmt.Errorf("failed to configure game launcher: %w", err)
 	}
+
+	// Set bridge connection info for environment variables
+	controller.SetBridgeInfo(host, port, token, mode)
 
 	// Start the game
 	if err := controller.Start(); err != nil {
