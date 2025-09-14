@@ -31,7 +31,6 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 				Name:       "RimWorld",
 				LaunchMode: "SteamAppId",
 				Target:     "294100", // This is what AI sees and tries to use as gameId
-				GabpMode:   "local",
 			},
 		},
 	}
@@ -169,14 +168,12 @@ func TestGameIdResolution(t *testing.T) {
 				Name:       "Minecraft Server",
 				LaunchMode: "DirectPath",
 				Target:     "/opt/minecraft/start.sh",
-				GabpMode:   "local",
 			},
 			"rimworld": {
 				ID:         "rimworld",
 				Name:       "RimWorld",
 				LaunchMode: "SteamAppId",
 				Target:     "294100",
-				GabpMode:   "local",
 			},
 		},
 	}

@@ -16,8 +16,6 @@ type GameConfig struct {
 	Args            []string `json:"args,omitempty"`
 	WorkingDir      string   `json:"workingDir,omitempty"`
 	StopProcessName string   `json:"stopProcessName,omitempty"` // Optional process name for stopping the game
-	GabpHost        string   `json:"gabpHost,omitempty"`        // Host for GABP server connection
-	GabpMode        string   `json:"gabpMode,omitempty"`        // Connection mode: local|remote|connect
 	Description     string   `json:"description,omitempty"`
 }
 

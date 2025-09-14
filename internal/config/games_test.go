@@ -64,7 +64,6 @@ func TestGamesConfig(t *testing.T) {
 					Name:       "RimWorld",
 					LaunchMode: "SteamAppId",
 					Target:     "294100",
-					GabpMode:   "local",
 				},
 			},
 		}
@@ -298,7 +297,6 @@ func TestStopProcessNameConfiguration(t *testing.T) {
 			LaunchMode:      "SteamAppId", 
 			Target:          "123456",
 			StopProcessName: "TestGame.exe",
-			GabpMode:        "local",
 			Description:     "A test game",
 		}
 

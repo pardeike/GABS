@@ -494,29 +494,17 @@ func (s *Server) startGame(game config.GameConfig, backoffMin, backoffMax time.D
 	// Clean up any stale controller reference
 	delete(s.games, game.ID)
 
-	// Create GABP bridge configuration
+	// Create GABP bridge configuration (always local for GABS)
 	var bridgeConfig config.BridgeConfig
-	if game.GabpHost != "" {
-		bridgeConfig.Host = game.GabpHost
-	}
-	if game.GabpMode != "" {
-		bridgeConfig.Mode = game.GabpMode
-	}
 
 	port, token, bridgePath, err := config.WriteBridgeJSONWithConfig(game.ID, "", bridgeConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create bridge config: %w", err)
 	}
 
-	// Set default host if not specified
-	host := bridgeConfig.Host
-	if host == "" {
-		host = "127.0.0.1"
-	}
-	mode := bridgeConfig.Mode
-	if mode == "" {
-		mode = "local"
-	}
+	// GABS always uses local communication
+	host := "127.0.0.1"
+	mode := "local"
 
 	s.log.Infow("created GABP bridge configuration", "gameId", game.ID, "port", port, "token", token[:8]+"...", "host", host, "mode", mode, "configPath", bridgePath)
 

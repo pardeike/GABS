@@ -295,7 +295,6 @@ func addGame(log util.Logger, gameID string) int {
 			Name:       gameID,
 			LaunchMode: "DirectPath",
 			Target:     "",
-			GabpMode:   "local", // GABP communication is always local since GABS launches the games
 		}
 		gamesConfig.AddGame(game)
 		
@@ -344,9 +343,6 @@ func addGame(log util.Logger, gameID string) int {
 			game.WorkingDir = workingDir
 		}
 	}
-
-	// GABP communication is always local since GABS launches the games
-	game.GabpMode = "local"
 
 	// Ask for optional stop process name for better game termination control
 	stopProcessName := promptString("Stop Process Name (optional - for better game stopping)", "")
@@ -416,12 +412,6 @@ func showGame(log util.Logger, gameID string) int {
 	}
 	if game.StopProcessName != "" {
 		fmt.Printf("  Stop Process Name: %s\n", game.StopProcessName)
-	}
-	if game.GabpMode != "" {
-		fmt.Printf("  GABP Mode: %s\n", game.GabpMode)
-	}
-	if game.GabpHost != "" {
-		fmt.Printf("  GABP Host: %s\n", game.GabpHost)
 	}
 	if game.Description != "" {
 		fmt.Printf("  Description: %s\n", game.Description)
