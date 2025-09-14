@@ -95,8 +95,8 @@ func main() {
 	// Initialize structured logger to stderr only
 	log := util.NewLogger(opts.logLevel)
 
-	// Suppress startup log for "games" commands to keep output clean for terminal usage
-	if subcmd != "games" {
+	// Suppress startup log for "games" and "version" commands to keep output clean for terminal usage
+	if subcmd != "games" && subcmd != "version" {
 		log.Infow("starting gabs", "version", version.Get(), "commit", version.GetCommit(), "built", version.GetBuildDate(), "subcmd", subcmd)
 	}
 
