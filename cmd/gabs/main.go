@@ -302,7 +302,7 @@ func addGame(log util.Logger, gameID string) int {
 			return 1
 		}
 
-		fmt.Printf("Game '%s' added with minimal configuration. Edit with 'gabs games edit %s' or manually.\n", gameID, gameID)
+		fmt.Printf("Game '%s' added with minimal configuration. Configure it manually or edit the config file.\n", gameID)
 		return 0
 	}
 
@@ -614,6 +614,9 @@ func parseBackoff(s string) (time.Duration, time.Duration, error) {
 		if err != nil {
 			return 100 * time.Millisecond, 5 * time.Second, fmt.Errorf("invalid min duration: %w", err)
 		}
+		if min < 0 {
+			return 100 * time.Millisecond, 5 * time.Second, fmt.Errorf("min duration cannot be negative")
+		}
 
 		var max time.Duration
 		if parts[1] == "inf" {
@@ -623,6 +626,13 @@ func parseBackoff(s string) (time.Duration, time.Duration, error) {
 			if err != nil {
 				return 100 * time.Millisecond, 5 * time.Second, fmt.Errorf("invalid max duration: %w", err)
 			}
+			if max < 0 {
+				return 100 * time.Millisecond, 5 * time.Second, fmt.Errorf("max duration cannot be negative")
+			}
+		}
+
+		if min > max {
+			return 100 * time.Millisecond, 5 * time.Second, fmt.Errorf("min duration (%v) cannot be greater than max duration (%v)", min, max)
 		}
 
 		return min, max, nil
