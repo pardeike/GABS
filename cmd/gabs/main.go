@@ -33,8 +33,8 @@ var (
 const defaultBackoff = "100ms..5s"
 
 type options struct {
-	subcmd     string
-	
+	subcmd string
+
 	// Server transport
 	httpAddr string // if empty → stdio
 
@@ -67,11 +67,11 @@ func main() {
 	fs.SetOutput(os.Stderr)
 
 	var (
-		httpAddr   = fs.String("http", "", "Run MCP as HTTP on addr (default stdio if empty)")
-		configDir  = fs.String("configDir", "", "Override GABS config directory")
-		logLevel   = fs.String("log-level", "info", "Log level: trace|debug|info|warn|error")
-		backoff    = fs.String("reconnectBackoff", defaultBackoff, "Reconnect backoff window, e.g. '100ms..5s'")
-		grace      = fs.Duration("grace", 3*time.Second, "Graceful stop timeout before kill")
+		httpAddr  = fs.String("http", "", "Run MCP as HTTP on addr (default stdio if empty)")
+		configDir = fs.String("configDir", "", "Override GABS config directory")
+		logLevel  = fs.String("log-level", "info", "Log level: trace|debug|info|warn|error")
+		backoff   = fs.String("reconnectBackoff", defaultBackoff, "Reconnect backoff window, e.g. '100ms..5s'")
+		grace     = fs.Duration("grace", 3*time.Second, "Graceful stop timeout before kill")
 	)
 
 	if err := fs.Parse(os.Args[2:]); err != nil {
@@ -97,9 +97,9 @@ func main() {
 
 	// Initialize structured logger to stderr only
 	log := util.NewLogger(opts.logLevel)
-	
-	// Suppress startup log for "games list" command to keep output clean for AI parsing
-	if !(subcmd == "games" && len(fs.Args()) > 0 && fs.Args()[0] == "list") {
+
+	// Suppress startup log for "games" commands to keep output clean for terminal usage
+	if subcmd != "games" {
 		log.Infow("starting gabs", "version", Version, "commit", Commit, "built", BuildDate, "subcmd", subcmd)
 	}
 
@@ -188,7 +188,7 @@ func runServer(ctx context.Context, log util.Logger, opts options) int {
 
 	// Create MCP server with game management tools
 	server := mcp.NewServer(log)
-	
+
 	// Register game management tools
 	server.RegisterGameManagementTools(gamesConfig, opts.backoffMin, opts.backoffMax)
 
@@ -312,8 +312,8 @@ func addGame(log util.Logger, gameID string) int {
 	// Interactive game configuration
 	fmt.Printf("Adding game configuration for '%s':\n", gameID)
 	game := config.GameConfig{
-		ID:       gameID,
-		Name:     promptString("Game Name", gameID),
+		ID:         gameID,
+		Name:       promptString("Game Name", gameID),
 		LaunchMode: promptChoice("Launch Mode", "DirectPath", []string{"DirectPath", "SteamAppId", "EpicAppId", "CustomCommand"}),
 	}
 
@@ -328,9 +328,9 @@ func addGame(log util.Logger, gameID string) int {
 	} else {
 		targetPrompt = "Target (path/id)"
 	}
-	
+
 	game.Target = promptString(targetPrompt, "")
-	
+
 	// For DirectPath on macOS, resolve .app bundles to actual executables
 	if game.LaunchMode == "DirectPath" && game.Target != "" {
 		if resolvedTarget, err := resolveMacOSAppBundle(game.Target); err == nil && resolvedTarget != game.Target {
@@ -338,7 +338,7 @@ func addGame(log util.Logger, gameID string) int {
 			game.Target = resolvedTarget
 		}
 	}
-	
+
 	if game.LaunchMode == "DirectPath" || game.LaunchMode == "CustomCommand" {
 		workingDir := promptString("Working Directory (optional)", "")
 		if workingDir != "" {
@@ -467,7 +467,7 @@ func promptString(prompt, defaultValue string) string {
 	} else {
 		fmt.Printf("%s: ", prompt)
 	}
-	
+
 	// Use bufio.Scanner to read the entire line, including spaces
 	scanner := bufio.NewScanner(os.Stdin)
 	if scanner.Scan() {
@@ -477,7 +477,7 @@ func promptString(prompt, defaultValue string) string {
 		}
 		return input
 	}
-	
+
 	// If scan failed or reached EOF, return default value
 	return defaultValue
 }
@@ -491,25 +491,25 @@ func promptChoice(prompt, defaultValue string, choices []string) string {
 		fmt.Printf(" [%s]", defaultValue)
 	}
 	fmt.Print(": ")
-	
+
 	// Use bufio.Scanner to read the entire line, including spaces
 	scanner := bufio.NewScanner(os.Stdin)
 	var input string
 	if scanner.Scan() {
 		input = strings.TrimSpace(scanner.Text())
 	}
-	
+
 	if input == "" {
 		return defaultValue
 	}
-	
+
 	// Validate choice
 	for _, choice := range choices {
 		if input == choice {
 			return input
 		}
 	}
-	
+
 	fmt.Printf("Invalid choice. Please select one of: %s\n", strings.Join(choices, ", "))
 	return promptChoice(prompt, defaultValue, choices)
 }
@@ -520,12 +520,12 @@ func resolveMacOSAppBundle(appPath string) (string, error) {
 	if runtime.GOOS != "darwin" || !strings.HasSuffix(appPath, ".app") {
 		return appPath, nil
 	}
-	
+
 	// Check if the app bundle exists
 	if _, err := os.Stat(appPath); os.IsNotExist(err) {
 		return appPath, nil // Return original path if it doesn't exist (user might be entering a path that doesn't exist yet)
 	}
-	
+
 	// Look for executables in Contents/MacOS/
 	macOSDir := filepath.Join(appPath, "Contents", "MacOS")
 	if _, err := os.Stat(macOSDir); os.IsNotExist(err) {
@@ -533,21 +533,21 @@ func resolveMacOSAppBundle(appPath string) (string, error) {
 		fmt.Printf("⚠️  Warning: %s doesn't appear to be a standard app bundle (missing Contents/MacOS)\n", filepath.Base(appPath))
 		return appPath, nil
 	}
-	
+
 	entries, err := os.ReadDir(macOSDir)
 	if err != nil {
 		fmt.Printf("⚠️  Warning: Cannot read Contents/MacOS directory in %s\n", filepath.Base(appPath))
 		return appPath, nil
 	}
-	
+
 	var executables []string
 	appName := strings.TrimSuffix(filepath.Base(appPath), ".app")
-	
+
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
-		
+
 		// Check if file is executable
 		fullPath := filepath.Join(macOSDir, entry.Name())
 		if info, err := os.Stat(fullPath); err == nil {
@@ -556,18 +556,18 @@ func resolveMacOSAppBundle(appPath string) (string, error) {
 			}
 		}
 	}
-	
+
 	if len(executables) == 0 {
 		fmt.Printf("⚠️  Warning: No executable files found in %s/Contents/MacOS\n", filepath.Base(appPath))
 		return appPath, nil
 	}
-	
+
 	// If there's only one executable, use it
 	if len(executables) == 1 {
 		fmt.Printf("🔍 Found executable: %s\n", executables[0])
 		return filepath.Join(macOSDir, executables[0]), nil
 	}
-	
+
 	// Multiple executables - try to find one that matches the app name
 	for _, executable := range executables {
 		if strings.Contains(strings.ToLower(executable), strings.ToLower(appName)) {
@@ -575,19 +575,19 @@ func resolveMacOSAppBundle(appPath string) (string, error) {
 			return filepath.Join(macOSDir, executable), nil
 		}
 	}
-	
+
 	// Multiple executables, none match app name - let user choose
 	fmt.Printf("\n🔍 Found multiple executables in %s:\n", filepath.Base(appPath))
 	for i, executable := range executables {
 		fmt.Printf("  %d. %s\n", i+1, executable)
 	}
-	
+
 	for {
 		choice := promptString("Select executable (1-"+fmt.Sprintf("%d", len(executables))+")", "1")
 		if choice == "" {
 			choice = "1"
 		}
-		
+
 		// Parse choice
 		var index int
 		if _, err := fmt.Sscanf(choice, "%d", &index); err == nil && index >= 1 && index <= len(executables) {
@@ -595,13 +595,13 @@ func resolveMacOSAppBundle(appPath string) (string, error) {
 			fmt.Printf("✓ Selected: %s\n", selectedExecutable)
 			return filepath.Join(macOSDir, selectedExecutable), nil
 		}
-		
+
 		fmt.Printf("Please enter a number between 1 and %d\n", len(executables))
 	}
 }
 
 func parseBackoff(s string) (time.Duration, time.Duration, error) {
-	// Parse "<min>..<max>" format 
+	// Parse "<min>..<max>" format
 	// Examples: "100ms..5s", "1s..30s", "250ms..inf"
 	switch {
 	case s == "", s == defaultBackoff:
@@ -631,5 +631,3 @@ func parseBackoff(s string) (time.Duration, time.Duration, error) {
 		return min, max, nil
 	}
 }
-
-

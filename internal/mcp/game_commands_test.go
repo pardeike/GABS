@@ -19,9 +19,9 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tempDir)
-	
+
 	configPath := filepath.Join(tempDir, "config.json")
-	
+
 	// Create config with RimWorld game - this mirrors the README example
 	gamesConfig := &config.GamesConfig{
 		Version: "1.0",
@@ -34,22 +34,22 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 			},
 		},
 	}
-	
+
 	err = config.SaveGamesConfigToPath(gamesConfig, configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	
+
 	// Load config and create server
 	loadedConfig, err := config.LoadGamesConfigFromPath(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	
+
 	logger := util.NewLogger("info")
 	server := NewServer(logger)
 	server.RegisterGameManagementTools(loadedConfig, 0, 0)
-	
+
 	// Test games.list - simplified output for AI
 	t.Run("GamesList", func(t *testing.T) {
 		listMsg := &Message{
@@ -61,17 +61,17 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 				"arguments": map[string]interface{}{},
 			},
 		}
-		
+
 		response := server.HandleMessage(listMsg)
 		if response == nil {
 			t.Fatal("Expected response from games.list")
 		}
-		
+
 		// Check that response contains only game IDs (simplified format)
 		respBytes, _ := json.Marshal(response)
 		responseStr := string(respBytes)
 		t.Logf("games.list output: %s", responseStr)
-		
+
 		// The output should only contain the game ID
 		if !strings.Contains(responseStr, "rimworld") {
 			t.Error("Expected to see game ID 'rimworld' in output")
@@ -140,23 +140,23 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 				},
 			},
 		}
-		
+
 		response := server.HandleMessage(startCorrectMsg)
 		if response == nil {
 			t.Fatal("Expected response from games.start")
 		}
-		
+
 		// Should not be an error (though may fail to actually start due to no Steam)
 		respBytes, _ := json.Marshal(response)
 		responseStr := string(respBytes)
 		t.Logf("games.start with 'rimworld': %s", responseStr)
-		
+
 		// Should find the game (even if start fails)
 		if strings.Contains(responseStr, "not found") {
 			t.Error("Should find game 'rimworld'")
 		}
 	})
-	
+
 	// Test games.start with Steam App ID (currently fails - this is the bug)
 	t.Run("GamesStartWithSteamAppId", func(t *testing.T) {
 		startWrongMsg := &Message{
@@ -170,22 +170,22 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 				},
 			},
 		}
-		
+
 		response := server.HandleMessage(startWrongMsg)
 		if response == nil {
 			t.Fatal("Expected response from games.start")
 		}
-		
+
 		respBytes, _ := json.Marshal(response)
 		responseStr := string(respBytes)
 		t.Logf("games.start with '294100': %s", responseStr)
-		
+
 		// After our fix, both the game ID and Steam App ID should work
 		// The command should resolve the Steam App ID to the actual game
 		if strings.Contains(responseStr, "not found") {
 			t.Error("After fix, Steam App ID should be accepted and resolved to game")
 		}
-		
+
 		// Should either succeed or fail with game-specific error (not "not found")
 		if strings.Contains(responseStr, "294100") && !strings.Contains(responseStr, "not found") {
 			t.Log("Steam App ID successfully resolved - this is the fix!")
@@ -201,9 +201,9 @@ func TestGameIdResolution(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tempDir)
-	
+
 	configPath := filepath.Join(tempDir, "config.json")
-	
+
 	// Create config with multiple games to test resolution
 	gamesConfig := &config.GamesConfig{
 		Version: "1.0",
@@ -222,22 +222,22 @@ func TestGameIdResolution(t *testing.T) {
 			},
 		},
 	}
-	
+
 	err = config.SaveGamesConfigToPath(gamesConfig, configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	
+
 	// Load config and create server
 	loadedConfig, err := config.LoadGamesConfigFromPath(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	
+
 	logger := util.NewLogger("info")
 	server := NewServer(logger)
 	server.RegisterGameManagementTools(loadedConfig, 0, 0)
-	
+
 	testCases := []struct {
 		name           string
 		gameIdInput    string
@@ -268,7 +268,7 @@ func TestGameIdResolution(t *testing.T) {
 			shouldFind:  false,
 		},
 	}
-	
+
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			statusMsg := &Message{
@@ -282,16 +282,16 @@ func TestGameIdResolution(t *testing.T) {
 					},
 				},
 			}
-			
+
 			response := server.HandleMessage(statusMsg)
 			if response == nil {
 				t.Fatal("Expected response from games.status")
 			}
-			
+
 			respBytes, _ := json.Marshal(response)
 			responseStr := string(respBytes)
 			t.Logf("Resolution test for '%s': %s", tc.gameIdInput, responseStr)
-			
+
 			if tc.shouldFind {
 				if strings.Contains(responseStr, "not found") {
 					t.Errorf("Expected to find game for input '%s'", tc.gameIdInput)

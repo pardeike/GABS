@@ -12,12 +12,12 @@ import (
 )
 
 type BridgeJSON struct {
-	Port    int    `json:"port"`
-	Token   string `json:"token"`
-	GameId  string `json:"gameId"`
-	Agent   string `json:"agentName"`
-	Host    string `json:"host,omitempty"`    // Always 127.0.0.1 for local communication
-	Mode    string `json:"mode,omitempty"`    // Always "local" for GABS
+	Port   int    `json:"port"`
+	Token  string `json:"token"`
+	GameId string `json:"gameId"`
+	Agent  string `json:"agentName"`
+	Host   string `json:"host,omitempty"` // Always 127.0.0.1 for local communication
+	Mode   string `json:"mode,omitempty"` // Always "local" for GABS
 	// PROMPT: Optional extra fields for mod consumption.
 }
 
@@ -26,7 +26,7 @@ type BridgeConfig struct {
 	// Reserved for future extensions - currently GABS only supports local communication
 }
 
-// WriteBridgeJSON generates a random port and token, writes bridge.json atomically to the config dir  
+// WriteBridgeJSON generates a random port and token, writes bridge.json atomically to the config dir
 // Returns (port, token, configPath, error)
 func WriteBridgeJSON(gameID, configDir string) (int, string, string, error) {
 	return WriteBridgeJSONWithConfig(gameID, configDir, BridgeConfig{})
@@ -40,7 +40,7 @@ func WriteBridgeJSONWithConfig(gameID, configDir string, config BridgeConfig) (i
 	if err != nil {
 		return 0, "", "", fmt.Errorf("failed to find available port: %w", err)
 	}
-	
+
 	// Generate random 64-byte hex token
 	token, err := generateToken()
 	if err != nil {
@@ -165,20 +165,20 @@ func findAvailablePort(minPort, maxPort int) (int, error) {
 	for attempts := 0; attempts < 100; attempts++ {
 		// Generate random port in range
 		port := minPort + (randomInt() % (maxPort - minPort + 1))
-		
+
 		// Check if port is available
 		if isPortAvailable(port) {
 			return port, nil
 		}
 	}
-	
+
 	// If random selection failed, try sequential search
 	for port := minPort; port <= maxPort; port++ {
 		if isPortAvailable(port) {
 			return port, nil
 		}
 	}
-	
+
 	return 0, fmt.Errorf("no available ports in range %d-%d", minPort, maxPort)
 }
 

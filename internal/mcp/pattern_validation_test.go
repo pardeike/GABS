@@ -25,7 +25,7 @@ func TestToolNamePatternCompliance(t *testing.T) {
 	})
 
 	server.RegisterTool(Tool{
-		Name:        "games.start", 
+		Name:        "games.start",
 		Description: "Test tool",
 		InputSchema: map[string]interface{}{},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
@@ -34,7 +34,7 @@ func TestToolNamePatternCompliance(t *testing.T) {
 
 	server.RegisterTool(Tool{
 		Name:        "games.stop",
-		Description: "Test tool", 
+		Description: "Test tool",
 		InputSchema: map[string]interface{}{},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
 		return &ToolResult{}, nil
@@ -58,7 +58,7 @@ func TestToolNamePatternCompliance(t *testing.T) {
 
 	server.RegisterTool(Tool{
 		Name:        "games.tools",
-		Description: "Test tool", 
+		Description: "Test tool",
 		InputSchema: map[string]interface{}{},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
 		return &ToolResult{}, nil
@@ -98,23 +98,23 @@ func TestToolNamePatternCompliance(t *testing.T) {
 // TestInvalidToolNames verifies that tool names that would have failed before are now properly sanitized
 func TestInvalidToolNames(t *testing.T) {
 	testCases := []struct {
-		name           string
-		originalName   string
+		name              string
+		originalName      string
 		expectedSanitized string
 	}{
 		{
-			name:           "SlashesToDots",
-			originalName:   "inventory/get",
+			name:              "SlashesToDots",
+			originalName:      "inventory/get",
 			expectedSanitized: "inventory.get",
 		},
 		{
-			name:           "MultipleSlashesToDots", 
-			originalName:   "world/blocks/place",
+			name:              "MultipleSlashesToDots",
+			originalName:      "world/blocks/place",
 			expectedSanitized: "world.blocks.place",
 		},
 		{
-			name:           "MixedSeparators",
-			originalName:   "player.stats/get",
+			name:              "MixedSeparators",
+			originalName:      "player.stats/get",
 			expectedSanitized: "player.stats.get",
 		},
 	}
@@ -123,7 +123,7 @@ func TestInvalidToolNames(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Simulate the sanitization that happens in Mirror.SyncTools()
 			sanitized := sanitizeToolName(tc.originalName)
-			
+
 			if sanitized != tc.expectedSanitized {
 				t.Errorf("Expected sanitized name '%s', got '%s'", tc.expectedSanitized, sanitized)
 			}

@@ -39,7 +39,7 @@ func (c *Controller) Configure(spec LaunchSpec) error {
 	if spec.GameId == "" {
 		return fmt.Errorf("GameId is required")
 	}
-	
+
 	switch spec.Mode {
 	case "DirectPath", "":
 		if spec.PathOrId == "" {
@@ -52,7 +52,7 @@ func (c *Controller) Configure(spec LaunchSpec) error {
 	default:
 		return fmt.Errorf("unsupported launch mode: %s", spec.Mode)
 	}
-	
+
 	c.spec = spec
 	return nil
 }
@@ -95,7 +95,7 @@ func (c *Controller) Start() error {
 	if c.spec.WorkingDir != "" {
 		c.cmd.Dir = c.spec.WorkingDir
 	}
-	
+
 	// Set environment variables for GABP server configuration
 	// The mod acts as GABP server, GABS acts as GABP client
 	bridgePath := c.getBridgePath()
@@ -103,7 +103,7 @@ func (c *Controller) Start() error {
 		fmt.Sprintf("GABS_GAME_ID=%s", c.spec.GameId),
 		fmt.Sprintf("GABS_BRIDGE_PATH=%s", bridgePath), // Fallback for compatibility/debugging
 	}
-	
+
 	// Pass essential GABP server configuration directly to mod
 	// Mod will start GABP server on this port and use this token for auth
 	if c.bridgeInfo != nil {
@@ -112,7 +112,7 @@ func (c *Controller) Start() error {
 			fmt.Sprintf("GABP_TOKEN=%s", c.bridgeInfo.Token),      // Auth token for GABS to use
 		)
 	}
-	
+
 	c.cmd.Env = append(os.Environ(), bridgeEnvVars...)
 
 	// For Steam/Epic launchers, we need different handling since the launcher
@@ -122,7 +122,7 @@ func (c *Controller) Start() error {
 		if err := c.cmd.Start(); err != nil {
 			return fmt.Errorf("failed to start %s launcher: %w", c.spec.Mode, err)
 		}
-		
+
 		// Don't wait for launcher to finish - it's just a trigger
 		// The actual game process runs independently
 		// Note: This means IsRunning() will return false for Steam/Epic games
@@ -190,7 +190,7 @@ func (c *Controller) IsRunning() bool {
 	if c.cmd == nil || c.cmd.Process == nil {
 		return false
 	}
-	
+
 	// Special case: Steam/Epic launchers exit quickly but game continues
 	// For these cases, we assume the game is running if we have a recent launch
 	// This is imperfect but matches the reality that we don't track the actual game process
@@ -201,14 +201,14 @@ func (c *Controller) IsRunning() bool {
 		// TODO: Could improve by trying to find game process by name/other heuristics
 		return false // For now, be conservative and assume launcher games manage themselves
 	}
-	
+
 	// For direct processes, check if the process is still alive
 	// First try to see if the process has already been waited for
 	if c.cmd.ProcessState != nil {
 		// Process has exited
 		return false
 	}
-	
+
 	// Try to signal the process with signal 0 (doesn't affect the process, just checks existence)
 	// This is the most reliable cross-platform approach
 	err := c.cmd.Process.Signal(syscall.Signal(0))

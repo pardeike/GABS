@@ -106,15 +106,15 @@ func TestApplicationLifecycleManagement(t *testing.T) {
 		if !strings.Contains(statusStr, "running") && !strings.Contains(statusStr, "launched") {
 			t.Error("Direct path game should show as running or launched after start")
 		}
-		
+
 		// Test that we can start the same game again (this was the main issue)
-		// Previously this would fail with "already running" 
+		// Previously this would fail with "already running"
 		response2 := server.HandleMessage(startMsg)
 		respBytes2, _ := json.Marshal(response2)
 		responseStr2 := string(respBytes2)
 		t.Logf("Second start attempt result: %s", responseStr2)
-		
-		// The second start should either succeed (for Steam-like games) or 
+
+		// The second start should either succeed (for Steam-like games) or
 		// give a reasonable error (for direct processes that are still running)
 		// The key improvement is that it doesn't fail with "not found"
 		if strings.Contains(responseStr2, "not found") {
@@ -215,7 +215,7 @@ func TestApplicationLifecycleManagement(t *testing.T) {
 
 		if _, err := os.Stat(bridgePath); err == nil {
 			t.Logf("Bridge config created at: %s", bridgePath)
-			
+
 			// Read and validate bridge config structure
 			bridgeData, err := os.ReadFile(bridgePath)
 			if err != nil {

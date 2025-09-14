@@ -63,7 +63,7 @@ type ToolsCapability struct {
 	ListChanged bool `json:"listChanged,omitempty"`
 }
 
-// ResourcesCapability represents resources capability  
+// ResourcesCapability represents resources capability
 type ResourcesCapability struct {
 	Subscribe   bool `json:"subscribe,omitempty"`
 	ListChanged bool `json:"listChanged,omitempty"`

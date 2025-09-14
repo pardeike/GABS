@@ -28,7 +28,7 @@ func TestMultiGameToolMirroring(t *testing.T) {
 	t.Run("SimulateMultipleGameToolRegistration", func(t *testing.T) {
 		// Simulate registering tools from different games
 		// In reality, Mirror instances would do this
-		
+
 		// Register minecraft tools
 		minecraftTools := []Tool{
 			{Name: "minecraft.inventory.get", Description: "Get player inventory in Minecraft (Game: minecraft)"},
@@ -38,7 +38,7 @@ func TestMultiGameToolMirroring(t *testing.T) {
 
 		rimworldTools := []Tool{
 			{Name: "rimworld.inventory.get", Description: "Get colonist inventory in RimWorld (Game: rimworld)"},
-			{Name: "rimworld.crafting.build", Description: "Build items in RimWorld (Game: rimworld)"},  
+			{Name: "rimworld.crafting.build", Description: "Build items in RimWorld (Game: rimworld)"},
 			{Name: "rimworld.player.teleport", Description: "Move colonist in RimWorld (Game: rimworld)"},
 		}
 
@@ -129,9 +129,9 @@ func TestGamesToolsCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tempDir)
-	
+
 	configPath := filepath.Join(tempDir, "config.json")
-	
+
 	// Create config with multiple games
 	gamesConfig := &config.GamesConfig{
 		Version: "1.0",
@@ -144,18 +144,18 @@ func TestGamesToolsCommand(t *testing.T) {
 			},
 			"rimworld": {
 				ID:         "rimworld",
-				Name:       "RimWorld", 
+				Name:       "RimWorld",
 				LaunchMode: "SteamAppId",
 				Target:     "294100",
 			},
 		},
 	}
-	
+
 	err = config.SaveGamesConfigToPath(gamesConfig, configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	
+
 	// Load config and create server with game management tools
 	loadedConfig, err := config.LoadGamesConfigFromPath(configPath)
 	if err != nil {
@@ -191,7 +191,7 @@ func TestGamesToolsCommand(t *testing.T) {
 	}
 
 	t.Run("ListAllGameTools", func(t *testing.T) {
-		// Test games.tools without gameId - should list all 
+		// Test games.tools without gameId - should list all
 		toolsMsg := &Message{
 			JSONRPC: "2.0",
 			Method:  "tools/call",
@@ -210,18 +210,18 @@ func TestGamesToolsCommand(t *testing.T) {
 		respBytes, _ := json.Marshal(response)
 		responseStr := string(respBytes)
 		t.Logf("games.tools (all games): %s", responseStr)
-		
+
 		// Should mention both minecraft and rimworld tools
 		if !strings.Contains(responseStr, "minecraft.inventory.get") {
 			t.Error("Expected to see minecraft tools")
 		}
 		if !strings.Contains(responseStr, "rimworld.inventory.get") {
-			t.Error("Expected to see rimworld tools") 
+			t.Error("Expected to see rimworld tools")
 		}
 	})
 
 	t.Run("ListMinecraftToolsOnly", func(t *testing.T) {
-		// Test games.tools with specific gameId  
+		// Test games.tools with specific gameId
 		toolsMsg := &Message{
 			JSONRPC: "2.0",
 			Method:  "tools/call",
@@ -242,7 +242,7 @@ func TestGamesToolsCommand(t *testing.T) {
 		respBytes, _ := json.Marshal(response)
 		responseStr := string(respBytes)
 		t.Logf("games.tools (minecraft only): %s", responseStr)
-		
+
 		// Should mention minecraft tools but not rimworld
 		if !strings.Contains(responseStr, "minecraft.inventory.get") {
 			t.Error("Expected to see minecraft tools")
@@ -256,17 +256,17 @@ func TestGamesToolsCommand(t *testing.T) {
 // TestProposedSolution demonstrates how the fix should work
 func TestProposedSolution(t *testing.T) {
 	// This test shows how we can fix the multi-game mirroring issue
-	
+
 	t.Run("GamePrefixedTools", func(t *testing.T) {
 		// Strategy 1: Prefix all tools with game ID
 		// inventory/get becomes:
-		// - minecraft.inventory.get  
+		// - minecraft.inventory.get
 		// - rimworld.inventory.get
-		
+
 		// This makes it clear to AI which game each tool belongs to
 		// AI can then explicitly choose: "use minecraft.inventory.get to get Steve's inventory"
 		t.Log("Strategy 1: Game-prefixed tool names")
-		t.Log("  minecraft.inventory.get - Get player inventory in Minecraft")  
+		t.Log("  minecraft.inventory.get - Get player inventory in Minecraft")
 		t.Log("  rimworld.inventory.get - Get colonist inventory in RimWorld")
 		t.Log("  AI can clearly specify which game to target")
 	})
@@ -275,10 +275,10 @@ func TestProposedSolution(t *testing.T) {
 		// Strategy 2: Add gameId parameter to all mirrored tools
 		// inventory/get with parameters: {gameId: "minecraft", playerId: "steve"}
 		// This allows keeping original tool names while adding game context
-		
+
 		t.Log("Strategy 2: Game context parameter")
 		t.Log("  inventory/get with {gameId: 'minecraft', playerId: 'steve'}")
-		t.Log("  inventory/get with {gameId: 'rimworld', playerId: 'colonist1'}")  
+		t.Log("  inventory/get with {gameId: 'rimworld', playerId: 'colonist1'}")
 		t.Log("  AI adds gameId parameter to specify target game")
 	})
 
@@ -286,14 +286,14 @@ func TestProposedSolution(t *testing.T) {
 		// Strategy 3: Only register tools for the currently "active" game
 		// games.switch tool to change active game context
 		// This is simpler but requires switching context
-		
+
 		t.Log("Strategy 3: Single active game context")
 		t.Log("  games.switch {'gameId': 'minecraft'}")
 		t.Log("  Now all tools (inventory_get, world_place_block) apply to Minecraft")
-		t.Log("  games.switch {'gameId': 'rimworld'}")  
+		t.Log("  games.switch {'gameId': 'rimworld'}")
 		t.Log("  Now all tools (inventory_get, crafting_build) apply to RimWorld")
 	})
-	
+
 	// I think Strategy 1 (game-prefixed tools) is clearest for AI
 	// It's explicit, no hidden context, and AI can see all available options
 }

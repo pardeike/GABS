@@ -12,8 +12,8 @@ import (
 type GameConfig struct {
 	ID              string   `json:"id"`
 	Name            string   `json:"name"`
-	LaunchMode      string   `json:"launchMode"`       // DirectPath|SteamAppId|EpicAppId|CustomCommand
-	Target          string   `json:"target"`           // path or id
+	LaunchMode      string   `json:"launchMode"` // DirectPath|SteamAppId|EpicAppId|CustomCommand
+	Target          string   `json:"target"`     // path or id
 	Args            []string `json:"args,omitempty"`
 	WorkingDir      string   `json:"workingDir,omitempty"`
 	StopProcessName string   `json:"stopProcessName,omitempty"` // Optional process name for stopping the game
@@ -22,7 +22,7 @@ type GameConfig struct {
 
 // GamesConfig represents the main GABS configuration
 type GamesConfig struct {
-	Version string                 `json:"version"`
+	Version string                `json:"version"`
 	Games   map[string]GameConfig `json:"games"`
 }
 
@@ -67,7 +67,7 @@ func SaveGamesConfig(config *GamesConfig) error {
 	return SaveGamesConfigToPath(config, "")
 }
 
-// SaveGamesConfigToPath saves games configuration to a specific path (for testing)  
+// SaveGamesConfigToPath saves games configuration to a specific path (for testing)
 func SaveGamesConfigToPath(config *GamesConfig, configPath string) error {
 	if configPath == "" {
 		var err error
@@ -184,7 +184,7 @@ func getGamesConfigPath() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to get home directory: %w", err)
 	}
-	
+
 	baseDir := filepath.Join(homeDir, ".gabs")
 	return filepath.Join(baseDir, "config.json"), nil
 }
