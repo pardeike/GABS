@@ -37,11 +37,13 @@ The specific path, ID, or command based on your launch mode:
 ### 4. Working Directory (Optional)
 Where the game should run from. Leave blank to use the game's default location.
 
-### 5. Stop Process Name (Optional)
-The name of the actual game process to stop when using games.stop or games.kill. This is especially useful for Steam/Epic games where GABS normally can only stop the launcher process. Examples:
+### 5. Stop Process Name (Required for Steam/Epic Games)
+The name of the actual game process to stop when using games.stop or games.kill. **This is required for Steam/Epic games** to enable proper game termination. Without it, GABS can only stop the launcher process, not the actual game. Examples:
 - For RimWorld: `RimWorldWin64.exe` (Windows) or `RimWorld` (Linux/macOS)
 - For Minecraft with Java: `java`
 - For Unity games: often the game name with `.exe` extension
+
+**Note:** For `SteamAppId` and `EpicAppId` launch modes, you must provide a `stopProcessName` or GABS will not be able to properly terminate the game.
 
 ### 6. GABP Mode
 How GABS talks to your game mod:
@@ -119,19 +121,22 @@ Best for: Games installed through Steam
 ```json
 {
   "launchMode": "SteamAppId", 
-  "target": "294100"
+  "target": "294100",
+  "stopProcessName": "RimWorldWin64.exe"
 }
 ```
-You can find Steam App IDs on the game's Steam store page URL.
+You can find Steam App IDs on the game's Steam store page URL. **The `stopProcessName` is required** for Steam games to enable proper game termination.
 
 ### EpicAppId
 Best for: Games installed through Epic Games Store
 ```json
 {
   "launchMode": "EpicAppId",
-  "target": "your-epic-app-id"
+  "target": "your-epic-app-id",
+  "stopProcessName": "GameName.exe"
 }
 ```
+**The `stopProcessName` is required** for Epic games to enable proper game termination.
 
 ### CustomCommand
 Best for: Complex launch setups or special requirements
@@ -202,10 +207,17 @@ The process finding works across platforms:
       "launchMode": "DirectPath",
       "target": "/opt/minecraft/start.sh",
       "stopProcessName": "java"
+    },
+    "epic-game": {
+      "launchMode": "EpicAppId",
+      "target": "epic-app-id",
+      "stopProcessName": "GameName.exe"
     }
   }
 }
 ```
+
+**Important:** For launcher-based games (`SteamAppId` and `EpicAppId`), the `stopProcessName` field is mandatory. GABS will refuse to save configurations for these launch modes without it, as proper game termination would not be possible.
 
 ## Troubleshooting
 

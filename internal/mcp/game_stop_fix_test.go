@@ -139,25 +139,21 @@ func TestGameStopFix(t *testing.T) {
 		responseStr := string(respBytes)
 		t.Logf("Steam game stop result: %s", responseStr)
 
-		// Should not be marked as error but should show warning
-		if strings.Contains(responseStr, "isError") && strings.Contains(responseStr, "true") {
-			t.Error("Steam game stop should not be marked as error with fix")
+		// Should be marked as error because stopProcessName is missing
+		if !strings.Contains(responseStr, "isError") || !strings.Contains(responseStr, "true") {
+			t.Error("Steam game stop should be marked as error when stopProcessName is missing")
 		}
 
-		// Should contain the warning about limitation
-		if !strings.Contains(responseStr, "launcher process stopped") {
-			t.Error("Should warn that only launcher process was stopped")
-		}
-
-		if !strings.Contains(responseStr, "may still be running independently") {
-			t.Error("Should warn that actual game may still be running")
+		// Should contain the warning about missing configuration
+		if !strings.Contains(responseStr, "Configure 'stopProcessName'") {
+			t.Error("Should warn about missing stopProcessName configuration")
 		}
 
 		if !strings.Contains(responseStr, "SteamAppId") {
 			t.Error("Should mention SteamAppId specifically")
 		}
 
-		t.Log("✓ Steam game stop shows proper warning about limitations")
+		t.Log("✓ Steam game stop shows proper warning about missing configuration")
 	})
 
 	t.Run("SteamGameStatusIsInformative", func(t *testing.T) {
@@ -227,8 +223,8 @@ func TestGameStopFix(t *testing.T) {
 		responseStr := string(respBytes)
 		t.Logf("Games list: %s", responseStr)
 
-		// Should mention limitation for Steam games
-		if !strings.Contains(responseStr, "cannot directly stop SteamAppId games") {
+		// Should mention missing stopProcessName for Steam games
+		if !strings.Contains(responseStr, "Missing stopProcessName") {
 			t.Error("Should warn about SteamAppId stop limitations in games list")
 		}
 

@@ -89,7 +89,11 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				content.WriteString(fmt.Sprintf("  Use gameId: '%s' (or target: '%s')\n", game.ID, game.Target))
 				content.WriteString(fmt.Sprintf("  Launch: %s\n", game.LaunchMode))
 				if game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId" {
-					content.WriteString(fmt.Sprintf("  Note: GABS can start but cannot directly stop %s games\n", game.LaunchMode))
+					if game.StopProcessName != "" {
+						content.WriteString(fmt.Sprintf("  ✓ Configured for proper game termination (process: %s)\n", game.StopProcessName))
+					} else {
+						content.WriteString(fmt.Sprintf("  ⚠️  Missing stopProcessName - GABS can start but cannot properly stop %s games\n", game.LaunchMode))
+					}
 				}
 				if game.Description != "" {
 					content.WriteString(fmt.Sprintf("  %s\n", game.Description))
@@ -232,13 +236,11 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 
 		err := s.stopGame(*game, false)
 		if err != nil {
-			// Check if this is a launcher-specific limitation
-			if strings.Contains(err.Error(), "launcher process stopped") || 
-			   strings.Contains(err.Error(), "may still be running independently") {
-				// This is expected behavior for Steam/Epic games - not a failure
+			// Check if this is a launcher-specific configuration issue
+			if strings.Contains(err.Error(), "Configure 'stopProcessName'") {
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("⚠️ %s\n\nNote: For Steam/Epic games, GABS can only stop the launcher process, not the actual game. To fully stop the game, use Steam/Epic's interface or the game's own quit option.", err.Error())}},
-					IsError: false,
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("⚠️ %s\n\nTo fix this, update your game configuration to include a 'stopProcessName'. Use: gabs games show %s", err.Error(), game.ID)}},
+					IsError: true,
 				}, nil
 			}
 			
@@ -286,13 +288,11 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 
 		err := s.stopGame(*game, true)
 		if err != nil {
-			// Check if this is a launcher-specific limitation
-			if strings.Contains(err.Error(), "launcher process stopped") || 
-			   strings.Contains(err.Error(), "may still be running independently") {
-				// This is expected behavior for Steam/Epic games - not a failure
+			// Check if this is a launcher-specific configuration issue
+			if strings.Contains(err.Error(), "Configure 'stopProcessName'") {
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("⚠️ %s\n\nNote: For Steam/Epic games, GABS can only kill the launcher process, not the actual game. To fully terminate the game, use Steam/Epic's interface or the game's own quit option.", err.Error())}},
-					IsError: false,
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("⚠️ %s\n\nTo fix this, update your game configuration to include a 'stopProcessName'. Use: gabs games show %s", err.Error(), game.ID)}},
+					IsError: true,
 				}, nil
 			}
 			
@@ -560,8 +560,16 @@ func (s *Server) stopGame(game config.GameConfig, force bool) error {
 
 	// Handle different launch modes differently
 	if launchMode == "SteamAppId" || launchMode == "EpicAppId" {
-		// For Steam/Epic games, we can only stop the launcher process
-		// The actual game runs independently and GABS cannot control it directly
+		// For Steam/Epic games, try to use stopProcessName first if available
+		if game.StopProcessName != "" {
+			// Try to stop by process name first
+			if err := controller.Stop(3 * time.Second); err == nil {
+				s.log.Infow("game stopped via process name", "gameId", game.ID, "processName", game.StopProcessName)
+				return nil
+			}
+		}
+		
+		// Fall back to stopping the launcher process
 		var err error
 		if force {
 			err = controller.Kill()
@@ -575,8 +583,13 @@ func (s *Server) stopGame(game config.GameConfig, force bool) error {
 			s.log.Infow("launcher process stopped", "gameId", game.ID, "mode", launchMode, "pid", controller.GetPID())
 		}
 		
-		// Return a specific message for launcher-based games
-		return fmt.Errorf("launcher process stopped, but actual %s game may still be running independently. GABS cannot directly control %s-launched games. Please stop the game through %s or the game's own interface", launchMode, launchMode, launchMode)
+		// If we have stopProcessName configured, we should have been able to stop the game properly
+		if game.StopProcessName != "" {
+			return nil // Process was handled by stopProcessName logic above
+		}
+		
+		// Only show the confusing message if stopProcessName is not configured
+		return fmt.Errorf("launcher process stopped, but the actual %s game may still be running independently. Configure 'stopProcessName' in the game configuration to enable proper game termination", launchMode)
 	}
 
 	// For direct processes, stop normally
