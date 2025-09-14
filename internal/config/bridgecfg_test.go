@@ -52,29 +52,23 @@ func TestWriteBridgeJSON(t *testing.T) {
 				t.Errorf("Token length %d, expected 64", len(token))
 			}
 
-			// Config path should now be unique (bridge-<timestamp>.json)
+			// Config path should be bridge.json in the game's directory
 			if !strings.Contains(cfgPath, gameDir) {
 				t.Errorf("Config path %s should contain game dir %s", cfgPath, gameDir)
 			}
-			if !strings.HasPrefix(filepath.Base(cfgPath), "bridge-") || !strings.HasSuffix(cfgPath, ".json") {
-				t.Errorf("Config path %s should be bridge-<timestamp>.json format", cfgPath)
+			if filepath.Base(cfgPath) != "bridge.json" {
+				t.Errorf("Config path %s should be bridge.json", cfgPath)
 			}
 
-			// Verify both unique and standard bridge files exist
-			standardPath := filepath.Join(gameDir, "bridge.json")
-			if _, err := os.Stat(standardPath); err != nil {
-				t.Errorf("Standard bridge.json should also exist at %s", standardPath)
-			}
-
-			// Read and verify the unique bridge file contents
+			// Read and verify the bridge file contents
 			data, err := os.ReadFile(cfgPath)
 			if err != nil {
-				t.Fatalf("Failed to read unique bridge file: %v", err)
+				t.Fatalf("Failed to read bridge file: %v", err)
 			}
 
 			var bridge BridgeJSON
 			if err := json.Unmarshal(data, &bridge); err != nil {
-				t.Fatalf("Failed to parse unique bridge file: %v", err)
+				t.Fatalf("Failed to parse bridge file: %v", err)
 			}
 
 			// Verify configuration was applied correctly
@@ -86,24 +80,6 @@ func TestWriteBridgeJSON(t *testing.T) {
 			}
 			if bridge.GameId != tt.gameID {
 				t.Errorf("GameId %s, expected %s", bridge.GameId, tt.gameID)
-			}
-
-			// Also verify the standard bridge.json has the same content
-			// standardPath already declared above, so reuse it
-			standardData, readErr := os.ReadFile(standardPath)
-			if readErr != nil {
-				t.Fatalf("Failed to read standard bridge.json: %v", readErr)
-			}
-
-			var standardBridge BridgeJSON
-			parseErr := json.Unmarshal(standardData, &standardBridge)
-			if parseErr != nil {
-				t.Fatalf("Failed to parse standard bridge.json: %v", parseErr)
-			}
-
-			// Standard bridge.json should have identical content
-			if standardBridge.Port != bridge.Port || standardBridge.Token != bridge.Token {
-				t.Errorf("Standard bridge.json content doesn't match unique bridge file")
 			}
 		})
 	}
