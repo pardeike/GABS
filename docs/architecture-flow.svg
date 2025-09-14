@@ -4,7 +4,7 @@
       .box { fill: #f8f9fa; stroke: #2563eb; stroke-width: 2; rx: 8; }
       .text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px; text-anchor: middle; dominant-baseline: middle; fill: #1f2937; }
       .arrow { stroke: #059669; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
-      .protocol { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 12px; fill: #6b7280; text-anchor: middle; dominant-baseline: middle; }
+      .protocol { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 12px; fill: #6b7280; text-anchor: middle; }
     </style>
     <!-- smaller arrowhead -->
     <marker id="arrowhead" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
@@ -12,41 +12,36 @@
     </marker>
   </defs>
 
-  <!-- AI Assistant Box -->
+  <!-- AI Assistant -->
   <rect x="20" y="70" width="120" height="60" class="box"/>
   <text x="80" y="100" class="text">AI Assistant</text>
 
-  <!-- MCP Tools Connection -->
-  <line x1="140" y1="100" x2="200" y2="100" class="arrow"/>
-  <!-- label slightly below the arrow -->
-  <text x="170" y="116" class="protocol">MCP Tools</text>
-
-  <!-- GABS Box -->
+  <!-- GABS -->
   <rect x="220" y="70" width="120" height="60" class="box"/>
   <text x="280" y="100" class="text">GABS</text>
 
-  <!-- GABP Connection -->
-  <line x1="340" y1="100" x2="400" y2="100" class="arrow"/>
-  <!-- label slightly above the arrow -->
-  <text x="370" y="84" class="protocol">GABP</text>
-
-  <!-- Game Mod Box -->
+  <!-- Game Mod -->
   <rect x="420" y="70" width="120" height="60" class="box"/>
   <text x="480" y="100" class="text">Game Mod</text>
 
-  <!-- Game Connection -->
-  <line x1="540" y1="100" x2="600" y2="100" class="arrow"/>
-  <!-- label slightly below the arrow -->
-  <text x="570" y="116" class="protocol">Game API</text>
-
-  <!-- Your Game Box -->
+  <!-- Your Game -->
   <rect x="620" y="70" width="120" height="60" class="box"/>
   <text x="680" y="100" class="text">Your Game</text>
 
-  <!-- Bidirectional arrows for real-time communication -->
-  <line x1="200" y1="110" x2="140" y2="110" class="arrow"/>
-  <line x1="400" y1="110" x2="340" y2="110" class="arrow"/>
-  <line x1="600" y1="110" x2="540" y2="110" class="arrow"/>
+  <!-- Arrows + labels -->
+  <line x1="140" y1="100" x2="220" y2="100" class="arrow"/>
+  <text x="180" y="85" class="protocol">MCP Tools</text>
+
+  <line x1="340" y1="100" x2="420" y2="100" class="arrow"/>
+  <text x="380" y="85" class="protocol">GABP</text>
+
+  <line x1="540" y1="100" x2="620" y2="100" class="arrow"/>
+  <text x="580" y="85" class="protocol">Game API</text>
+
+  <!-- Return arrows (for bidirectionality) -->
+  <line x1="220" y1="110" x2="140" y2="110" class="arrow"/>
+  <line x1="420" y1="110" x2="340" y2="110" class="arrow"/>
+  <line x1="620" y1="110" x2="540" y2="110" class="arrow"/>
 
   <!-- Info text -->
   <text x="400" y="170" class="protocol">Real-time bidirectional communication enables AI to control games and receive live updates</text>
