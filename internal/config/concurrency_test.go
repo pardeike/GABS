@@ -7,19 +7,20 @@ import (
 )
 
 func TestConcurrentBridgeCreation(t *testing.T) {
-	t.Log("Testing concurrent bridge file creation for same game...")
+	t.Log("Testing concurrent bridge file creation for different games...")
 
 	var wg sync.WaitGroup
 	results := make([]concurrentResult, 10)
+	gameNames := []string{"minecraft", "rimworld", "terraria", "stardew", "factorio", "cities", "valheim", "subnautica", "kerbal", "oxygen"}
 
-	// Launch 10 concurrent bridge creations for the same game
+	// Launch 10 concurrent bridge creations for different games
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func(index int) {
 			defer wg.Done()
 
 			start := time.Now()
-			port, token, path, err := WriteBridgeJSON("minecraft", "")
+			port, token, path, err := WriteBridgeJSON(gameNames[index], "")
 			duration := time.Since(start)
 
 			results[index] = concurrentResult{
@@ -29,6 +30,7 @@ func TestConcurrentBridgeCreation(t *testing.T) {
 				Path:     path,
 				Error:    err,
 				Duration: duration,
+				GameName: gameNames[index],
 			}
 		}(i)
 	}
@@ -42,20 +44,19 @@ func TestConcurrentBridgeCreation(t *testing.T) {
 
 	for _, r := range results {
 		if r.Error != nil {
-			t.Logf("  %d: ERROR - %v", r.Index, r.Error)
+			t.Logf("  %s: ERROR - %v", r.GameName, r.Error)
 			errorCount++
 		} else {
-			t.Logf("  %d: Port=%d, Token=%s..., Path=%s, Duration=%v",
-				r.Index, r.Port, r.Token[:8], r.Path, r.Duration)
+			t.Logf("  %s: Port=%d, Token=%s..., Path=%s, Duration=%v",
+				r.GameName, r.Port, r.Token[:8], r.Path, r.Duration)
 
 			if portMap[r.Port] {
-				t.Errorf("Port %d was used by multiple launches! This indicates a concurrency issue.", r.Port)
+				t.Errorf("Port %d was used by multiple games! This indicates a concurrency issue.", r.Port)
 			}
 			portMap[r.Port] = true
 
 			if pathMap[r.Path] {
-				// This is expected - we want unique paths for concurrent launches
-				t.Logf("    Note: Path %s is unique (this is good!)", r.Path)
+				t.Errorf("Path %s was used by multiple games! Each game should have its own directory.", r.Path)
 			} else {
 				pathMap[r.Path] = true
 			}
@@ -78,10 +79,11 @@ func TestConcurrentBridgeCreation(t *testing.T) {
 	t.Logf("Summary: %d unique ports, %d unique paths, %d errors",
 		len(portMap), len(pathMap), errorCount)
 
-	// This test should pass if concurrency is handled correctly:
-	// - Each launch gets a unique port (no conflicts)
-	// - Each launch gets a unique bridge file path (concurrent-safe)
+	// This test verifies that concurrent launches of DIFFERENT games work correctly:
+	// - Each game gets a unique port (no conflicts)
+	// - Each game gets its own bridge file path (in its own directory)
 	// - No errors due to race conditions
+	// - ENV variable isolation is guaranteed by Go's exec.Command
 }
 
 type concurrentResult struct {
@@ -91,4 +93,5 @@ type concurrentResult struct {
 	Path     string
 	Error    error
 	Duration time.Duration
+	GameName string
 }

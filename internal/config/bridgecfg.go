@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"time"
 )
 
 type BridgeJSON struct {
@@ -19,6 +18,7 @@ type BridgeJSON struct {
 
 // WriteBridgeJSON generates a random port and token, writes bridge.json atomically to the config dir
 // Returns (port, token, configPath, error)
+// Each game gets its own directory, ensuring concurrent launches of different games are properly isolated.
 func WriteBridgeJSON(gameID, configDir string) (int, string, string, error) {
 	// Generate available port with conflict detection
 	port, err := findAvailablePort(49152, 65535)
@@ -50,21 +50,16 @@ func WriteBridgeJSON(gameID, configDir string) (int, string, string, error) {
 		GameId: gameID,
 	}
 
-	// Create unique filename with timestamp to avoid conflicts in concurrent launches
-	timestamp := time.Now().UnixNano()
-	cfgFilename := fmt.Sprintf("bridge-%d.json", timestamp)
-	cfgPath := filepath.Join(cfgDir, cfgFilename)
+	// Use standard bridge.json filename (one per game)
+	cfgPath := filepath.Join(cfgDir, "bridge.json")
 	tempPath := cfgPath + ".tmp"
-
-	// Also create/update the standard bridge.json for backward compatibility
-	standardPath := filepath.Join(cfgDir, "bridge.json")
 
 	data, err := json.MarshalIndent(bridge, "", "  ")
 	if err != nil {
 		return 0, "", "", fmt.Errorf("failed to marshal bridge config: %w", err)
 	}
 
-	// Write unique bridge file atomically
+	// Write bridge file atomically
 	if err := os.WriteFile(tempPath, data, 0644); err != nil {
 		return 0, "", "", fmt.Errorf("failed to write temp config: %w", err)
 	}
@@ -72,15 +67,6 @@ func WriteBridgeJSON(gameID, configDir string) (int, string, string, error) {
 	if err := os.Rename(tempPath, cfgPath); err != nil {
 		os.Remove(tempPath) // cleanup
 		return 0, "", "", fmt.Errorf("failed to rename temp config: %w", err)
-	}
-
-	// Also update standard bridge.json for backward compatibility
-	tempStandardPath := standardPath + ".tmp"
-	if err := os.WriteFile(tempStandardPath, data, 0644); err != nil {
-		// Don't fail if we can't write the standard file - the unique one is the important one
-		os.Remove(tempStandardPath)
-	} else if err := os.Rename(tempStandardPath, standardPath); err != nil {
-		os.Remove(tempStandardPath)
 	}
 
 	return port, token, cfgPath, nil
