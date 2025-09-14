@@ -295,6 +295,7 @@ func addGame(log util.Logger, gameID string) int {
 			Name:       gameID,
 			LaunchMode: "DirectPath",
 			Target:     "",
+			GabpMode:   "local", // GABP communication is always local since GABS launches the games
 		}
 		gamesConfig.AddGame(game)
 		
@@ -344,17 +345,8 @@ func addGame(log util.Logger, gameID string) int {
 		}
 	}
 
-	gabpMode := promptChoice("GABP Mode", "local", []string{"local", "remote", "connect"})
-	if gabpMode != "" {
-		game.GabpMode = gabpMode
-	}
-
-	if gabpMode == "remote" {
-		gabpHost := promptString("GABP Host (for remote access)", "127.0.0.1")
-		if gabpHost != "" {
-			game.GabpHost = gabpHost
-		}
-	}
+	// GABP communication is always local since GABS launches the games
+	game.GabpMode = "local"
 
 	// Ask for optional stop process name for better game termination control
 	stopProcessName := promptString("Stop Process Name (optional - for better game stopping)", "")
