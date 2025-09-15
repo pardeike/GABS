@@ -207,42 +207,47 @@ func TestBackwardCompatibility(t *testing.T) {
 // TestPortFallbackFunctionality tests the new port allocation with fallback ranges
 func TestPortFallbackFunctionality(t *testing.T) {
 	tests := []struct {
-		name        string
-		customRange string
-		expectError bool
+		name         string
+		gamesConfig  *GamesConfig
+		expectError  bool
 	}{
 		{
-			name:        "default fallback ranges",
-			customRange: "",
+			name:         "default fallback ranges",
+			gamesConfig:  nil,
+			expectError:  false,
+		},
+		{
+			name: "custom port range",
+			gamesConfig: &GamesConfig{
+				PortRanges: &PortRangeConfig{
+					CustomRanges: []PortRange{{Min: 8000, Max: 8999}},
+				},
+			},
 			expectError: false,
 		},
 		{
-			name:        "custom port range",
-			customRange: "8000-8999",
+			name: "multiple custom ranges",
+			gamesConfig: &GamesConfig{
+				PortRanges: &PortRangeConfig{
+					CustomRanges: []PortRange{{Min: 8000, Max: 8099}, {Min: 9000, Max: 9099}},
+				},
+			},
 			expectError: false,
 		},
 		{
-			name:        "multiple custom ranges",
-			customRange: "8000-8099,9000-9099",
+			name: "empty custom ranges falls back to defaults",
+			gamesConfig: &GamesConfig{
+				PortRanges: &PortRangeConfig{
+					CustomRanges: []PortRange{},
+				},
+			},
 			expectError: false,
-		},
-		{
-			name:        "invalid range format",
-			customRange: "invalid",
-			expectError: false, // Should fallback to default ranges
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Set custom port range if specified
-			if tt.customRange != "" {
-				oldValue := os.Getenv("GABS_PORT_RANGES")
-				os.Setenv("GABS_PORT_RANGES", tt.customRange)
-				defer os.Setenv("GABS_PORT_RANGES", oldValue)
-			}
-
-			port, err := findAvailablePortWithFallback()
+			port, err := findAvailablePortWithConfig(tt.gamesConfig)
 			
 			if tt.expectError && err == nil {
 				t.Error("Expected error but got none")
@@ -259,69 +264,155 @@ func TestPortFallbackFunctionality(t *testing.T) {
 	}
 }
 
-// TestGetCustomPortRanges tests the environment variable parsing
-func TestGetCustomPortRanges(t *testing.T) {
+// TestConfigPortRanges tests the configuration-based port range functionality
+func TestConfigPortRanges(t *testing.T) {
 	tests := []struct {
-		name        string
-		envValue    string
-		expectedLen int
-		firstRange  []int
+		name           string
+		gamesConfig    *GamesConfig
+		expectedRanges int
+		firstRange     *PortRange
 	}{
 		{
-			name:        "empty env var",
-			envValue:    "",
-			expectedLen: 0,
+			name:           "nil config",
+			gamesConfig:    nil,
+			expectedRanges: 0,
 		},
 		{
-			name:        "single range",
-			envValue:    "8000-8999",
-			expectedLen: 1,
-			firstRange:  []int{8000, 8999},
+			name: "single range",
+			gamesConfig: &GamesConfig{
+				PortRanges: &PortRangeConfig{
+					CustomRanges: []PortRange{{Min: 8000, Max: 8999}},
+				},
+			},
+			expectedRanges: 1,
+			firstRange:     &PortRange{Min: 8000, Max: 8999},
 		},
 		{
-			name:        "multiple ranges",
-			envValue:    "8000-8999,9000-9999",
-			expectedLen: 2,
-			firstRange:  []int{8000, 8999},
+			name: "multiple ranges",
+			gamesConfig: &GamesConfig{
+				PortRanges: &PortRangeConfig{
+					CustomRanges: []PortRange{{Min: 8000, Max: 8999}, {Min: 9000, Max: 9999}},
+				},
+			},
+			expectedRanges: 2,
+			firstRange:     &PortRange{Min: 8000, Max: 8999},
 		},
 		{
-			name:        "ranges with spaces",
-			envValue:    " 8000 - 8999 , 9000 - 9999 ",
-			expectedLen: 2,
-			firstRange:  []int{8000, 8999},
-		},
-		{
-			name:        "invalid format mixed with valid",
-			envValue:    "invalid,8000-8999,bad-range",
-			expectedLen: 1,
-			firstRange:  []int{8000, 8999},
-		},
-		{
-			name:        "invalid range values",
-			envValue:    "0-100,70000-80000,8000-8999", // 0 and >65535 invalid
-			expectedLen: 1,
-			firstRange:  []int{8000, 8999},
+			name: "empty custom ranges",
+			gamesConfig: &GamesConfig{
+				PortRanges: &PortRangeConfig{
+					CustomRanges: []PortRange{},
+				},
+			},
+			expectedRanges: 0,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Set environment variable
-			oldValue := os.Getenv("GABS_PORT_RANGES")
-			os.Setenv("GABS_PORT_RANGES", tt.envValue)
-			defer os.Setenv("GABS_PORT_RANGES", oldValue)
-
-			ranges := getCustomPortRanges()
-			
-			if len(ranges) != tt.expectedLen {
-				t.Errorf("Expected %d ranges, got %d", tt.expectedLen, len(ranges))
+			var ranges []PortRange
+			if tt.gamesConfig != nil && tt.gamesConfig.PortRanges != nil {
+				ranges = tt.gamesConfig.PortRanges.CustomRanges
 			}
 			
-			if tt.expectedLen > 0 && len(ranges) > 0 {
-				if ranges[0][0] != tt.firstRange[0] || ranges[0][1] != tt.firstRange[1] {
+			if len(ranges) != tt.expectedRanges {
+				t.Errorf("Expected %d ranges, got %d", tt.expectedRanges, len(ranges))
+			}
+			
+			if tt.expectedRanges > 0 && len(ranges) > 0 && tt.firstRange != nil {
+				if ranges[0].Min != tt.firstRange.Min || ranges[0].Max != tt.firstRange.Max {
 					t.Errorf("Expected first range %v, got %v", tt.firstRange, ranges[0])
 				}
 			}
 		})
 	}
+}
+
+// TestWriteBridgeJSONWithConfig tests the new config-based bridge creation
+func TestWriteBridgeJSONWithConfig(t *testing.T) {
+tempDir := t.TempDir()
+
+tests := []struct {
+name        string
+gameID      string
+gamesConfig *GamesConfig
+}{
+{
+name:        "with nil config (uses defaults)",
+gameID:      "testgame1",
+gamesConfig: nil,
+},
+{
+name:   "with custom port ranges",
+gameID: "testgame2",
+gamesConfig: &GamesConfig{
+PortRanges: &PortRangeConfig{
+CustomRanges: []PortRange{{Min: 8000, Max: 8999}},
+},
+},
+},
+{
+name:   "with empty port ranges (uses defaults)",
+gameID: "testgame3",
+gamesConfig: &GamesConfig{
+PortRanges: &PortRangeConfig{
+CustomRanges: []PortRange{},
+},
+},
+},
+}
+
+for _, tt := range tests {
+t.Run(tt.name, func(t *testing.T) {
+// Create game-specific directory
+gameDir := filepath.Join(tempDir, tt.gameID)
+if err := os.MkdirAll(gameDir, 0755); err != nil {
+t.Fatalf("Failed to create game dir: %v", err)
+}
+
+// Write bridge.json with games config
+port, token, cfgPath, err := WriteBridgeJSONWithConfig(tt.gameID, gameDir, tt.gamesConfig)
+if err != nil {
+t.Fatalf("WriteBridgeJSONWithConfig failed: %v", err)
+}
+
+// Verify return values
+if port <= 0 || port > 65535 {
+t.Errorf("Port %d out of valid range [1, 65535]", port)
+}
+if len(token) != 64 {
+t.Errorf("Token length %d, expected 64", len(token))
+}
+
+// Config path should be bridge.json in the game's directory
+if !strings.Contains(cfgPath, gameDir) {
+t.Errorf("Config path %s should contain game dir %s", cfgPath, gameDir)
+}
+if filepath.Base(cfgPath) != "bridge.json" {
+t.Errorf("Config path %s should be bridge.json", cfgPath)
+}
+
+// Read and verify the bridge file contents
+data, err := os.ReadFile(cfgPath)
+if err != nil {
+t.Fatalf("Failed to read bridge file: %v", err)
+}
+
+var bridge BridgeJSON
+if err := json.Unmarshal(data, &bridge); err != nil {
+t.Fatalf("Failed to parse bridge file: %v", err)
+}
+
+// Verify configuration was applied correctly
+if bridge.Port != port {
+t.Errorf("Port mismatch: bridge.json has %d, expected %d", bridge.Port, port)
+}
+if bridge.Token != token {
+t.Errorf("Token mismatch")
+}
+if bridge.GameId != tt.gameID {
+t.Errorf("GameId %s, expected %s", bridge.GameId, tt.gameID)
+}
+})
+}
 }

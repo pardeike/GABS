@@ -305,7 +305,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		err := s.startGame(*game, backoffMin, backoffMax)
+		err := s.startGame(*game, gamesConfig, backoffMin, backoffMax)
 		if err != nil {
 			return &ToolResult{
 				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to start %s: %v", game.ID, err)}},
@@ -633,7 +633,7 @@ func (s *Server) checkGameStatus(gameID string) string {
 }
 
 // startGame starts a game process using the process controller and sets up GABP bridge
-func (s *Server) startGame(game config.GameConfig, backoffMin, backoffMax time.Duration) error {
+func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -646,7 +646,7 @@ func (s *Server) startGame(game config.GameConfig, backoffMin, backoffMax time.D
 	delete(s.games, game.ID)
 
 	// Create GABP bridge configuration (always local for GABS)
-	port, token, bridgePath, err := config.WriteBridgeJSON(game.ID, s.configDir)
+	port, token, bridgePath, err := config.WriteBridgeJSONWithConfig(game.ID, s.configDir, gamesConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create bridge config: %w", err)
 	}

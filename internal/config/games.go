@@ -31,12 +31,26 @@ type ToolNormalizationConfig struct {
 	PreserveOriginalName bool `json:"preserveOriginalName,omitempty"`
 }
 
+// PortRange represents a min-max port range
+type PortRange struct {
+	Min int `json:"min"`
+	Max int `json:"max"`
+}
+
+// PortRangeConfig configures custom port ranges for game bridge connections
+type PortRangeConfig struct {
+	// CustomRanges allows specifying custom port ranges for bridge connections
+	// If empty, default ranges will be used
+	CustomRanges []PortRange `json:"customRanges,omitempty"`
+}
+
 // GamesConfig represents the main GABS configuration
 type GamesConfig struct {
 	Version            string                   `json:"version"`
 	Games              map[string]GameConfig    `json:"games"`
 	ToolNormalization  *ToolNormalizationConfig `json:"toolNormalization,omitempty"`
 	APIKey             string                   `json:"apiKey,omitempty"` // API key for HTTP server authentication
+	PortRanges         *PortRangeConfig         `json:"portRanges,omitempty"` // Custom port ranges for bridge connections
 }
 
 // LoadGamesConfig loads the games configuration from the standard location
@@ -66,6 +80,7 @@ func LoadGamesConfigFromPath(configPath string) (*GamesConfig, error) {
 				MaxToolNameLength:         64,    // OpenAI limit
 				PreserveOriginalName:      true,  // Always preserve original name
 			},
+			PortRanges: &PortRangeConfig{}, // Empty - will use defaults
 		}, nil
 	}
 
@@ -91,6 +106,11 @@ func LoadGamesConfigFromPath(configPath string) (*GamesConfig, error) {
 		if config.ToolNormalization.MaxToolNameLength == 0 {
 			config.ToolNormalization.MaxToolNameLength = 64
 		}
+	}
+
+	// Initialize port ranges if not present (defaults handled in bridge config)
+	if config.PortRanges == nil {
+		config.PortRanges = &PortRangeConfig{}
 	}
 
 	return &config, nil
