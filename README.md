@@ -149,6 +149,7 @@ GABS: Shows minecraft.inventory.get, minecraft.world.place_block, etc.
 - **[Mod Development Guide](docs/MOD_DEVELOPMENT.md)** - Add GABP support to your game mods
 - **[Advanced Usage Guide](docs/ADVANCED_USAGE.md)** - Multiple instances, HTTP mode, scripting, and more
 - **[Deployment Guide](docs/DEPLOYMENT.md)** - Production deployments and cloud setups
+- **[Windows Troubleshooting](docs/WINDOWS_TROUBLESHOOTING.md)** - Windows-specific issues and port configuration
 - **[OpenAI Tool Normalization](docs/OPENAI_TOOL_NORMALIZATION.md)** - Configure tool name compatibility for OpenAI API
 - **[Dynamic Tools Guide](docs/DYNAMIC_TOOLS_GUIDE.md)** - How AI agents handle expanding tool sets
 - **[AI Dynamic Tools FAQ](docs/AI_DYNAMIC_TOOLS_FAQ.md)** - Common questions about dynamic tool discovery
