@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ type Server struct {
 	tools       map[string]*ToolHandler
 	resources   map[string]*ResourceHandler
 	games       map[string]*process.Controller // Track running games
+	configDir   string                        // Config directory for bridge files
 	mu          sync.RWMutex
 	writers     []util.FrameWriter           // Track client connections for notifications
 	writersMu   sync.RWMutex                // Protect writers slice
@@ -47,6 +49,7 @@ func NewServer(log util.Logger) *Server {
 		tools:         make(map[string]*ToolHandler),
 		resources:     make(map[string]*ResourceHandler),
 		games:         make(map[string]*process.Controller),
+		configDir:     "", // Will be set by SetConfigDir
 		writers:       make([]util.FrameWriter, 0),
 		gameTools:     make(map[string][]string),
 		gameResources: make(map[string][]string),
@@ -103,6 +106,11 @@ func (s *Server) RegisterResource(resource Resource, handler func() ([]Content, 
 		Resource: resource,
 		Handler:  handler,
 	}
+}
+
+// SetConfigDir sets the configuration directory for bridge files
+func (s *Server) SetConfigDir(configDir string) {
+	s.configDir = configDir
 }
 
 // RegisterGameManagementTools registers the game management tools for the new architecture
@@ -629,7 +637,7 @@ func (s *Server) startGame(game config.GameConfig, backoffMin, backoffMax time.D
 	delete(s.games, game.ID)
 
 	// Create GABP bridge configuration (always local for GABS)
-	port, token, bridgePath, err := config.WriteBridgeJSON(game.ID, "")
+	port, token, bridgePath, err := config.WriteBridgeJSON(game.ID, s.configDir)
 	if err != nil {
 		return fmt.Errorf("failed to create bridge config: %w", err)
 	}
@@ -842,7 +850,16 @@ func (s *Server) CleanupGameResources(gameId string) {
 
 // CleanupBridgeConfig removes the bridge configuration file for a game
 func (s *Server) CleanupBridgeConfig(gameId string) {
-	bridgePath := config.GetBridgeConfigPath(gameId)
+	// Use configDir-aware function if available, or fall back to default path
+	var bridgePath string
+	if s.configDir != "" {
+		// Use custom config directory
+		bridgePath = filepath.Join(s.configDir, gameId, "bridge.json")
+	} else {
+		// Use default path
+		bridgePath = config.GetBridgeConfigPath(gameId)
+	}
+	
 	if err := os.Remove(bridgePath); err != nil {
 		// Don't log as error since file might not exist
 		s.log.Debugw("bridge config cleanup", "gameId", gameId, "path", bridgePath, "result", err.Error())

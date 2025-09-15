@@ -110,17 +110,18 @@ func GetBridgeConfigPath(gameID string) string {
 
 // getConfigDir computes per-OS config directory
 func getConfigDir(gameID, override string) (string, error) {
+	var baseDir string
 	if override != "" {
-		return override, nil
+		baseDir = override
+	} else {
+		// Use ~/.gabs/ directory on all platforms as requested in the issue
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("failed to get home directory: %w", err)
+		}
+		baseDir = filepath.Join(homeDir, ".gabs")
 	}
-
-	// Use ~/.gabs/ directory on all platforms as requested in the issue
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
-	}
-
-	baseDir := filepath.Join(homeDir, ".gabs")
+	
 	return filepath.Join(baseDir, gameID), nil
 }
 

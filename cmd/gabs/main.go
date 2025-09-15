@@ -185,6 +185,7 @@ func runServer(ctx context.Context, log util.Logger, opts options) int {
 
 	// Create MCP server with game management tools
 	server := mcp.NewServer(log)
+	server.SetConfigDir(opts.configDir)
 
 	// Register game management tools
 	server.RegisterGameManagementTools(gamesConfig, opts.backoffMin, opts.backoffMax)

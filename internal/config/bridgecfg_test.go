@@ -120,6 +120,52 @@ func TestReadBridgeJSON(t *testing.T) {
 	}
 }
 
+// TestBridgeConfigWithCustomDirectory tests that bridge configs respect custom config directories
+func TestBridgeConfigWithCustomDirectory(t *testing.T) {
+	// Create a temporary custom config directory
+	tmpDir, err := os.MkdirTemp("", "gabs-test-custom-config-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	gameID := "testgame"
+	
+	// Test WriteBridgeJSON with custom config directory
+	port, token, configPath, err := WriteBridgeJSON(gameID, tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to write bridge config: %v", err)
+	}
+
+	// Verify the file was created in the custom directory
+	expectedPath := filepath.Join(tmpDir, gameID, "bridge.json")
+	if configPath != expectedPath {
+		t.Errorf("Expected config path %s, got %s", expectedPath, configPath)
+	}
+
+	// Verify the file exists
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		t.Errorf("Bridge config file was not created at %s", configPath)
+	}
+
+	// Test ReadBridgeJSON with custom config directory
+	host, readPort, readToken, err := ReadBridgeJSON(gameID, tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to read bridge config: %v", err)
+	}
+
+	// Verify the values match
+	if host != "127.0.0.1" {
+		t.Errorf("Expected host 127.0.0.1, got %s", host)
+	}
+	if readPort != port {
+		t.Errorf("Expected port %d, got %d", port, readPort)
+	}
+	if readToken != token {
+		t.Errorf("Expected token %s, got %s", token, readToken)
+	}
+}
+
 func TestBackwardCompatibility(t *testing.T) {
 	tempDir := t.TempDir()
 
@@ -142,7 +188,7 @@ func TestBackwardCompatibility(t *testing.T) {
 	}
 
 	// Read it back and verify values are correct
-	host, port, token, err := ReadBridgeJSON("oldgame", gameDir)
+	host, port, token, err := ReadBridgeJSON("oldgame", tempDir)
 	if err != nil {
 		t.Fatalf("ReadBridgeJSON failed: %v", err)
 	}
