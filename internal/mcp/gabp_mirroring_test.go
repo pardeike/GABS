@@ -292,3 +292,90 @@ func TestGABPConnectionBackoffLogic(t *testing.T) {
 
 	t.Logf("✓ Backoff logic interface test passed")
 }
+
+func TestEstablishGABPConnectionWorkflow(t *testing.T) {
+	// This test verifies the complete workflow that would happen when a game starts
+	// and GABP connection is established (using a mock instead of real connection)
+
+	log := util.NewLogger("debug")
+	server := NewServer(log)
+
+	gameID := "test-game"
+
+	// Mock the establishGABPConnection workflow by calling the individual functions
+	// that would be called if a real GABP server were available
+
+	// Create a mock client to simulate successful GABP connection
+	mockClient := &MockGABPClient{
+		tools: []gabp.ToolDescriptor{
+			{
+				Name:        "player/status",
+				Description: "Get player status",
+				InputSchema: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"playerId": map[string]interface{}{
+							"type": "string",
+							"description": "Player ID",
+						},
+					},
+				},
+			},
+		},
+		caps: gabp.Capabilities{
+			Methods: []string{"tools/list", "tools/call"},
+			Events:  []string{"player/move"},
+		},
+	}
+
+	// Simulate the workflow that establishGABPConnection would perform
+	t.Log("Simulating GABP connection establishment workflow...")
+
+	// Step 1: Connection would be established (simulated)
+	t.Log("Step 1: GABP connection established")
+
+	// Step 2: Sync tools from GABP to MCP
+	err := server.syncGABPToolsWithInterface(mockClient, gameID)
+	if err != nil {
+		t.Fatalf("Failed to sync GABP tools: %v", err)
+	}
+	t.Log("Step 2: GABP tools synchronized to MCP")
+
+	// Step 3: Verify game-specific tools were registered
+	server.mu.RLock()
+	toolExists := false
+	for toolName := range server.tools {
+		if strings.HasPrefix(toolName, gameID+".") {
+			toolExists = true
+			t.Logf("Found game-specific tool: %s", toolName)
+		}
+	}
+	server.mu.RUnlock()
+
+	if !toolExists {
+		t.Fatal("No game-specific tools were registered")
+	}
+
+	// Step 4: Verify notifications would be sent (already tested in syncGABPToolsWithInterface)
+	t.Log("Step 3: Notifications sent to AI agents")
+
+	// Step 5: Test cleanup when game stops
+	server.CleanupGameResources(gameID)
+	t.Log("Step 4: Game resources cleaned up")
+
+	// Verify cleanup worked
+	server.mu.RLock()
+	remainingGameTools := 0
+	for toolName := range server.tools {
+		if strings.HasPrefix(toolName, gameID+".") {
+			remainingGameTools++
+		}
+	}
+	server.mu.RUnlock()
+
+	if remainingGameTools > 0 {
+		t.Errorf("Game-specific tools were not properly cleaned up: %d remaining", remainingGameTools)
+	}
+
+	t.Log("✓ Complete GABP connection workflow test passed")
+}
