@@ -27,6 +27,7 @@ type Server struct {
 	writersMu   sync.RWMutex                // Protect writers slice
 	gameTools   map[string][]string         // Track which tools belong to which games
 	gameResources map[string][]string       // Track which resources belong to which games
+	configDir   string                      // Custom config directory for games and bridge configs
 }
 
 // ToolHandler represents a tool handler function
@@ -106,7 +107,9 @@ func (s *Server) RegisterResource(resource Resource, handler func() ([]Content, 
 }
 
 // RegisterGameManagementTools registers the game management tools for the new architecture
-func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration) {
+func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration, configDir string) {
+	// Store configDir for use in tool handlers
+	s.configDir = configDir
 	normalizationConfig := gamesConfig.GetToolNormalization()
 
 	// games.list tool
@@ -629,7 +632,7 @@ func (s *Server) startGame(game config.GameConfig, backoffMin, backoffMax time.D
 	delete(s.games, game.ID)
 
 	// Create GABP bridge configuration (always local for GABS)
-	port, token, bridgePath, err := config.WriteBridgeJSON(game.ID, "")
+	port, token, bridgePath, err := config.WriteBridgeJSON(game.ID, s.configDir)
 	if err != nil {
 		return fmt.Errorf("failed to create bridge config: %w", err)
 	}

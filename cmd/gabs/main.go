@@ -174,20 +174,28 @@ Once the server is running, use MCP tools to manage games:
 // === Server Command ===
 
 func runServer(ctx context.Context, log util.Logger, opts options) int {
-	// Load games configuration
-	gamesConfig, err := config.LoadGamesConfig()
+	// Load games configuration with optional custom config directory
+	var gamesConfig *config.GamesConfig
+	var err error
+	
+	if opts.configDir != "" {
+		gamesConfig, err = config.LoadGamesConfigFromDir(opts.configDir)
+	} else {
+		gamesConfig, err = config.LoadGamesConfig()
+	}
+	
 	if err != nil {
-		log.Errorw("failed to load games config", "error", err)
+		log.Errorw("failed to load games config", "error", err, "configDir", opts.configDir)
 		return 1
 	}
 
-	log.Infow("loaded games configuration", "gameCount", len(gamesConfig.Games))
+	log.Infow("loaded games configuration", "gameCount", len(gamesConfig.Games), "configDir", opts.configDir)
 
 	// Create MCP server with game management tools
 	server := mcp.NewServer(log)
 
-	// Register game management tools
-	server.RegisterGameManagementTools(gamesConfig, opts.backoffMin, opts.backoffMax)
+	// Register game management tools with configDir support
+	server.RegisterGameManagementTools(gamesConfig, opts.backoffMin, opts.backoffMax, opts.configDir)
 
 	// Start serving MCP according to transport
 	errCh := make(chan error, 1)
@@ -227,35 +235,43 @@ func manageGames(ctx context.Context, log util.Logger, opts options, args []stri
 
 	switch action {
 	case "list":
-		return listGames(log)
+		return listGames(log, opts.configDir)
 	case "add":
 		if len(args) < 2 {
 			fmt.Fprintf(os.Stderr, "games add requires a game ID\n")
 			return 2
 		}
-		return addGame(log, args[1])
+		return addGame(log, args[1], opts.configDir)
 	case "remove":
 		if len(args) < 2 {
 			fmt.Fprintf(os.Stderr, "games remove requires a game ID\n")
 			return 2
 		}
-		return removeGame(log, args[1])
+		return removeGame(log, args[1], opts.configDir)
 	case "show":
 		if len(args) < 2 {
 			fmt.Fprintf(os.Stderr, "games show requires a game ID\n")
 			return 2
 		}
-		return showGame(log, args[1])
+		return showGame(log, args[1], opts.configDir)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown games action: %s\n", action)
 		return 2
 	}
 }
 
-func listGames(log util.Logger) int {
-	gamesConfig, err := config.LoadGamesConfig()
+func listGames(log util.Logger, configDir string) int {
+	var gamesConfig *config.GamesConfig
+	var err error
+	
+	if configDir != "" {
+		gamesConfig, err = config.LoadGamesConfigFromDir(configDir)
+	} else {
+		gamesConfig, err = config.LoadGamesConfig()
+	}
+	
 	if err != nil {
-		log.Errorw("failed to load games config", "error", err)
+		log.Errorw("failed to load games config", "error", err, "configDir", configDir)
 		return 1
 	}
 
@@ -271,10 +287,18 @@ func listGames(log util.Logger) int {
 	return 0
 }
 
-func addGame(log util.Logger, gameID string) int {
-	gamesConfig, err := config.LoadGamesConfig()
+func addGame(log util.Logger, gameID string, configDir string) int {
+	var gamesConfig *config.GamesConfig
+	var err error
+	
+	if configDir != "" {
+		gamesConfig, err = config.LoadGamesConfigFromDir(configDir)
+	} else {
+		gamesConfig, err = config.LoadGamesConfig()
+	}
+	
 	if err != nil {
-		log.Errorw("failed to load games config", "error", err)
+		log.Errorw("failed to load games config", "error", err, "configDir", configDir)
 		return 1
 	}
 
@@ -297,8 +321,8 @@ func addGame(log util.Logger, gameID string) int {
 			return 1
 		}
 		
-		if err := config.SaveGamesConfig(gamesConfig); err != nil {
-			log.Errorw("failed to save games config", "error", err)
+		if err := config.SaveGamesConfigToDir(gamesConfig, configDir); err != nil {
+			log.Errorw("failed to save games config", "error", err, "configDir", configDir)
 			return 1
 		}
 
@@ -371,8 +395,8 @@ func addGame(log util.Logger, gameID string) int {
 		return 1
 	}
 	
-	if err := config.SaveGamesConfig(gamesConfig); err != nil {
-		log.Errorw("failed to save games config", "error", err)
+	if err := config.SaveGamesConfigToDir(gamesConfig, configDir); err != nil {
+		log.Errorw("failed to save games config", "error", err, "configDir", configDir)
 		return 1
 	}
 
@@ -380,10 +404,18 @@ func addGame(log util.Logger, gameID string) int {
 	return 0
 }
 
-func removeGame(log util.Logger, gameID string) int {
-	gamesConfig, err := config.LoadGamesConfig()
+func removeGame(log util.Logger, gameID string, configDir string) int {
+	var gamesConfig *config.GamesConfig
+	var err error
+	
+	if configDir != "" {
+		gamesConfig, err = config.LoadGamesConfigFromDir(configDir)
+	} else {
+		gamesConfig, err = config.LoadGamesConfig()
+	}
+	
 	if err != nil {
-		log.Errorw("failed to load games config", "error", err)
+		log.Errorw("failed to load games config", "error", err, "configDir", configDir)
 		return 1
 	}
 
@@ -392,8 +424,8 @@ func removeGame(log util.Logger, gameID string) int {
 		return 1
 	}
 
-	if err := config.SaveGamesConfig(gamesConfig); err != nil {
-		log.Errorw("failed to save games config", "error", err)
+	if err := config.SaveGamesConfigToDir(gamesConfig, configDir); err != nil {
+		log.Errorw("failed to save games config", "error", err, "configDir", configDir)
 		return 1
 	}
 
@@ -401,10 +433,18 @@ func removeGame(log util.Logger, gameID string) int {
 	return 0
 }
 
-func showGame(log util.Logger, gameID string) int {
-	gamesConfig, err := config.LoadGamesConfig()
+func showGame(log util.Logger, gameID string, configDir string) int {
+	var gamesConfig *config.GamesConfig
+	var err error
+	
+	if configDir != "" {
+		gamesConfig, err = config.LoadGamesConfigFromDir(configDir)
+	} else {
+		gamesConfig, err = config.LoadGamesConfig()
+	}
+	
 	if err != nil {
-		log.Errorw("failed to load games config", "error", err)
+		log.Errorw("failed to load games config", "error", err, "configDir", configDir)
 		return 1
 	}
 

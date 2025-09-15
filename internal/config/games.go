@@ -40,14 +40,24 @@ type GamesConfig struct {
 
 // LoadGamesConfig loads the games configuration from the standard location
 func LoadGamesConfig() (*GamesConfig, error) {
-	return LoadGamesConfigFromPath("")
+	return LoadGamesConfigFromDir("")
+}
+
+// LoadGamesConfigFromDir loads the games configuration from a specific directory
+// If configDir is empty, uses the standard ~/.gabs directory
+func LoadGamesConfigFromDir(configDir string) (*GamesConfig, error) {
+	configPath, err := getGamesConfigPath(configDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get config path: %w", err)
+	}
+	return LoadGamesConfigFromPath(configPath)
 }
 
 // LoadGamesConfigFromPath loads games configuration from a specific path (for testing)
 func LoadGamesConfigFromPath(configPath string) (*GamesConfig, error) {
 	if configPath == "" {
 		var err error
-		configPath, err = getGamesConfigPath()
+		configPath, err = getGamesConfigPath("")
 		if err != nil {
 			return nil, fmt.Errorf("failed to get config path: %w", err)
 		}
@@ -93,16 +103,26 @@ func LoadGamesConfigFromPath(configPath string) (*GamesConfig, error) {
 	return &config, nil
 }
 
-// SaveGamesConfig saves the games configuration to the standard location
+// SaveGamesConfig saves games configuration to the standard location
 func SaveGamesConfig(config *GamesConfig) error {
-	return SaveGamesConfigToPath(config, "")
+	return SaveGamesConfigToDir(config, "")
 }
 
-// SaveGamesConfigToPath saves games configuration to a specific path (for testing)
+// SaveGamesConfigToDir saves games configuration to a specific directory
+// If configDir is empty, uses the standard ~/.gabs directory
+func SaveGamesConfigToDir(config *GamesConfig, configDir string) error {
+	configPath, err := getGamesConfigPath(configDir)
+	if err != nil {
+		return fmt.Errorf("failed to get config path: %w", err)
+	}
+	return SaveGamesConfigToPath(config, configPath)
+}
+
+// SaveGamesConfigToPath saves games configuration to a specific file path
 func SaveGamesConfigToPath(config *GamesConfig, configPath string) error {
 	if configPath == "" {
 		var err error
-		configPath, err = getGamesConfigPath()
+		configPath, err = getGamesConfigPath("")
 		if err != nil {
 			return fmt.Errorf("failed to get config path: %w", err)
 		}
@@ -229,13 +249,21 @@ func (c *GamesConfig) GetToolNormalization() *ToolNormalizationConfig {
 }
 
 // getGamesConfigPath returns the path to the main GABS config file
-func getGamesConfigPath() (string, error) {
-	// Use ~/.gabs/ directory on all platforms as requested in the issue
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
+// If configDir is provided, uses that as the base directory instead of ~/.gabs
+func getGamesConfigPath(configDir string) (string, error) {
+	var baseDir string
+	
+	if configDir != "" {
+		// Use custom config directory
+		baseDir = configDir
+	} else {
+		// Use standard ~/.gabs/ directory on all platforms
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("failed to get home directory: %w", err)
+		}
+		baseDir = filepath.Join(homeDir, ".gabs")
 	}
-
-	baseDir := filepath.Join(homeDir, ".gabs")
+	
 	return filepath.Join(baseDir, "config.json"), nil
 }
