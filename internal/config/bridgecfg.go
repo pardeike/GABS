@@ -33,15 +33,15 @@ func WriteBridgeJSON(gameID, configDir string) (int, string, string, error) {
 		return 0, "", "", fmt.Errorf("failed to generate token: %w", err)
 	}
 
-	// Determine config directory
-	cfgDir, err := getConfigDir(gameID, configDir)
+	// Use centralized config paths
+	cp, err := NewConfigPaths(configDir)
 	if err != nil {
-		return 0, "", "", fmt.Errorf("failed to get config dir: %w", err)
+		return 0, "", "", fmt.Errorf("failed to create config paths: %w", err)
 	}
 
-	// Create directory if it doesn't exist
-	if err := os.MkdirAll(cfgDir, 0755); err != nil {
-		return 0, "", "", fmt.Errorf("failed to create config dir: %w", err)
+	// Ensure the game directory exists
+	if err := cp.EnsureGameDir(gameID); err != nil {
+		return 0, "", "", fmt.Errorf("failed to create game config dir: %w", err)
 	}
 
 	// Create bridge config
@@ -51,8 +51,8 @@ func WriteBridgeJSON(gameID, configDir string) (int, string, string, error) {
 		GameId: gameID,
 	}
 
-	// Use standard bridge.json filename (one per game)
-	cfgPath := filepath.Join(cfgDir, "bridge.json")
+	// Get bridge config path and use atomic write
+	cfgPath := cp.GetBridgeConfigPath(gameID)
 	tempPath := cfgPath + ".tmp"
 
 	data, err := json.MarshalIndent(bridge, "", "  ")
@@ -76,12 +76,12 @@ func WriteBridgeJSON(gameID, configDir string) (int, string, string, error) {
 // ReadBridgeJSON reads existing bridge.json and returns connection info
 // Returns (host, port, token, error) - host is always 127.0.0.1 for GABS
 func ReadBridgeJSON(gameID, configDir string) (string, int, string, error) {
-	cfgDir, err := getConfigDir(gameID, configDir)
+	cp, err := NewConfigPaths(configDir)
 	if err != nil {
-		return "", 0, "", fmt.Errorf("failed to get config dir: %w", err)
+		return "", 0, "", fmt.Errorf("failed to create config paths: %w", err)
 	}
 
-	cfgPath := filepath.Join(cfgDir, "bridge.json")
+	cfgPath := cp.GetBridgeConfigPath(gameID)
 	data, err := os.ReadFile(cfgPath)
 	if err != nil {
 		return "", 0, "", fmt.Errorf("failed to read bridge.json: %w", err)
@@ -100,29 +100,15 @@ func ReadBridgeJSON(gameID, configDir string) (string, int, string, error) {
 
 // GetBridgeConfigPath returns the path to the bridge.json file for a given game
 func GetBridgeConfigPath(gameID string) string {
-	cfgDir, err := getConfigDir(gameID, "")
+	cp, err := NewConfigPaths("")
 	if err != nil {
 		// Fallback - should not happen in normal operation
 		return filepath.Join(os.TempDir(), gameID, "bridge.json")
 	}
-	return filepath.Join(cfgDir, "bridge.json")
+	return cp.GetBridgeConfigPath(gameID)
 }
 
-// getConfigDir computes per-OS config directory
-func getConfigDir(gameID, override string) (string, error) {
-	if override != "" {
-		return override, nil
-	}
 
-	// Use ~/.gabs/ directory on all platforms as requested in the issue
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
-	}
-
-	baseDir := filepath.Join(homeDir, ".gabs")
-	return filepath.Join(baseDir, gameID), nil
-}
 
 // generateToken creates a random 64-character hex token
 func generateToken() (string, error) {
