@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -850,15 +849,13 @@ func (s *Server) CleanupGameResources(gameId string) {
 
 // CleanupBridgeConfig removes the bridge configuration file for a game
 func (s *Server) CleanupBridgeConfig(gameId string) {
-	// Use configDir-aware function if available, or fall back to default path
-	var bridgePath string
-	if s.configDir != "" {
-		// Use custom config directory
-		bridgePath = filepath.Join(s.configDir, gameId, "bridge.json")
-	} else {
-		// Use default path
-		bridgePath = config.GetBridgeConfigPath(gameId)
+	cp, err := config.NewConfigPaths(s.configDir)
+	if err != nil {
+		s.log.Warnw("failed to create config paths for cleanup", "gameId", gameId, "error", err)
+		return
 	}
+	
+	bridgePath := cp.GetBridgeConfigPath(gameId)
 	
 	if err := os.Remove(bridgePath); err != nil {
 		// Don't log as error since file might not exist

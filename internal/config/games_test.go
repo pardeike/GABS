@@ -163,10 +163,12 @@ func TestGamesConfig(t *testing.T) {
 
 func TestNewGabsDirectoryStructure(t *testing.T) {
 	t.Run("ConfigPathUsesHomeGabsDirectory", func(t *testing.T) {
-		configPath, err := getGamesConfigPath("")
+		cp, err := NewConfigPaths("")
 		if err != nil {
-			t.Fatalf("Failed to get config path: %v", err)
+			t.Fatalf("Failed to create config paths: %v", err)
 		}
+		
+		configPath := cp.GetMainConfigPath()
 
 		// Verify the path ends with .gabs/config.json
 		if !strings.Contains(configPath, ".gabs") {
@@ -191,10 +193,12 @@ func TestNewGabsDirectoryStructure(t *testing.T) {
 
 	t.Run("ConfigPathUsesCustomDirectory", func(t *testing.T) {
 		customDir := "/tmp/test-gabs-config"
-		configPath, err := getGamesConfigPath(customDir)
+		cp, err := NewConfigPaths(customDir)
 		if err != nil {
-			t.Fatalf("Failed to get config path with custom dir: %v", err)
+			t.Fatalf("Failed to create config paths with custom dir: %v", err)
 		}
+		
+		configPath := cp.GetMainConfigPath()
 
 		expectedPath := filepath.Join(customDir, "config.json")
 		if configPath != expectedPath {
@@ -255,10 +259,12 @@ func TestNewGabsDirectoryStructure(t *testing.T) {
 
 	t.Run("BridgeConfigUsesGabsDirectory", func(t *testing.T) {
 		gameID := "test-game"
-		configDir, err := getConfigDir(gameID, "")
+		cp, err := NewConfigPaths("")
 		if err != nil {
-			t.Fatalf("Failed to get config directory: %v", err)
+			t.Fatalf("Failed to create config paths: %v", err)
 		}
+		
+		configDir := cp.GetGameDir(gameID)
 
 		// Verify the path contains .gabs
 		if !strings.Contains(configDir, ".gabs") {

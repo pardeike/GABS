@@ -46,11 +46,11 @@ func LoadGamesConfig() (*GamesConfig, error) {
 // LoadGamesConfigFromDir loads games configuration from the specified config directory
 // If configDir is empty, uses the default location
 func LoadGamesConfigFromDir(configDir string) (*GamesConfig, error) {
-	configPath, err := getGamesConfigPath(configDir)
+	cp, err := NewConfigPaths(configDir)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get config path: %w", err)
+		return nil, fmt.Errorf("failed to create config paths: %w", err)
 	}
-	return LoadGamesConfigFromPath(configPath)
+	return LoadGamesConfigFromPath(cp.GetMainConfigPath())
 }
 
 // LoadGamesConfigFromPath loads games configuration from a specific path (for testing)
@@ -103,11 +103,11 @@ func SaveGamesConfig(config *GamesConfig) error {
 // SaveGamesConfigToDir saves games configuration to the specified config directory
 // If configDir is empty, uses the default location  
 func SaveGamesConfigToDir(config *GamesConfig, configDir string) error {
-	configPath, err := getGamesConfigPath(configDir)
+	cp, err := NewConfigPaths(configDir)
 	if err != nil {
-		return fmt.Errorf("failed to get config path: %w", err)
-	}	
-	return SaveGamesConfigToPath(config, configPath)
+		return fmt.Errorf("failed to create config paths: %w", err)
+	}
+	return SaveGamesConfigToPath(config, cp.GetMainConfigPath())
 }
 
 // SaveGamesConfigToPath saves games configuration to a specific path (for testing)
@@ -232,20 +232,4 @@ func (c *GamesConfig) GetToolNormalization() *ToolNormalizationConfig {
 	return c.ToolNormalization
 }
 
-// getGamesConfigPath returns the path to the main GABS config file
-// If configDir is provided, uses that directory; otherwise uses default ~/.gabs/
-func getGamesConfigPath(configDir string) (string, error) {
-	var baseDir string
-	if configDir != "" {
-		baseDir = configDir
-	} else {
-		// Use ~/.gabs/ directory on all platforms as default
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("failed to get home directory: %w", err)
-		}
-		baseDir = filepath.Join(homeDir, ".gabs")
-	}
-	
-	return filepath.Join(baseDir, "config.json"), nil
-}
+
