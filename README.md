@@ -33,7 +33,7 @@ AI Agent ← MCP → GABS ← GABP → Game Mod ← Game API → Game
 
 **Important:** In the GABP layer, **your game mod acts as the server** (listening on a port) while **GABS acts as the client** (connecting to your mod). This design ensures:
 - GABS manages port allocation for multiple games
-- All communication stays local (127.0.0.1) 
+- All communication stays local (127.0.0.1)
 - Games can start independently and GABS connects when ready
 
 **Key Features:**
@@ -49,7 +49,7 @@ AI Agent ← MCP → GABS ← GABP → Game Mod ← Game API → Game
 
 Get the latest version for your system:
 - **Windows**: [`gabs-windows-amd64.exe`](../../releases/latest)
-- **macOS**: [`gabs-darwin-arm64`](../../releases/latest) 
+- **macOS**: [`gabs-darwin-arm64`](../../releases/latest)
 - **Linux**: [`gabs-linux-amd64`](../../releases/latest)
 
 ### 2. Add Your Games
@@ -117,7 +117,7 @@ Once connected, your AI can use these tools:
 ### Core Game Management Tools
 - **`games.list`** - Show all configured games and their status
 - **`games.start`** - Start a game: `{"gameId": "minecraft"}`
-- **`games.stop`** - Stop a game gracefully: `{"gameId": "minecraft"}`  
+- **`games.stop`** - Stop a game gracefully: `{"gameId": "minecraft"}`
 - **`games.kill`** - Force stop a game: `{"gameId": "minecraft"}`
 - **`games.status`** - Check game status: `{"gameId": "minecraft"}`
 - **`games.tools`** - List game-specific tools from connected mods
@@ -128,7 +128,7 @@ Once connected, your AI can use these tools:
 
 When your games have GABP mods installed, they add game-specific tools like:
 - **`minecraft.inventory.get`** - Get player inventory in Minecraft
-- **`minecraft.world.place_block`** - Place blocks in Minecraft world  
+- **`minecraft.world.place_block`** - Place blocks in Minecraft world
 - **`rimworld.inventory.get`** - Get colonist inventory in RimWorld
 - **`rimworld.crafting.build`** - Build items in RimWorld
 
@@ -145,11 +145,10 @@ GABS: Shows minecraft.inventory.get, minecraft.world.place_block, etc.
 ## Documentation
 
 - **[Configuration Guide](docs/CONFIGURATION.md)** - Detailed setup for different game types and tool normalization
-- **[AI Integration Guide](docs/INTEGRATION.md)** - Connect GABS to different AI tools and deployment scenarios  
+- **[AI Integration Guide](docs/INTEGRATION.md)** - Connect GABS to different AI tools and deployment scenarios
 - **[Mod Development Guide](docs/MOD_DEVELOPMENT.md)** - Add GABP support to your game mods
 - **[Advanced Usage Guide](docs/ADVANCED_USAGE.md)** - Multiple instances, HTTP mode, scripting, and more
 - **[Deployment Guide](docs/DEPLOYMENT.md)** - Production deployments and cloud setups
-- **[Windows Troubleshooting](docs/WINDOWS_TROUBLESHOOTING.md)** - Windows-specific issues and port configuration
 - **[OpenAI Tool Normalization](docs/OPENAI_TOOL_NORMALIZATION.md)** - Configure tool name compatibility for OpenAI API
 - **[Dynamic Tools Guide](docs/DYNAMIC_TOOLS_GUIDE.md)** - How AI agents handle expanding tool sets
 - **[AI Dynamic Tools FAQ](docs/AI_DYNAMIC_TOOLS_FAQ.md)** - Common questions about dynamic tool discovery
