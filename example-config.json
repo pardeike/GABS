@@ -6,6 +6,18 @@
     "maxToolNameLength": 64,
     "preserveOriginalName": true
   },
+  "portRanges": {
+    "customRanges": [
+      {
+        "min": 8000,
+        "max": 8999
+      },
+      {
+        "min": 9000,
+        "max": 9999
+      }
+    ]
+  },
   "games": {
     "minecraft": {
       "id": "minecraft",
