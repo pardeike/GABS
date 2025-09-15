@@ -97,6 +97,19 @@ func (s *Server) handleMCPHTTPRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check API key authentication if configured
+	if s.apiKey != "" {
+		authHeader := r.Header.Get("Authorization")
+		expectedAuth := "Bearer " + s.apiKey
+		if authHeader != expectedAuth {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprintf(w, `{"error":"Invalid or missing API key. Include 'Authorization: Bearer <your-api-key>' header."}`)
+			s.log.Warnw("unauthorized HTTP request", "clientIP", r.RemoteAddr, "authHeader", authHeader != "")
+			return
+		}
+	}
+
 	// Limit request body size to prevent memory exhaustion
 	const maxBodySize = 1 << 20 // 1MB
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)

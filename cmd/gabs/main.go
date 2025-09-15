@@ -33,7 +33,8 @@ type options struct {
 	subcmd string
 
 	// Server transport
-	httpAddr string // if empty → stdio
+	transport string // "stdio" or "http"
+	httpAddr  string // address for HTTP mode
 
 	// Config + runtime
 	configDir  string
@@ -60,19 +61,60 @@ func main() {
 		return
 	}
 
+	var remainingArgs []string
+	var transport string
+	var httpAddr string
+
+	// Handle server subcommands
+	if subcmd == "server" {
+		if len(os.Args) >= 3 {
+			serverMode := os.Args[2]
+			if serverMode == "http" || serverMode == "stdio" {
+				transport = serverMode
+				remainingArgs = os.Args[3:] // Skip "server" and transport mode
+			} else {
+				// Treat as flag-based syntax
+				transport = "" // Will be determined by flags
+				remainingArgs = os.Args[2:] // Skip only "server"
+			}
+		} else {
+			// Default to stdio when no transport specified
+			transport = "stdio"
+			remainingArgs = os.Args[2:]
+		}
+	} else {
+		remainingArgs = os.Args[2:]
+	}
+
 	fs := flag.NewFlagSet(subcmd, flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 
 	var (
-		httpAddr  = fs.String("http", "", "Run MCP as HTTP on addr (default stdio if empty)")
-		configDir = fs.String("configDir", "", "Override GABS config directory")
-		logLevel  = fs.String("log-level", "info", "Log level: trace|debug|info|warn|error")
-		backoff   = fs.String("reconnectBackoff", defaultBackoff, "Reconnect backoff window, e.g. '100ms..5s'")
-		grace     = fs.Duration("grace", 3*time.Second, "Graceful stop timeout before kill")
+		httpAddrFlag = fs.String("http", "", "Run MCP as HTTP on addr")
+		httpAddrNew  = fs.String("addr", "localhost:8080", "HTTP server address (for 'gabs server http' command)")
+		configDir    = fs.String("configDir", "", "Override GABS config directory")
+		logLevel     = fs.String("log-level", "info", "Log level: trace|debug|info|warn|error")
+		backoff      = fs.String("reconnectBackoff", defaultBackoff, "Reconnect backoff window, e.g. '100ms..5s'")
+		grace        = fs.Duration("grace", 3*time.Second, "Graceful stop timeout before kill")
 	)
 
-	if err := fs.Parse(os.Args[2:]); err != nil {
+	if err := fs.Parse(remainingArgs); err != nil {
 		os.Exit(2)
+	}
+
+	// Determine final transport and httpAddr
+	if subcmd == "server" {
+		if transport == "" {
+			// Use --http flag
+			if *httpAddrFlag != "" {
+				transport = "http"
+				httpAddr = *httpAddrFlag
+			} else {
+				transport = "stdio"
+			}
+		} else if transport == "http" {
+			httpAddr = *httpAddrNew
+		}
 	}
 
 	min, max, err := parseBackoff(*backoff)
@@ -83,7 +125,8 @@ func main() {
 
 	opts := options{
 		subcmd:     subcmd,
-		httpAddr:   *httpAddr,
+		transport:  transport,
+		httpAddr:   httpAddr,
 		configDir:  *configDir,
 		logLevel:   *logLevel,
 		backoffStr: *backoff,
@@ -132,12 +175,15 @@ Usage:
   gabs <subcommand> [flags]
 
 Subcommands:
-  server     Start the GABS MCP server
-  games      Manage game configurations
-  version    Print version information
+  server stdio     Start the GABS MCP server on stdio (default)
+  server http      Start the GABS MCP server on HTTP
+  server           Start the GABS MCP server (stdio)
+  games            Manage game configurations
+  version          Print version information
 
 Server flags:
-  --http <addr>                 Run MCP as HTTP on address; if empty, use stdio
+  --addr <addr>                 HTTP server address (default: localhost:8080)
+  --http <addr>                 Run MCP as HTTP on address
   --configDir <dir>             Override GABS config directory  
   --reconnectBackoff <min..max> Reconnect backoff window (default %s)
   --log-level <lvl>             trace|debug|info|warn|error
@@ -152,8 +198,13 @@ Game management:
 Examples:
   # Start GABS MCP server (stdio)
   gabs server
+  gabs server stdio
   
   # Start GABS MCP server (HTTP)  
+  gabs server http
+  gabs server http --addr localhost:8080
+  
+  # Legacy flag syntax
   gabs server --http localhost:8080
   
   # Add a new game configuration
@@ -161,6 +212,10 @@ Examples:
   
   # List configured games (shows only game IDs)
   gabs games list
+
+API Key Configuration:
+  Add "apiKey": "your-secret-key" to your GABS config file to enable
+  HTTP authentication. Clients must include: Authorization: Bearer your-secret-key
 
 Once the server is running, use MCP tools to manage games:
   games.list        List configured game IDs (simplified for AI)
@@ -187,13 +242,19 @@ func runServer(ctx context.Context, log util.Logger, opts options) int {
 	server := mcp.NewServer(log)
 	server.SetConfigDir(opts.configDir)
 
+	// Set API key for HTTP authentication if configured
+	if gamesConfig.APIKey != "" {
+		server.SetAPIKey(gamesConfig.APIKey)
+		log.Infow("API key authentication enabled for HTTP server")
+	}
+
 	// Register game management tools
 	server.RegisterGameManagementTools(gamesConfig, opts.backoffMin, opts.backoffMax)
 
 	// Start serving MCP according to transport
 	errCh := make(chan error, 1)
 	go func() {
-		if opts.httpAddr == "" {
+		if opts.transport == "stdio" || (opts.transport == "" && opts.httpAddr == "") {
 			log.Infow("starting MCP server", "transport", "stdio")
 			errCh <- server.ServeStdio(ctx)
 		} else {

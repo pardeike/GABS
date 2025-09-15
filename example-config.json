@@ -1,5 +1,6 @@
 {
   "version": "1.0",
+  "apiKey": "your-secret-api-key-here",
   "toolNormalization": {
     "enableOpenAINormalization": true,
     "maxToolNameLength": 64,

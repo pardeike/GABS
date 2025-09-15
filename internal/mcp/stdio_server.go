@@ -24,6 +24,7 @@ type Server struct {
 	resources   map[string]*ResourceHandler
 	games       map[string]*process.Controller // Track running games
 	configDir   string                        // Config directory for bridge files
+	apiKey      string                        // API key for HTTP authentication
 	mu          sync.RWMutex
 	writers     []util.FrameWriter           // Track client connections for notifications
 	writersMu   sync.RWMutex                // Protect writers slice
@@ -113,6 +114,11 @@ func (s *Server) RegisterResource(resource Resource, handler func() ([]Content, 
 // SetConfigDir sets the configuration directory for bridge files
 func (s *Server) SetConfigDir(configDir string) {
 	s.configDir = configDir
+}
+
+// SetAPIKey sets the API key for HTTP authentication
+func (s *Server) SetAPIKey(apiKey string) {
+	s.apiKey = apiKey
 }
 
 // RegisterGameManagementTools registers the game management tools for the new architecture
