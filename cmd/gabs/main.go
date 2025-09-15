@@ -73,7 +73,7 @@ func main() {
 				transport = serverMode
 				remainingArgs = os.Args[3:] // Skip "server" and transport mode
 			} else {
-				// Backwards compatibility: treat as old flag-based syntax
+				// Treat as flag-based syntax
 				transport = "" // Will be determined by flags
 				remainingArgs = os.Args[2:] // Skip only "server"
 			}
@@ -90,7 +90,7 @@ func main() {
 	fs.SetOutput(os.Stderr)
 
 	var (
-		httpAddrFlag = fs.String("http", "", "Run MCP as HTTP on addr (backward compatibility - use 'gabs server http --addr' instead)")
+		httpAddrFlag = fs.String("http", "", "Run MCP as HTTP on addr")
 		httpAddrNew  = fs.String("addr", "localhost:8080", "HTTP server address (for 'gabs server http' command)")
 		configDir    = fs.String("configDir", "", "Override GABS config directory")
 		logLevel     = fs.String("log-level", "info", "Log level: trace|debug|info|warn|error")
@@ -105,7 +105,7 @@ func main() {
 	// Determine final transport and httpAddr
 	if subcmd == "server" {
 		if transport == "" {
-			// Backwards compatibility: use --http flag
+			// Use --http flag
 			if *httpAddrFlag != "" {
 				transport = "http"
 				httpAddr = *httpAddrFlag
@@ -177,13 +177,13 @@ Usage:
 Subcommands:
   server stdio     Start the GABS MCP server on stdio (default)
   server http      Start the GABS MCP server on HTTP
-  server           Start the GABS MCP server (stdio, backward compatible)
+  server           Start the GABS MCP server (stdio)
   games            Manage game configurations
   version          Print version information
 
 Server flags:
   --addr <addr>                 HTTP server address (default: localhost:8080)
-  --http <addr>                 Run MCP as HTTP on address (backward compatibility)
+  --http <addr>                 Run MCP as HTTP on address
   --configDir <dir>             Override GABS config directory  
   --reconnectBackoff <min..max> Reconnect backoff window (default %s)
   --log-level <lvl>             trace|debug|info|warn|error
@@ -204,7 +204,7 @@ Examples:
   gabs server http
   gabs server http --addr localhost:8080
   
-  # Backward compatibility (deprecated)
+  # Legacy flag syntax
   gabs server --http localhost:8080
   
   # Add a new game configuration

@@ -62,7 +62,7 @@ func LoadGamesConfigFromPath(configPath string) (*GamesConfig, error) {
 			Version: "1.0",
 			Games:   make(map[string]GameConfig),
 			ToolNormalization: &ToolNormalizationConfig{
-				EnableOpenAINormalization: false, // Off by default for backward compatibility
+				EnableOpenAINormalization: false, // Off by default
 				MaxToolNameLength:         64,    // OpenAI limit
 				PreserveOriginalName:      true,  // Always preserve original name
 			},
@@ -82,7 +82,7 @@ func LoadGamesConfigFromPath(configPath string) (*GamesConfig, error) {
 	// Ensure tool normalization defaults are set if not present in config
 	if config.ToolNormalization == nil {
 		config.ToolNormalization = &ToolNormalizationConfig{
-			EnableOpenAINormalization: false, // Off by default for backward compatibility
+			EnableOpenAINormalization: false, // Off by default
 			MaxToolNameLength:         64,    // OpenAI limit
 			PreserveOriginalName:      true,  // Always preserve original name
 		}
