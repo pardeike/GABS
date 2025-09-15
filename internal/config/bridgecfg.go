@@ -8,6 +8,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -21,8 +23,8 @@ type BridgeJSON struct {
 // Returns (port, token, configPath, error)
 // Each game gets its own directory, ensuring concurrent launches of different games are properly isolated.
 func WriteBridgeJSON(gameID, configDir string) (int, string, string, error) {
-	// Generate available port with conflict detection
-	port, err := findAvailablePort(49152, 65535)
+	// Generate available port with conflict detection using fallback ranges
+	port, err := findAvailablePortWithFallback()
 	if err != nil {
 		return 0, "", "", fmt.Errorf("failed to find available port: %w", err)
 	}
@@ -118,6 +120,82 @@ func generateToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(bytes), nil
+}
+
+// findAvailablePortWithFallback tries multiple port ranges to find an available port
+// This improves compatibility with Windows 11 where the default ephemeral range (49152-65535)
+// might be restricted by Hyper-V, WSL, or other system components
+func findAvailablePortWithFallback() (int, error) {
+	// Check for custom port ranges from environment variables
+	if customRanges := getCustomPortRanges(); len(customRanges) > 0 {
+		for _, portRange := range customRanges {
+			minPort, maxPort := portRange[0], portRange[1]
+			port, err := findAvailablePort(minPort, maxPort)
+			if err == nil {
+				return port, nil
+			}
+		}
+	}
+
+	// Define default port ranges to try in order of preference
+	// Ranges are chosen to avoid common conflicts and work across different systems
+	portRanges := [][]int{
+		{49152, 65535}, // Default Windows/IANA ephemeral range
+		{32768, 49151}, // Linux ephemeral range 
+		{8000, 8999},   // Common HTTP alternate ports (8000-8999)
+		{9000, 9999},   // Common application ports (9000-9999)
+		{10000, 19999}, // Registered/dynamic range subset
+		{20000, 29999}, // Registered/dynamic range subset
+		{30000, 32767}, // Registered/dynamic range subset
+	}
+
+	var lastErr error
+	for _, portRange := range portRanges {
+		minPort, maxPort := portRange[0], portRange[1]
+		port, err := findAvailablePort(minPort, maxPort)
+		if err == nil {
+			return port, nil
+		}
+		lastErr = err
+	}
+
+	// If all ranges failed, provide a helpful error message
+	return 0, fmt.Errorf("no available ports found in any range - this may be due to Windows system restrictions (Hyper-V, WSL, etc.) or firewall settings. Consider: 1) Checking Windows reserved port ranges with 'netsh int ipv4 show excludedportrange protocol=tcp', 2) Disabling Hyper-V if not needed, 3) Configuring your firewall/antivirus, 4) Setting GABS_PORT_RANGES environment variable (e.g. 'GABS_PORT_RANGES=8000-8999,9000-9999'). Last error: %w", lastErr)
+}
+
+// getCustomPortRanges parses custom port ranges from GABS_PORT_RANGES environment variable
+// Format: "min1-max1,min2-max2" (e.g., "8000-8999,9000-9999")
+func getCustomPortRanges() [][]int {
+	rangesStr := os.Getenv("GABS_PORT_RANGES")
+	if rangesStr == "" {
+		return nil
+	}
+
+	var ranges [][]int
+	rangeParts := strings.Split(rangesStr, ",")
+	
+	for _, rangePart := range rangeParts {
+		rangePart = strings.TrimSpace(rangePart)
+		if rangePart == "" {
+			continue
+		}
+
+		parts := strings.Split(rangePart, "-")
+		if len(parts) != 2 {
+			continue // Skip invalid format
+		}
+
+		min, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+		max, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+		
+		if err1 != nil || err2 != nil || min <= 0 || max <= 0 || min > max || max > 65535 {
+			continue // Skip invalid range
+		}
+
+		ranges = append(ranges, []int{min, max})
+	}
+
+	return ranges
 }
 
 // findAvailablePort finds an available port in the given range

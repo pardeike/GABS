@@ -44,9 +44,9 @@ func TestWriteBridgeJSON(t *testing.T) {
 				t.Fatalf("WriteBridgeJSON failed: %v", err)
 			}
 
-			// Verify return values
-			if port < 49152 || port > 65535 {
-				t.Errorf("Port %d out of expected range [49152, 65535]", port)
+			// Verify return values - now using fallback ranges, so broader validation
+			if port <= 0 || port > 65535 {
+				t.Errorf("Port %d out of valid range [1, 65535]", port)
 			}
 			if len(token) != 64 {
 				t.Errorf("Token length %d, expected 64", len(token))
@@ -201,5 +201,127 @@ func TestBackwardCompatibility(t *testing.T) {
 	}
 	if token != oldBridge.Token {
 		t.Errorf("Token mismatch")
+	}
+}
+
+// TestPortFallbackFunctionality tests the new port allocation with fallback ranges
+func TestPortFallbackFunctionality(t *testing.T) {
+	tests := []struct {
+		name        string
+		customRange string
+		expectError bool
+	}{
+		{
+			name:        "default fallback ranges",
+			customRange: "",
+			expectError: false,
+		},
+		{
+			name:        "custom port range",
+			customRange: "8000-8999",
+			expectError: false,
+		},
+		{
+			name:        "multiple custom ranges",
+			customRange: "8000-8099,9000-9099",
+			expectError: false,
+		},
+		{
+			name:        "invalid range format",
+			customRange: "invalid",
+			expectError: false, // Should fallback to default ranges
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Set custom port range if specified
+			if tt.customRange != "" {
+				oldValue := os.Getenv("GABS_PORT_RANGES")
+				os.Setenv("GABS_PORT_RANGES", tt.customRange)
+				defer os.Setenv("GABS_PORT_RANGES", oldValue)
+			}
+
+			port, err := findAvailablePortWithFallback()
+			
+			if tt.expectError && err == nil {
+				t.Error("Expected error but got none")
+			}
+			if !tt.expectError && err != nil {
+				t.Errorf("Unexpected error: %v", err)
+			}
+			if err == nil {
+				if port <= 0 || port > 65535 {
+					t.Errorf("Port %d out of valid range [1, 65535]", port)
+				}
+			}
+		})
+	}
+}
+
+// TestGetCustomPortRanges tests the environment variable parsing
+func TestGetCustomPortRanges(t *testing.T) {
+	tests := []struct {
+		name        string
+		envValue    string
+		expectedLen int
+		firstRange  []int
+	}{
+		{
+			name:        "empty env var",
+			envValue:    "",
+			expectedLen: 0,
+		},
+		{
+			name:        "single range",
+			envValue:    "8000-8999",
+			expectedLen: 1,
+			firstRange:  []int{8000, 8999},
+		},
+		{
+			name:        "multiple ranges",
+			envValue:    "8000-8999,9000-9999",
+			expectedLen: 2,
+			firstRange:  []int{8000, 8999},
+		},
+		{
+			name:        "ranges with spaces",
+			envValue:    " 8000 - 8999 , 9000 - 9999 ",
+			expectedLen: 2,
+			firstRange:  []int{8000, 8999},
+		},
+		{
+			name:        "invalid format mixed with valid",
+			envValue:    "invalid,8000-8999,bad-range",
+			expectedLen: 1,
+			firstRange:  []int{8000, 8999},
+		},
+		{
+			name:        "invalid range values",
+			envValue:    "0-100,70000-80000,8000-8999", // 0 and >65535 invalid
+			expectedLen: 1,
+			firstRange:  []int{8000, 8999},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Set environment variable
+			oldValue := os.Getenv("GABS_PORT_RANGES")
+			os.Setenv("GABS_PORT_RANGES", tt.envValue)
+			defer os.Setenv("GABS_PORT_RANGES", oldValue)
+
+			ranges := getCustomPortRanges()
+			
+			if len(ranges) != tt.expectedLen {
+				t.Errorf("Expected %d ranges, got %d", tt.expectedLen, len(ranges))
+			}
+			
+			if tt.expectedLen > 0 && len(ranges) > 0 {
+				if ranges[0][0] != tt.firstRange[0] || ranges[0][1] != tt.firstRange[1] {
+					t.Errorf("Expected first range %v, got %v", tt.firstRange, ranges[0])
+				}
+			}
+		})
 	}
 }
