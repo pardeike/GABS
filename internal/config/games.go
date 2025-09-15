@@ -36,6 +36,7 @@ type GamesConfig struct {
 	Version            string                   `json:"version"`
 	Games              map[string]GameConfig    `json:"games"`
 	ToolNormalization  *ToolNormalizationConfig `json:"toolNormalization,omitempty"`
+	APIKey             string                   `json:"apiKey,omitempty"` // API key for HTTP server authentication
 }
 
 // LoadGamesConfig loads the games configuration from the standard location
