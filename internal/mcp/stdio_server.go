@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/pardeike/gabs/internal/config"
+	"github.com/pardeike/gabs/internal/gabp"
 	"github.com/pardeike/gabs/internal/process"
 	"github.com/pardeike/gabs/internal/util"
 	"github.com/pardeike/gabs/internal/version"
@@ -27,6 +28,7 @@ type Server struct {
 	writersMu   sync.RWMutex                // Protect writers slice
 	gameTools   map[string][]string         // Track which tools belong to which games
 	gameResources map[string][]string       // Track which resources belong to which games
+	gabpClients map[string]*gabp.Client     // Track GABP connections per game
 }
 
 // ToolHandler represents a tool handler function
@@ -50,6 +52,7 @@ func NewServer(log util.Logger) *Server {
 		writers:       make([]util.FrameWriter, 0),
 		gameTools:     make(map[string][]string),
 		gameResources: make(map[string][]string),
+		gabpClients:   make(map[string]*gabp.Client),
 	}
 }
 
@@ -605,9 +608,10 @@ func (s *Server) checkGameStatus(gameID string) string {
 	delete(s.games, gameID)
 	// Cleanup GABP connections and mirrored tools for this game
 	// This involves:
-	// 1. Disconnecting any active GABP client for this game (handled by process termination)
+	// 1. Disconnecting any active GABP client for this game
 	// 2. Unregistering all game-specific tools (gameId.* tools)
 	// 3. Cleaning up bridge configuration files
+	s.CleanupGABPConnection(gameID)
 	s.CleanupGameResources(gameID)
 	s.CleanupBridgeConfig(gameID)
 	s.log.Debugw("cleaned up dead game process and resources", "gameId", gameID)
@@ -665,13 +669,198 @@ func (s *Server) startGame(game config.GameConfig, backoffMin, backoffMax time.D
 
 	s.log.Infow("game started with GABP bridge", "gameId", game.ID, "mode", game.LaunchMode, "pid", controller.GetPID(), "gabpPort", port)
 
-	// Future Enhancement: When GABP mirroring is implemented, the workflow would be:
-	// 1. Game starts with bridge config
-	// 2. GABP client connects to game mod's server
-	// 3. Mirror system syncs tools and sends tools/list_changed notification
-	// 4. AI agents automatically discover new capabilities via games.tools
-	//
+	// Start GABP connection attempt in background with retry logic
 	// This ensures AI agents are notified when tool sets expand dynamically
+	go s.establishGABPConnection(game.ID, port, token, backoffMin, backoffMax)
+
+	return nil
+}
+
+// establishGABPConnection attempts to connect to the game's GABP server with retry logic
+// This runs in the background and implements the Future Enhancement workflow:
+// 1. Game starts with bridge config (already done in startGame)
+// 2. GABP client connects to game mod's server (implemented here)
+// 3. Mirror system syncs tools and sends tools/list_changed notification (implemented here)
+// 4. AI agents automatically discover new capabilities via games.tools (enabled by notification)
+func (s *Server) establishGABPConnection(gameID string, port int, token string, backoffMin, backoffMax time.Duration) {
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	s.log.Debugw("attempting GABP connection for game", "gameId", gameID, "addr", addr)
+
+	// Create GABP client
+	client := gabp.NewClient(s.log)
+
+	// Store client reference for cleanup
+	s.mu.Lock()
+	s.gabpClients[gameID] = client
+	s.mu.Unlock()
+
+	// Attempt connection with retry logic (handles game mod startup delays)
+	err := client.Connect(addr, token, backoffMin, backoffMax)
+	if err != nil {
+		s.log.Warnw("failed to establish GABP connection - game may not support GABP", 
+			"gameId", gameID, "addr", addr, "error", err)
+		
+		// Clean up client reference on failure
+		s.mu.Lock()
+		delete(s.gabpClients, gameID)
+		s.mu.Unlock()
+		return
+	}
+
+	s.log.Infow("GABP connection established successfully", "gameId", gameID, "addr", addr)
+
+	// Sync tools from GABP to MCP (inline mirroring logic)
+	if err := s.syncGABPTools(client, gameID); err != nil {
+		s.log.Warnw("failed to sync GABP tools", "gameId", gameID, "error", err)
+	} else {
+		s.log.Infow("GABP tools synchronized successfully", "gameId", gameID)
+	}
+
+	// Expose GABP resources as MCP resources (inline mirroring logic)
+	if err := s.exposeGABPResources(client, gameID); err != nil {
+		s.log.Warnw("failed to expose GABP resources", "gameId", gameID, "error", err)
+	} else {
+		s.log.Infow("GABP resources exposed successfully", "gameId", gameID)
+	}
+
+	s.log.Infow("GABP mirroring setup complete for game", "gameId", gameID)
+}
+
+// syncGABPTools mirrors GABP tools to MCP tools with game-specific naming
+func (s *Server) syncGABPTools(client *gabp.Client, gameID string) error {
+	// Get tools from GABP client
+	gabpTools, err := client.ListTools()
+	if err != nil {
+		return fmt.Errorf("failed to list GABP tools: %w", err)
+	}
+
+	// Register each GABP tool as an MCP tool with game-specific naming
+	for _, tool := range gabpTools {
+		// Create game-prefixed tool name for multi-game clarity
+		// Apply basic normalization first (convert slashes to dots)
+		sanitizedToolName := util.NormalizeToolNameBasic(tool.Name)
+		gameSpecificName := fmt.Sprintf("%s.%s", gameID, sanitizedToolName)
+
+		mcpTool := Tool{
+			Name:        gameSpecificName,
+			Description: fmt.Sprintf("%s (Game: %s)", tool.Description, gameID),
+			InputSchema: tool.InputSchema,
+		}
+
+		// Create handler that forwards to GABP with original tool name
+		originalToolName := tool.Name // Capture original name for GABP call
+		handler := func(toolName string) func(args map[string]interface{}) (*ToolResult, error) {
+			return func(args map[string]interface{}) (*ToolResult, error) {
+				// Call GABP with original tool name (without game prefix)
+				result, isError, err := client.CallTool(toolName, args)
+				if err != nil {
+					return &ToolResult{
+						Content: []Content{{Type: "text", Text: err.Error()}},
+						IsError: true,
+					}, nil
+				}
+
+				if isError {
+					return &ToolResult{
+						Content:           []Content{{Type: "text", Text: fmt.Sprintf("Tool error: %v", result)}},
+						StructuredContent: result,
+						IsError:           true,
+					}, nil
+				}
+
+				// Convert result to MCP format
+				content := []Content{}
+				if resultText, ok := result["text"].(string); ok {
+					content = append(content, Content{Type: "text", Text: resultText})
+				} else {
+					// Serialize non-text tool results as JSON instead of using %v
+					if jsonData, err := json.Marshal(result); err != nil {
+						// Fallback to string representation if JSON marshaling fails
+						content = append(content, Content{Type: "text", Text: fmt.Sprintf("Tool result (JSON marshal failed): %v", result)})
+					} else {
+						content = append(content, Content{Type: "text", Text: string(jsonData)})
+					}
+				}
+
+				return &ToolResult{
+					Content:           content,
+					StructuredContent: result,
+					IsError:           false,
+				}, nil
+			}
+		}(originalToolName)
+
+		// Register the tool using the existing game tool registration method
+		// Use empty normalization config for now
+		normalizationConfig := &config.ToolNormalizationConfig{}
+		s.RegisterGameTool(gameID, mcpTool, handler, normalizationConfig)
+		s.log.Debugw("registered GABP tool as game-specific MCP tool", "gameId", gameID, "originalName", tool.Name, "mcpName", gameSpecificName)
+	}
+
+	s.log.Infow("synced GABP tools to MCP with game namespacing", "gameId", gameID, "count", len(gabpTools))
+
+	// Send tools/list_changed notification to AI agents
+	// This automatically alerts AI agents that new tools are available without
+	// them needing to poll. AI agents can then use games.tools to discover the
+	// new capabilities.
+	s.SendToolsListChangedNotification()
+
+	return nil
+}
+
+// exposeGABPResources creates MCP resources that expose GABP game information
+func (s *Server) exposeGABPResources(client *gabp.Client, gameID string) error {
+	// Game state resource for exposing current game information
+	stateResource := Resource{
+		URI:         fmt.Sprintf("gab://%s/state", gameID),
+		Name:        fmt.Sprintf("%s Game State", gameID),
+		Description: fmt.Sprintf("Current state and capabilities of game: %s", gameID),
+		MimeType:    "application/json",
+	}
+
+	stateHandler := func() ([]Content, error) {
+		// Get current tools to show game capabilities
+		tools, err := client.ListTools()
+		if err != nil {
+			return []Content{
+				{Type: "text", Text: fmt.Sprintf("Error retrieving game state: %v", err)},
+			}, nil
+		}
+
+		stateData := map[string]interface{}{
+			"gameId":       gameID,
+			"connected":    true,
+			"toolCount":    len(tools),
+			"capabilities": client.GetCapabilities(),
+			"availableTools": func() []string {
+				var toolNames []string
+				for _, tool := range tools {
+					toolNames = append(toolNames, tool.Name)
+				}
+				return toolNames
+			}(),
+			"lastUpdate": fmt.Sprintf("%d", time.Now().Unix()),
+		}
+
+		stateJson, err := json.Marshal(stateData)
+		if err != nil {
+			return []Content{
+				{Type: "text", Text: fmt.Sprintf("Error marshaling state data: %v", err)},
+			}, err
+		}
+
+		return []Content{
+			{Type: "text", Text: string(stateJson)},
+		}, nil
+	}
+
+	// Register the resource using the existing game resource registration method
+	s.RegisterGameResource(gameID, stateResource, stateHandler)
+
+	s.log.Infow("exposed GABP resources as game-specific MCP resources", "gameId", gameID, "resources", []string{"state"})
+
+	// Send resources/list_changed notification to alert AI agents
+	s.SendResourcesListChangedNotification()
 
 	return nil
 }
@@ -738,9 +927,10 @@ func (s *Server) stopGame(game config.GameConfig, force bool) error {
 
 	// Cleanup GABP connections and mirrored tools when game stops
 	// This involves:
-	// 1. Disconnecting any active GABP client for this game (handled by process termination)
+	// 1. Disconnecting any active GABP client for this game
 	// 2. Unregistering all game-specific tools (gameId.* tools)
 	// 3. Cleaning up bridge configuration files
+	s.CleanupGABPConnection(game.ID)
 	s.CleanupGameResources(game.ID)
 	s.CleanupBridgeConfig(game.ID)
 
@@ -837,6 +1027,21 @@ func (s *Server) CleanupGameResources(gameId string) {
 		if resourcesRemoved > 0 {
 			s.SendResourcesListChangedNotification()
 		}
+	}
+}
+
+// CleanupGABPConnection closes the GABP connection for a game
+func (s *Server) CleanupGABPConnection(gameId string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Clean up GABP client connection
+	if client, exists := s.gabpClients[gameId]; exists {
+		if err := client.Close(); err != nil {
+			s.log.Warnw("error closing GABP client", "gameId", gameId, "error", err)
+		}
+		delete(s.gabpClients, gameId)
+		s.log.Debugw("cleaned up GABP client connection", "gameId", gameId)
 	}
 }
 

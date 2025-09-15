@@ -359,6 +359,22 @@ func (c *Client) GetCapabilities() Capabilities {
 	return c.capabilities
 }
 
+// Close gracefully closes the GABP connection
+func (c *Client) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	
+	if !c.connected {
+		return nil
+	}
+	
+	c.connected = false
+	if c.conn != nil {
+		return c.conn.Close()
+	}
+	return nil
+}
+
 // mapToStruct converts a generic interface{} to a specific struct
 func mapToStruct(src interface{}, dst interface{}) error {
 	data, err := json.Marshal(src)
