@@ -163,7 +163,7 @@ func TestGamesConfig(t *testing.T) {
 
 func TestNewGabsDirectoryStructure(t *testing.T) {
 	t.Run("ConfigPathUsesHomeGabsDirectory", func(t *testing.T) {
-		configPath, err := getGamesConfigPath()
+		configPath, err := getGamesConfigPath("")
 		if err != nil {
 			t.Fatalf("Failed to get config path: %v", err)
 		}
@@ -186,6 +186,70 @@ func TestNewGabsDirectoryStructure(t *testing.T) {
 		expectedPath := filepath.Join(homeDir, ".gabs", "config.json")
 		if configPath != expectedPath {
 			t.Errorf("Expected config path '%s', got '%s'", expectedPath, configPath)
+		}
+	})
+
+	t.Run("ConfigPathUsesCustomDirectory", func(t *testing.T) {
+		customDir := "/tmp/test-gabs-config"
+		configPath, err := getGamesConfigPath(customDir)
+		if err != nil {
+			t.Fatalf("Failed to get config path with custom dir: %v", err)
+		}
+
+		expectedPath := filepath.Join(customDir, "config.json")
+		if configPath != expectedPath {
+			t.Errorf("Expected config path '%s', got '%s'", expectedPath, configPath)
+		}
+	})
+
+	t.Run("LoadGamesConfigFromCustomDirectory", func(t *testing.T) {
+		// Create a temporary directory for testing
+		tempDir, err := os.MkdirTemp("", "gabs-config-test")
+		if err != nil {
+			t.Fatalf("Failed to create temp dir: %v", err)
+		}
+		defer os.RemoveAll(tempDir)
+
+		// Create a test config file in the custom directory
+		testConfig := &GamesConfig{
+			Version: "1.0",
+			Games: map[string]GameConfig{
+				"test-game": {
+					ID:         "test-game",
+					Name:       "Test Game",
+					LaunchMode: "DirectPath",
+					Target:     "/path/to/test/game",
+				},
+			},
+		}
+
+		// Save the config to the custom directory
+		err = SaveGamesConfigToDir(testConfig, tempDir)
+		if err != nil {
+			t.Fatalf("Failed to save config to custom dir: %v", err)
+		}
+
+		// Load the config from the custom directory
+		loadedConfig, err := LoadGamesConfigFromDir(tempDir)
+		if err != nil {
+			t.Fatalf("Failed to load config from custom dir: %v", err)
+		}
+
+		// Verify the loaded config matches what we saved
+		if len(loadedConfig.Games) != 1 {
+			t.Errorf("Expected 1 game in loaded config, got %d", len(loadedConfig.Games))
+		}
+
+		game, exists := loadedConfig.GetGame("test-game")
+		if !exists {
+			t.Error("Expected 'test-game' to exist in loaded config")
+		} else {
+			if game.Name != "Test Game" {
+				t.Errorf("Expected game name 'Test Game', got '%s'", game.Name)
+			}
+			if game.Target != "/path/to/test/game" {
+				t.Errorf("Expected game target '/path/to/test/game', got '%s'", game.Target)
+			}
 		}
 	})
 
