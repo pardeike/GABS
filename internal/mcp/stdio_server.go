@@ -648,7 +648,7 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	// Create GABP bridge configuration (always local for GABS)
 	port, token, bridgePath, err := config.WriteBridgeJSONWithConfig(game.ID, s.configDir, gamesConfig)
 	if err != nil {
-		return fmt.Errorf("failed to create bridge config: %w", err)
+		return fmt.Errorf("failed to create bridge config for game '%s': %w", game.ID, err)
 	}
 
 	s.log.Infow("created GABP bridge configuration", "gameId", game.ID, "port", port, "token", token[:8]+"...", "host", "127.0.0.1", "configPath", bridgePath)
@@ -666,7 +666,8 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	// Create and configure controller
 	controller := &process.Controller{}
 	if err := controller.Configure(launchSpec); err != nil {
-		return fmt.Errorf("failed to configure game launcher: %w", err)
+		return fmt.Errorf("failed to configure game launcher for '%s' (mode: %s, target: %s): %w", 
+			game.ID, game.LaunchMode, game.Target, err)
 	}
 
 	// Set bridge connection info for environment variables
@@ -674,7 +675,8 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 
 	// Start the game
 	if err := controller.Start(); err != nil {
-		return fmt.Errorf("failed to start game: %w", err)
+		return fmt.Errorf("failed to start game '%s' (mode: %s, target: %s): %w", 
+			game.ID, game.LaunchMode, game.Target, err)
 	}
 
 	// Track the running game

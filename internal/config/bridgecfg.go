@@ -165,8 +165,8 @@ func findAvailablePortWithConfig(gamesConfig *GamesConfig) (int, error) {
 		lastErr = err
 	}
 
-	// If all ranges failed, provide a helpful error message
-	return 0, fmt.Errorf("no available ports found in any range - this may be due to Windows system restrictions (Hyper-V, WSL, etc.) or firewall settings. Consider: 1) Checking Windows reserved port ranges with 'netsh int ipv4 show excludedportrange protocol=tcp', 2) Disabling Hyper-V if not needed, 3) Configuring your firewall/antivirus, 4) Adding custom port ranges to your GABS config file in the 'portRanges' section. Last error: %w", lastErr)
+	// If all ranges failed, provide a simple error message
+	return 0, fmt.Errorf("no available ports found in any configured range (last error: %w)", lastErr)
 }
 
 // findAvailablePortWithFallback tries multiple port ranges to find an available port
