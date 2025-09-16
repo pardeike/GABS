@@ -116,7 +116,7 @@ func (c *Controller) Start() error {
 	if c.spec.Mode == "SteamAppId" || c.spec.Mode == "EpicAppId" {
 		// Start the launcher and let it exit
 		if err := c.cmd.Start(); err != nil {
-			return fmt.Errorf("failed to start %s launcher: %w", c.spec.Mode, err)
+			return fmt.Errorf("failed to start %s launcher for '%s': %w", c.spec.Mode, c.spec.PathOrId, err)
 		}
 
 		// Don't wait for launcher to finish - it's just a trigger
@@ -127,7 +127,10 @@ func (c *Controller) Start() error {
 	}
 
 	// For direct processes, start normally and track the actual process
-	return c.cmd.Start()
+	if err := c.cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start process '%s': %w", c.spec.PathOrId, err)
+	}
+	return nil
 }
 
 func (c *Controller) Stop(grace time.Duration) error {

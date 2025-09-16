@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -29,10 +28,10 @@ func WriteBridgeJSON(gameID, configDir string) (int, string, string, error) {
 // Each game gets its own directory, ensuring concurrent launches of different games are properly isolated.
 // If gamesConfig is provided, uses custom port ranges from config; otherwise uses defaults.
 func WriteBridgeJSONWithConfig(gameID, configDir string, gamesConfig *GamesConfig) (int, string, string, error) {
-	// Generate available port with conflict detection using config or fallback ranges
-	port, err := findAvailablePortWithConfig(gamesConfig)
+	// Assign port deterministically using config or fallback ranges
+	port, err := assignPortWithConfig(gamesConfig)
 	if err != nil {
-		return 0, "", "", fmt.Errorf("failed to find available port: %w", err)
+		return 0, "", "", fmt.Errorf("failed to assign port: %w", err)
 	}
 
 	// Generate random 64-byte hex token
@@ -128,18 +127,16 @@ func generateToken() (string, error) {
 	return hex.EncodeToString(bytes), nil
 }
 
-// findAvailablePortWithConfig tries multiple port ranges to find an available port
-// This improves compatibility with Windows 11 where the default ephemeral range (49152-65535)
-// might be restricted by Hyper-V, WSL, or other system components
-func findAvailablePortWithConfig(gamesConfig *GamesConfig) (int, error) {
+// assignPortWithConfig deterministically assigns a port from the configured ranges
+// without checking availability. This avoids port availability checking issues and
+// lets the actual network operations fail with clearer error messages if needed.
+func assignPortWithConfig(gamesConfig *GamesConfig) (int, error) {
 	// Check for custom port ranges from configuration
 	if gamesConfig != nil && gamesConfig.PortRanges != nil && len(gamesConfig.PortRanges.CustomRanges) > 0 {
 		for _, portRange := range gamesConfig.PortRanges.CustomRanges {
 			minPort, maxPort := portRange.Min, portRange.Max
-			port, err := findAvailablePort(minPort, maxPort)
-			if err == nil {
-				return port, nil
-			}
+			port := assignPortFromRange(minPort, maxPort)
+			return port, nil
 		}
 	}
 
@@ -155,26 +152,16 @@ func findAvailablePortWithConfig(gamesConfig *GamesConfig) (int, error) {
 		{30000, 32767}, // Registered/dynamic range subset
 	}
 
-	var lastErr error
-	for _, portRange := range portRanges {
-		minPort, maxPort := portRange[0], portRange[1]
-		port, err := findAvailablePort(minPort, maxPort)
-		if err == nil {
-			return port, nil
-		}
-		lastErr = err
-	}
-
-	// If all ranges failed, provide a helpful error message
-	return 0, fmt.Errorf("no available ports found in any range - this may be due to Windows system restrictions (Hyper-V, WSL, etc.) or firewall settings. Consider: 1) Checking Windows reserved port ranges with 'netsh int ipv4 show excludedportrange protocol=tcp', 2) Disabling Hyper-V if not needed, 3) Configuring your firewall/antivirus, 4) Adding custom port ranges to your GABS config file in the 'portRanges' section. Last error: %w", lastErr)
+	// Use the first available range (deterministic)
+	minPort, maxPort := portRanges[0][0], portRanges[0][1]
+	port := assignPortFromRange(minPort, maxPort)
+	return port, nil
 }
 
-// findAvailablePortWithFallback tries multiple port ranges to find an available port
-// This improves compatibility with Windows 11 where the default ephemeral range (49152-65535)
-// might be restricted by Hyper-V, WSL, or other system components
-// DEPRECATED: Use findAvailablePortWithConfig instead
+// findAvailablePortWithFallback is deprecated - use assignPortWithConfig instead
+// DEPRECATED: Use assignPortWithConfig instead
 func findAvailablePortWithFallback() (int, error) {
-	return findAvailablePortWithConfig(nil)
+	return assignPortWithConfig(nil)
 }
 
 
@@ -184,10 +171,10 @@ var (
 	portOffset      int
 )
 
-// findAvailablePort finds an available port in the given range using deterministic sequential search
-// This approach avoids random selection that may fail in sandboxed environments while still
-// providing some collision avoidance for concurrent allocations
-func findAvailablePort(minPort, maxPort int) (int, error) {
+// assignPortFromRange deterministically assigns a port from the given range
+// without checking availability. This avoids port checking issues and provides
+// consistent port assignment for concurrent game launches.
+func assignPortFromRange(minPort, maxPort int) int {
 	// Get a small offset to reduce collision probability in concurrent scenarios
 	// This is deterministic but different for each call
 	portOffsetMutex.Lock()
@@ -197,26 +184,11 @@ func findAvailablePort(minPort, maxPort int) (int, error) {
 
 	rangeSize := maxPort - minPort + 1
 	
-	// Try ports starting from minPort + offset, wrapping around the range
-	for i := 0; i < rangeSize; i++ {
-		port := minPort + (offset + i) % rangeSize
-		if isPortAvailable(port) {
-			return port, nil
-		}
-	}
-
-	return 0, fmt.Errorf("no available ports in range %d-%d", minPort, maxPort)
+	// Assign port deterministically with offset to avoid collisions
+	port := minPort + (offset % rangeSize)
+	return port
 }
 
-// isPortAvailable checks if a port is available by attempting to bind to it
-func isPortAvailable(port int) bool {
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return false
-	}
-	listener.Close()
-	return true
-}
+
 
 
