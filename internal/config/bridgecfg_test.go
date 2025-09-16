@@ -2,6 +2,8 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -415,4 +417,96 @@ t.Errorf("GameId %s, expected %s", bridge.GameId, tt.gameID)
 }
 })
 }
+}
+
+// TestDeterministicPortSelection tests that port selection is deterministic and repeatable
+func TestDeterministicPortSelection(t *testing.T) {
+	// Test that the port selection approach is deterministic by nature
+	// The small offset approach still maintains deterministic behavior within the same process
+	
+	// First, find what port would be selected in a small range
+	minPort := 8000
+	maxPort := 8010
+	
+	// Reset the global offset to ensure deterministic behavior
+	portOffsetMutex.Lock()
+	originalOffset := portOffset
+	portOffset = 0
+	portOffsetMutex.Unlock()
+	
+	// Restore offset after test
+	defer func() {
+		portOffsetMutex.Lock()
+		portOffset = originalOffset
+		portOffsetMutex.Unlock()
+	}()
+	
+	// Get first available port with reset offset
+	port1, err := findAvailablePort(minPort, maxPort)
+	if err != nil {
+		t.Fatalf("Failed to find available port: %v", err)
+	}
+	
+	// Verify it's in the expected range
+	if port1 < minPort || port1 > maxPort {
+		t.Errorf("Port %d not in range [%d, %d]", port1, minPort, maxPort)
+	}
+	
+	// With offset=0, it should start from minPort and find the first available
+	expectedPort := minPort
+	for ; expectedPort <= maxPort; expectedPort++ {
+		if isPortAvailable(expectedPort) {
+			break
+		}
+	}
+	
+	if port1 != expectedPort {
+		t.Errorf("Expected deterministic port %d, got %d", expectedPort, port1)
+	}
+}
+
+// TestSequentialPortAllocation tests that ports are allocated sequentially
+func TestSequentialPortAllocation(t *testing.T) {
+	// Create a test scenario with a very small port range
+	// to verify sequential behavior
+	minPort := 9000
+	maxPort := 9005
+	
+	var allocatedPorts []int
+	var listeners []net.Listener
+	
+	// Clean up at the end
+	defer func() {
+		for _, l := range listeners {
+			l.Close()
+		}
+	}()
+	
+	// Allocate ports one by one and verify they're sequential
+	for i := 0; i < 3; i++ {
+		port, err := findAvailablePort(minPort, maxPort)
+		if err != nil {
+			t.Fatalf("Failed to find available port on attempt %d: %v", i+1, err)
+		}
+		
+		// Actually bind to this port so it becomes unavailable for next iteration
+		addr := fmt.Sprintf("127.0.0.1:%d", port)
+		listener, err := net.Listen("tcp", addr)
+		if err != nil {
+			t.Fatalf("Failed to bind to port %d: %v", port, err)
+		}
+		
+		listeners = append(listeners, listener)
+		allocatedPorts = append(allocatedPorts, port)
+	}
+	
+	// Verify ports were allocated sequentially (accounting for any initially unavailable ports)
+	if len(allocatedPorts) >= 2 {
+		for i := 1; i < len(allocatedPorts); i++ {
+			if allocatedPorts[i] <= allocatedPorts[i-1] {
+				t.Errorf("Ports not allocated in ascending order: %v", allocatedPorts)
+				break
+			}
+		}
+	}
 }

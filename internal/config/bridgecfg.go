@@ -8,7 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"time"
+	"sync"
 )
 
 type BridgeJSON struct {
@@ -178,21 +178,28 @@ func findAvailablePortWithFallback() (int, error) {
 }
 
 
-// findAvailablePort finds an available port in the given range
+// Global port offset counter to reduce concurrent allocation collisions
+var (
+	portOffsetMutex sync.Mutex
+	portOffset      int
+)
+
+// findAvailablePort finds an available port in the given range using deterministic sequential search
+// This approach avoids random selection that may fail in sandboxed environments while still
+// providing some collision avoidance for concurrent allocations
 func findAvailablePort(minPort, maxPort int) (int, error) {
-	// Try up to 100 random ports to avoid infinite loops
-	for attempts := 0; attempts < 100; attempts++ {
-		// Generate random port in range
-		port := minPort + (randomInt() % (maxPort - minPort + 1))
+	// Get a small offset to reduce collision probability in concurrent scenarios
+	// This is deterministic but different for each call
+	portOffsetMutex.Lock()
+	offset := portOffset % 10  // Small offset to avoid excessive range scanning
+	portOffset++
+	portOffsetMutex.Unlock()
 
-		// Check if port is available
-		if isPortAvailable(port) {
-			return port, nil
-		}
-	}
-
-	// If random selection failed, try sequential search
-	for port := minPort; port <= maxPort; port++ {
+	rangeSize := maxPort - minPort + 1
+	
+	// Try ports starting from minPort + offset, wrapping around the range
+	for i := 0; i < rangeSize; i++ {
+		port := minPort + (offset + i) % rangeSize
 		if isPortAvailable(port) {
 			return port, nil
 		}
@@ -212,16 +219,4 @@ func isPortAvailable(port int) bool {
 	return true
 }
 
-// randomInt returns a non-negative pseudo-random int for port generation
-func randomInt() int {
-	// Use crypto/rand for secure random generation
-	bytes := make([]byte, 4)
-	if _, err := rand.Read(bytes); err != nil {
-		// Fallback to timestamp-based seed if crypto/rand fails
-		// This shouldn't happen in normal operation but provides resilience
-		return int(time.Now().UnixNano() & 0x7FFFFFFF)
-	}
-	// Ensure result is non-negative by masking the sign bit
-	result := int(bytes[0])<<24 | int(bytes[1])<<16 | int(bytes[2])<<8 | int(bytes[3])
-	return result & 0x7FFFFFFF // Clear sign bit to ensure non-negative
-}
+
