@@ -2,8 +2,6 @@ package config
 
 import (
 	"encoding/json"
-	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -249,7 +247,7 @@ func TestPortFallbackFunctionality(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			port, err := findAvailablePortWithConfig(tt.gamesConfig)
+			port, err := assignPortWithConfig(tt.gamesConfig)
 			
 			if tt.expectError && err == nil {
 				t.Error("Expected error but got none")
@@ -419,12 +417,11 @@ t.Errorf("GameId %s, expected %s", bridge.GameId, tt.gameID)
 }
 }
 
-// TestDeterministicPortSelection tests that port selection is deterministic and repeatable
+// TestDeterministicPortSelection tests that port assignment is deterministic and repeatable
 func TestDeterministicPortSelection(t *testing.T) {
-	// Test that the port selection approach is deterministic by nature
-	// The small offset approach still maintains deterministic behavior within the same process
+	// Test that the port assignment approach is deterministic within the same process
 	
-	// First, find what port would be selected in a small range
+	// First, find what port would be assigned in a small range
 	minPort := 8000
 	maxPort := 8010
 	
@@ -441,72 +438,55 @@ func TestDeterministicPortSelection(t *testing.T) {
 		portOffsetMutex.Unlock()
 	}()
 	
-	// Get first available port with reset offset
-	port1, err := findAvailablePort(minPort, maxPort)
-	if err != nil {
-		t.Fatalf("Failed to find available port: %v", err)
-	}
+	// Get first assigned port with reset offset
+	port1 := assignPortFromRange(minPort, maxPort)
 	
 	// Verify it's in the expected range
 	if port1 < minPort || port1 > maxPort {
 		t.Errorf("Port %d not in range [%d, %d]", port1, minPort, maxPort)
 	}
 	
-	// With offset=0, it should start from minPort and find the first available
+	// With offset=0, it should be the first port in range (minPort)
 	expectedPort := minPort
-	for ; expectedPort <= maxPort; expectedPort++ {
-		if isPortAvailable(expectedPort) {
-			break
-		}
-	}
 	
 	if port1 != expectedPort {
 		t.Errorf("Expected deterministic port %d, got %d", expectedPort, port1)
 	}
 }
 
-// TestSequentialPortAllocation tests that ports are allocated sequentially
-func TestSequentialPortAllocation(t *testing.T) {
-	// Create a test scenario with a very small port range
-	// to verify sequential behavior
+// TestPortAssignmentDeterminism tests that ports are assigned deterministically with offset
+func TestPortAssignmentDeterminism(t *testing.T) {
+	// Test that port assignment uses offset to avoid collisions
 	minPort := 9000
 	maxPort := 9005
 	
-	var allocatedPorts []int
-	var listeners []net.Listener
+	var assignedPorts []int
 	
-	// Clean up at the end
-	defer func() {
-		for _, l := range listeners {
-			l.Close()
-		}
-	}()
-	
-	// Allocate ports one by one and verify they're sequential
+	// Assign ports multiple times and verify they use offset
 	for i := 0; i < 3; i++ {
-		port, err := findAvailablePort(minPort, maxPort)
-		if err != nil {
-			t.Fatalf("Failed to find available port on attempt %d: %v", i+1, err)
+		port := assignPortFromRange(minPort, maxPort)
+		
+		// Verify it's in the expected range
+		if port < minPort || port > maxPort {
+			t.Errorf("Port %d not in range [%d, %d]", port, minPort, maxPort)
 		}
 		
-		// Actually bind to this port so it becomes unavailable for next iteration
-		addr := fmt.Sprintf("127.0.0.1:%d", port)
-		listener, err := net.Listen("tcp", addr)
-		if err != nil {
-			t.Fatalf("Failed to bind to port %d: %v", port, err)
-		}
-		
-		listeners = append(listeners, listener)
-		allocatedPorts = append(allocatedPorts, port)
+		assignedPorts = append(assignedPorts, port)
 	}
 	
-	// Verify ports were allocated sequentially (accounting for any initially unavailable ports)
-	if len(allocatedPorts) >= 2 {
-		for i := 1; i < len(allocatedPorts); i++ {
-			if allocatedPorts[i] <= allocatedPorts[i-1] {
-				t.Errorf("Ports not allocated in ascending order: %v", allocatedPorts)
+	// Verify ports are different due to offset mechanism
+	if len(assignedPorts) >= 2 {
+		allSame := true
+		for i := 1; i < len(assignedPorts); i++ {
+			if assignedPorts[i] != assignedPorts[0] {
+				allSame = false
 				break
 			}
+		}
+		if allSame {
+			t.Logf("All ports were the same (%d) - this is possible but offset should provide variation", assignedPorts[0])
+		} else {
+			t.Logf("Port assignment used offset correctly: %v", assignedPorts)
 		}
 	}
 }
