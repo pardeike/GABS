@@ -635,15 +635,16 @@ func (s *Server) checkGameStatus(gameID string) string {
 // startGame starts a game process using the process controller and sets up GABP bridge
 func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
+	
 	// Check if already running
 	if controller, exists := s.games[game.ID]; exists && controller != nil && controller.IsRunning() {
+		s.mu.Unlock()
 		return fmt.Errorf("game %s is already running", game.ID)
 	}
 
 	// Clean up any stale controller reference
 	delete(s.games, game.ID)
+	s.mu.Unlock()
 
 	// Create GABP bridge configuration (always local for GABS)
 	port, token, bridgePath, err := config.WriteBridgeJSONWithConfig(game.ID, s.configDir, gamesConfig)
@@ -679,13 +680,17 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 			game.ID, game.LaunchMode, game.Target, err)
 	}
 
-	// Track the running game
+	// Track the running game - need to acquire lock again for this operation
+	s.mu.Lock()
 	s.games[game.ID] = controller
+	s.mu.Unlock()
 
 	s.log.Infow("game started with GABP bridge", "gameId", game.ID, "mode", game.LaunchMode, "pid", controller.GetPID(), "gabpPort", port)
 
 	// Start GABP connection attempt in background with retry logic
 	// This ensures AI agents are notified when tool sets expand dynamically
+	// NOTE: We launch this goroutine after releasing the mutex to prevent deadlock
+	// since establishGABPConnection will eventually call RegisterGameTool which needs the mutex
 	go s.establishGABPConnection(game.ID, port, token, backoffMin, backoffMax)
 
 	return nil
