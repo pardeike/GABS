@@ -22,7 +22,7 @@ func TestMultiGameToolMirroring(t *testing.T) {
 	// Expected after fix: Clear game-specific tool names or context
 
 	logger := util.NewLogger("info")
-	server := NewServer(logger)
+	server := NewServerForTesting(logger)
 
 	// Simulate what happens when 2 games connect via GABP
 	t.Run("SimulateMultipleGameToolRegistration", func(t *testing.T) {
@@ -163,7 +163,7 @@ func TestGamesToolsCommand(t *testing.T) {
 	}
 
 	logger := util.NewLogger("info")
-	server := NewServer(logger)
+	server := NewServerForTesting(logger)
 	server.RegisterGameManagementTools(loadedConfig, 0, 0)
 
 	// Simulate having some game-specific tools registered (as Mirror would do)

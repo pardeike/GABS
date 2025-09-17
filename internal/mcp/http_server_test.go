@@ -15,7 +15,7 @@ import (
 
 func TestHTTPServerBasicFunctionality(t *testing.T) {
 	log := util.NewLogger("error")
-	server := NewServer(log)
+	server := NewServerForTesting(log)
 
 	// Register a test tool
 	testTool := Tool{
@@ -62,7 +62,7 @@ func TestHTTPServerBasicFunctionality(t *testing.T) {
 
 func TestMCPHTTPEndpoint(t *testing.T) {
 	log := util.NewLogger("error")
-	server := NewServer(log)
+	server := NewServerForTesting(log)
 
 	// Register a simple tool
 	server.RegisterTool(Tool{
@@ -173,7 +173,7 @@ func TestSSENotificationFormat(t *testing.T) {
 
 func TestHTTPMethodValidation(t *testing.T) {
 	log := util.NewLogger("error")
-	server := NewServer(log)
+	server := NewServerForTesting(log)
 
 	tests := []struct {
 		method     string
@@ -236,7 +236,7 @@ func (m *MockResponseWriter) WriteHeader(statusCode int) {
 
 func TestValidJSONRPCOverHTTP(t *testing.T) {
 	log := util.NewLogger("error")
-	server := NewServer(log)
+	server := NewServerForTesting(log)
 
 	// Create a valid MCP initialize request
 	request := Message{

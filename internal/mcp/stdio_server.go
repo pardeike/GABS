@@ -22,7 +22,7 @@ type Server struct {
 	log         util.Logger
 	tools       map[string]*ToolHandler
 	resources   map[string]*ResourceHandler
-	games       map[string]*process.Controller // Track running games
+	games       map[string]process.ControllerInterface // Track running games
 	configDir   string                        // Config directory for bridge files
 	apiKey      string                        // API key for HTTP authentication
 	mu          sync.RWMutex
@@ -31,6 +31,7 @@ type Server struct {
 	gameTools   map[string][]string         // Track which tools belong to which games
 	gameResources map[string][]string       // Track which resources belong to which games
 	gabpClients map[string]*gabp.Client     // Track GABP connections per game
+	starter     *process.SerializedStarter  // Serialized process starter
 }
 
 // ToolHandler represents a tool handler function
@@ -50,12 +51,29 @@ func NewServer(log util.Logger) *Server {
 		log:           log,
 		tools:         make(map[string]*ToolHandler),
 		resources:     make(map[string]*ResourceHandler),
-		games:         make(map[string]*process.Controller),
+		games:         make(map[string]process.ControllerInterface),
 		configDir:     "", // Will be set by SetConfigDir
 		writers:       make([]util.FrameWriter, 0),
 		gameTools:     make(map[string][]string),
 		gameResources: make(map[string][]string),
 		gabpClients:   make(map[string]*gabp.Client),
+		starter:       process.NewSerializedStarter(), // Initialize serialized starter
+	}
+}
+
+// NewServerForTesting creates a server with shorter timeouts for testing
+func NewServerForTesting(log util.Logger) *Server {
+	return &Server{
+		log:           log,
+		tools:         make(map[string]*ToolHandler),
+		resources:     make(map[string]*ResourceHandler),
+		games:         make(map[string]process.ControllerInterface),
+		configDir:     "", // Will be set by SetConfigDir
+		writers:       make([]util.FrameWriter, 0),
+		gameTools:     make(map[string][]string),
+		gameResources: make(map[string][]string),
+		gabpClients:   make(map[string]*gabp.Client),
+		starter:       process.NewSerializedStarterForTesting(), // Use testing timeouts
 	}
 }
 
@@ -505,7 +523,7 @@ func (s *Server) RegisterBridgeTools(ctrl interface{}, client interface{}) {
 }
 
 // getGameFromController extracts game config from controller - helper for status checking
-func (s *Server) getGameFromController(controller *process.Controller) *config.GameConfig {
+func (s *Server) getGameFromController(controller process.ControllerInterface) *config.GameConfig {
 	// This is a temporary helper. In a proper refactor, we'd store the game config 
 	// alongside the controller, but for minimal changes, we'll work with what we have.
 	// We can check the controller's spec to get the StopProcessName
@@ -593,23 +611,24 @@ func (s *Server) checkGameStatus(gameID string) string {
 		return "stopped"
 	}
 
+	// Simple stateless approach: directly query the system state
 	launchMode := controller.GetLaunchMode()
 
-	// For Steam/Epic launcher games, we use different status reporting
+	// For Steam/Epic launcher games, check the actual game process
 	if launchMode == "SteamAppId" || launchMode == "EpicAppId" {
-		// Check if we can track the actual game process
 		if controller.IsRunning() {
 			return "running" // We can track it and it's running
 		} else {
-			// Check if the launcher process is still active (shouldn't normally happen)
+			// Check if the launcher process is still active
 			if controller.IsLauncherProcessRunning() {
 				return "launcher-running" // Launcher process is still active
 			}
 			
-			// Launcher has exited (normal) - determine if we have tracking capability
+			// Launcher has exited - determine if we have tracking capability
 			game := s.getGameFromController(controller)
 			if game != nil && game.StopProcessName != "" {
 				// We have tracking capability but game is not running
+				s.cleanupStoppedGame(gameID)
 				return "stopped"
 			} else {
 				// We don't have tracking capability, so we can't know the real status
@@ -619,40 +638,43 @@ func (s *Server) checkGameStatus(gameID string) string {
 	}
 
 	// For direct processes, check if the process is actually running
-	if controller != nil && controller.IsRunning() {
+	if controller.IsRunning() {
 		return "running"
 	}
 
 	// Process is dead, clean up
-	delete(s.games, gameID)
-	// Cleanup GABP connections and mirrored tools for this game
-	// This involves:
-	// 1. Disconnecting any active GABP client for this game
-	// 2. Unregistering all game-specific tools (gameId.* tools)
-	// 3. Cleaning up bridge configuration files
-	s.CleanupGABPConnection(gameID)
-	s.CleanupGameResources(gameID)
-	s.CleanupBridgeConfig(gameID)
-	s.log.Debugw("cleaned up dead game process and resources", "gameId", gameID)
-
+	s.cleanupStoppedGame(gameID)
 	return "stopped"
 }
 
-// startGame starts a game process using the process controller and sets up GABP bridge
-func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration) error {
-	s.mu.Lock()
+// cleanupStoppedGame centralizes the cleanup logic for stopped games
+func (s *Server) cleanupStoppedGame(gameID string) {
+	// Remove from games map - no need for complex cleanup in stateless approach
+	delete(s.games, gameID)
 	
-	// Check if already running
+	// Note: The mutex is already held when this is called from checkGameStatus
+	// So we call internal cleanup methods that don't acquire locks
+	s.cleanupGABPConnectionInternal(gameID)
+	s.cleanupGameResourcesInternal(gameID)
+	s.cleanupBridgeConfigInternal(gameID)
+	s.log.Debugw("cleaned up dead game process and resources", "gameId", gameID)
+}
+
+// startGame starts a game process using the serialized starter approach
+// This implements @pardeike's requirements for serialized, verified process starting
+func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration) error {
+	// Check if already running (this is still needed for safety)
+	s.mu.Lock()
 	if controller, exists := s.games[game.ID]; exists && controller != nil && controller.IsRunning() {
 		s.mu.Unlock()
 		return fmt.Errorf("game %s is already running", game.ID)
 	}
-
+	
 	// Clean up any stale controller reference
 	delete(s.games, game.ID)
 	s.mu.Unlock()
 
-	// Create GABP bridge configuration (always local for GABS)
+	// Create GABP bridge configuration (prepare environment variables)
 	port, token, bridgePath, err := config.WriteBridgeJSONWithConfig(game.ID, s.configDir, gamesConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create bridge config for game '%s': %w", game.ID, err)
@@ -671,7 +693,7 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	}
 
 	// Create and configure controller
-	controller := &process.Controller{}
+	controller := process.NewController()
 	if err := controller.Configure(launchSpec); err != nil {
 		return fmt.Errorf("failed to configure game launcher for '%s' (mode: %s, target: %s): %w", 
 			game.ID, game.LaunchMode, game.Target, err)
@@ -680,24 +702,33 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	// Set bridge connection info for environment variables
 	controller.SetBridgeInfo(port, token)
 
-	// Start the game
-	if err := controller.Start(); err != nil {
+	// Use serialized starter with verification
+	// This implements the asynchronous handling requested by @pardeike
+	gabpConnector := NewServerGABPConnector(s)
+	result := s.starter.StartWithVerification(controller, gabpConnector, game.ID, port, token)
+	
+	if result.Error != nil {
 		return fmt.Errorf("failed to start game '%s' (mode: %s, target: %s): %w", 
-			game.ID, game.LaunchMode, game.Target, err)
+			game.ID, game.LaunchMode, game.Target, result.Error)
 	}
 
-	// Track the running game - need to acquire lock again for this operation
+	// Track the running game
 	s.mu.Lock()
 	s.games[game.ID] = controller
 	s.mu.Unlock()
 
-	s.log.Infow("game started with GABP bridge", "gameId", game.ID, "mode", game.LaunchMode, "pid", controller.GetPID(), "gabpPort", port)
-
-	// Start GABP connection attempt in background with retry logic
-	// This ensures AI agents are notified when tool sets expand dynamically
-	// NOTE: We launch this goroutine after releasing the mutex to prevent deadlock
-	// since establishGABPConnection will eventually call RegisterGameTool which needs the mutex
-	go s.establishGABPConnection(game.ID, port, token, backoffMin, backoffMax)
+	// Log the result with detailed status
+	logMsg := fmt.Sprintf("game started with GABP bridge (pid: %d, port: %d)", controller.GetPID(), port)
+	if result.ProcessStarted {
+		logMsg += ", process verified"
+	}
+	if result.GABPConnected {
+		logMsg += ", GABP connected"
+	} else {
+		logMsg += ", GABP connection failed/timeout"
+	}
+	
+	s.log.Infow(logMsg, "gameId", game.ID, "mode", game.LaunchMode, "processStarted", result.ProcessStarted, "gabpConnected", result.GABPConnected)
 
 	return nil
 }
@@ -1073,6 +1104,73 @@ func (s *Server) CleanupGABPConnection(gameId string) {
 
 // CleanupBridgeConfig removes the bridge configuration file for a game
 func (s *Server) CleanupBridgeConfig(gameId string) {
+	cp, err := config.NewConfigPaths(s.configDir)
+	if err != nil {
+		s.log.Warnw("failed to create config paths for cleanup", "gameId", gameId, "error", err)
+		return
+	}
+	
+	bridgePath := cp.GetBridgeConfigPath(gameId)
+	
+	if err := os.Remove(bridgePath); err != nil {
+		// Don't log as error since file might not exist
+		s.log.Debugw("bridge config cleanup", "gameId", gameId, "path", bridgePath, "result", err.Error())
+	} else {
+		s.log.Debugw("cleaned up bridge config", "gameId", gameId, "path", bridgePath)
+	}
+}
+
+// Internal cleanup methods that don't acquire locks (for use when mutex is already held)
+
+// cleanupGameResourcesInternal removes game-specific resources without acquiring mutex
+func (s *Server) cleanupGameResourcesInternal(gameId string) {
+	toolsRemoved := 0
+	resourcesRemoved := 0
+	
+	// Remove game-specific tools
+	if toolNames, exists := s.gameTools[gameId]; exists {
+		for _, toolName := range toolNames {
+			if _, exists := s.tools[toolName]; exists {
+				delete(s.tools, toolName)
+				toolsRemoved++
+			}
+		}
+		delete(s.gameTools, gameId)
+	}
+	
+	// Remove game-specific resources
+	if resourceURIs, exists := s.gameResources[gameId]; exists {
+		for _, resourceURI := range resourceURIs {
+			if _, exists := s.resources[resourceURI]; exists {
+				delete(s.resources, resourceURI)
+				resourcesRemoved++
+			}
+		}
+		delete(s.gameResources, gameId)
+	}
+	
+	if toolsRemoved > 0 || resourcesRemoved > 0 {
+		s.log.Infow("cleaned up game resources", "gameId", gameId, "toolsRemoved", toolsRemoved, "resourcesRemoved", resourcesRemoved)
+		
+		// Note: We cannot send notifications here because that might require acquiring locks
+		// The caller should handle notifications separately if needed
+	}
+}
+
+// cleanupGABPConnectionInternal cleans up GABP connection without acquiring mutex
+func (s *Server) cleanupGABPConnectionInternal(gameId string) {
+	// Clean up GABP client connection
+	if client, exists := s.gabpClients[gameId]; exists {
+		if err := client.Close(); err != nil {
+			s.log.Warnw("error closing GABP client", "gameId", gameId, "error", err)
+		}
+		delete(s.gabpClients, gameId)
+		s.log.Debugw("cleaned up GABP client connection", "gameId", gameId)
+	}
+}
+
+// cleanupBridgeConfigInternal removes bridge config without acquiring mutex
+func (s *Server) cleanupBridgeConfigInternal(gameId string) {
 	cp, err := config.NewConfigPaths(s.configDir)
 	if err != nil {
 		s.log.Warnw("failed to create config paths for cleanup", "gameId", gameId, "error", err)

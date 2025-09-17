@@ -13,7 +13,7 @@ func TestToolNamePatternCompliance(t *testing.T) {
 	mcpPattern := regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
 	logger := util.NewLogger("info")
-	server := NewServer(logger)
+	server := NewServerForTesting(logger)
 
 	// Register built-in tools (simulates what happens during server startup)
 	server.RegisterTool(Tool{

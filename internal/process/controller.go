@@ -1,6 +1,7 @@
 package process
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -26,36 +27,54 @@ type BridgeInfo struct {
 	Token string
 }
 
+// Controller implements a stateless approach to process management
+// It queries the actual system state rather than maintaining internal state
 type Controller struct {
 	spec       LaunchSpec
 	cmd        *exec.Cmd
 	bridgeInfo *BridgeInfo
 }
 
+// Configure sets up the controller with the given launch specification
 func (c *Controller) Configure(spec LaunchSpec) error {
-	// Validate spec and prepare platform-specific launch
 	if spec.GameId == "" {
-		return fmt.Errorf("GameId is required")
+		return &ProcessError{
+			Type:    ProcessErrorTypeConfiguration,
+			Context: "GameId is required",
+			Err:     fmt.Errorf("GameId cannot be empty"),
+		}
 	}
 
 	switch spec.Mode {
 	case "DirectPath", "":
 		if spec.PathOrId == "" {
-			return fmt.Errorf("PathOrId is required for DirectPath mode")
+			return &ProcessError{
+				Type:    ProcessErrorTypeConfiguration,
+				Context: fmt.Sprintf("PathOrId is required for mode %s", spec.Mode),
+				Err:     fmt.Errorf("PathOrId cannot be empty for DirectPath mode"),
+			}
 		}
 	case "SteamAppId", "EpicAppId", "CustomCommand":
 		if spec.PathOrId == "" {
-			return fmt.Errorf("PathOrId is required for %s mode", spec.Mode)
+			return &ProcessError{
+				Type:    ProcessErrorTypeConfiguration,
+				Context: fmt.Sprintf("PathOrId is required for mode %s", spec.Mode),
+				Err:     fmt.Errorf("PathOrId cannot be empty for %s mode", spec.Mode),
+			}
 		}
 	default:
-		return fmt.Errorf("unsupported launch mode: %s", spec.Mode)
+		return &ProcessError{
+			Type:    ProcessErrorTypeConfiguration,
+			Context: fmt.Sprintf("unsupported launch mode: %s", spec.Mode),
+			Err:     fmt.Errorf("unsupported launch mode: %s", spec.Mode),
+		}
 	}
 
 	c.spec = spec
 	return nil
 }
 
-// SetBridgeInfo sets the bridge connection information that will be passed to the game via environment variables
+// SetBridgeInfo sets the bridge connection information 
 func (c *Controller) SetBridgeInfo(port int, token string) {
 	c.bridgeInfo = &BridgeInfo{
 		Port:  port,
@@ -63,6 +82,7 @@ func (c *Controller) SetBridgeInfo(port int, token string) {
 	}
 }
 
+// Start launches the process and waits for verification
 func (c *Controller) Start() error {
 	// Prepare command based on launch mode
 	var cmdName string
@@ -74,16 +94,23 @@ func (c *Controller) Start() error {
 		cmdArgs = c.spec.Args
 	case "SteamAppId":
 		cmdName = c.getSteamLauncher()
-		cmdArgs = []string{fmt.Sprintf("steam://rungameid/%s", c.spec.PathOrId)}
+		if runtime.GOOS == "windows" {
+			cmdArgs = []string{"/c", "start", fmt.Sprintf("steam://rungameid/%s", c.spec.PathOrId)}
+		} else {
+			cmdArgs = []string{fmt.Sprintf("steam://rungameid/%s", c.spec.PathOrId)}
+		}
 	case "EpicAppId":
-		// Epic Games Store URL format
 		cmdName = c.getSystemOpenCommand()
 		cmdArgs = []string{fmt.Sprintf("com.epicgames.launcher://apps/%s?action=launch&silent=true", c.spec.PathOrId)}
 	case "CustomCommand":
 		cmdName = c.spec.PathOrId
 		cmdArgs = c.spec.Args
 	default:
-		return fmt.Errorf("unsupported launch mode: %s", c.spec.Mode)
+		return &ProcessError{
+			Type:    ProcessErrorTypeStart,
+			Context: fmt.Sprintf("unsupported launch mode: %s", c.spec.Mode),
+			Err:     fmt.Errorf("unsupported launch mode: %s", c.spec.Mode),
+		}
 	}
 
 	// Create command
@@ -92,70 +119,135 @@ func (c *Controller) Start() error {
 		c.cmd.Dir = c.spec.WorkingDir
 	}
 
-	// Set environment variables for GABP server configuration
-	// The mod acts as GABP server, GABS acts as GABP client
+	// Set up environment variables
+	c.setupEnvironment()
+
+	// Start the process
+	if err := c.cmd.Start(); err != nil {
+		return &ProcessError{
+			Type:    ProcessErrorTypeStart,
+			Context: fmt.Sprintf("failed to start %s (mode: %s, target: %s)", c.spec.GameId, c.spec.Mode, c.spec.PathOrId),
+			Err:     err,
+		}
+	}
+
+	return nil
+}
+
+// setupEnvironment configures environment variables for the process
+func (c *Controller) setupEnvironment() {
 	bridgePath := c.getBridgePath()
 	bridgeEnvVars := []string{
 		fmt.Sprintf("GABS_GAME_ID=%s", c.spec.GameId),
-		fmt.Sprintf("GABS_BRIDGE_PATH=%s", bridgePath), // Fallback for compatibility/debugging
+		fmt.Sprintf("GABS_BRIDGE_PATH=%s", bridgePath),
 	}
 
-	// Pass essential GABP server configuration directly to mod
-	// Mod will start GABP server on this port and use this token for auth
 	if c.bridgeInfo != nil {
 		bridgeEnvVars = append(bridgeEnvVars,
-			fmt.Sprintf("GABP_SERVER_PORT=%d", c.bridgeInfo.Port), // Port for mod to listen on
-			fmt.Sprintf("GABP_TOKEN=%s", c.bridgeInfo.Token),      // Auth token for GABS to use
+			fmt.Sprintf("GABP_SERVER_PORT=%d", c.bridgeInfo.Port),
+			fmt.Sprintf("GABP_TOKEN=%s", c.bridgeInfo.Token),
 		)
 	}
 
-	// Some agents strip environment variables, ensure essential ones are present
 	env := os.Environ()
 	if os.Getenv("SystemRoot") == "" {
 		env = append(env, "SystemRoot=C:\\Windows", "WINDIR=C:\\Windows")
 	}
 	c.cmd.Env = append(env, bridgeEnvVars...)
-
-	// For Steam/Epic launchers, we need different handling since the launcher
-	// process exits quickly but the game continues running independently
-	if c.spec.Mode == "SteamAppId" || c.spec.Mode == "EpicAppId" {
-		// Start the launcher and let it exit
-		if err := c.cmd.Start(); err != nil {
-			return fmt.Errorf("failed to start %s launcher for '%s': %w", c.spec.Mode, c.spec.PathOrId, err)
-		}
-
-		// Don't wait for launcher to finish - it's just a trigger
-		// The actual game process runs independently
-		// Note: This means IsRunning() will return false for Steam/Epic games
-		// which is technically correct since we're not managing the game process directly
-		return nil
-	}
-
-	// For direct processes, start normally and track the actual process
-	if err := c.cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start process '%s': %w", c.spec.PathOrId, err)
-	}
-	return nil
 }
 
-func (c *Controller) Stop(grace time.Duration) error {
-	if c.cmd == nil || c.cmd.Process == nil {
-		return fmt.Errorf("no process to stop")
+// IsRunning queries the actual system state to determine if the process is running
+// This is stateless - it directly checks the real process state
+func (c *Controller) IsRunning() bool {
+	// For Steam/Epic launchers, check for the actual game process by name if configured
+	if c.spec.Mode == "SteamAppId" || c.spec.Mode == "EpicAppId" {
+		if c.spec.StopProcessName != "" {
+			pids, err := findProcessesByName(c.spec.StopProcessName)
+			if err != nil {
+				return false
+			}
+			return len(pids) > 0
+		}
+		// Without StopProcessName, we can't track launcher-based games
+		return false
 	}
 
-	// If a specific stop process name is configured, try to find and stop that process
+	// For direct processes, check the managed process
+	if c.cmd == nil || c.cmd.Process == nil {
+		return false
+	}
+
+	// Check if the process has already been waited for
+	if c.cmd.ProcessState != nil {
+		return false
+	}
+
+	// Try to signal the process with signal 0 (doesn't affect the process, just checks existence)
+	// This is the most reliable cross-platform approach
+	err := c.cmd.Process.Signal(syscall.Signal(0))
+	if err != nil {
+		// Process is dead, try to reap it to update ProcessState
+		go func() {
+			c.cmd.Wait() // This will set ProcessState for future calls
+		}()
+		return false
+	}
+	return true
+}
+
+// WaitForProcessStart waits for the process to be detectable in the system
+func (c *Controller) WaitForProcessStart(timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return &ProcessError{
+				Type:    ProcessErrorTypeStart,
+				Context: fmt.Sprintf("timed out waiting for %s to start", c.spec.GameId),
+				Err:     fmt.Errorf("process not found in system after %v", timeout),
+			}
+		case <-ticker.C:
+			if c.IsRunning() {
+				return nil
+			}
+		}
+	}
+}
+
+// Stop gracefully stops the process
+func (c *Controller) Stop(grace time.Duration) error {
+	// Try to stop by process name first if configured
 	if c.spec.StopProcessName != "" {
 		if err := c.stopByProcessName(c.spec.StopProcessName, false, grace); err == nil {
-			// Successfully stopped by process name
 			return nil
 		}
-		// If stopping by process name failed, continue with the normal process stopping
+	}
+
+	if c.cmd == nil || c.cmd.Process == nil {
+		return &ProcessError{
+			Type:    ProcessErrorTypeStop,
+			Context: "no process to stop",
+			Err:     fmt.Errorf("no process available"),
+		}
 	}
 
 	// Try graceful termination first
 	if err := c.cmd.Process.Signal(getTerminationSignal()); err != nil {
 		// If graceful termination fails, try force kill
-		return c.cmd.Process.Kill()
+		killErr := c.cmd.Process.Kill()
+		if killErr != nil {
+			return &ProcessError{
+				Type:    ProcessErrorTypeStop,
+				Context: fmt.Sprintf("failed to stop %s", c.spec.GameId),
+				Err:     killErr,
+			}
+		}
+		return nil
 	}
 
 	// Wait for graceful shutdown with timeout
@@ -169,99 +261,45 @@ func (c *Controller) Stop(grace time.Duration) error {
 		return nil
 	case <-time.After(grace):
 		// Grace period expired, force kill
-		return c.cmd.Process.Kill()
+		if err := c.cmd.Process.Kill(); err != nil {
+			return &ProcessError{
+				Type:    ProcessErrorTypeStop,
+				Context: fmt.Sprintf("failed to force kill %s after grace period", c.spec.GameId),
+				Err:     err,
+			}
+		}
+		return nil
 	}
 }
 
+// Kill forcefully terminates the process
 func (c *Controller) Kill() error {
-	// If a specific stop process name is configured, try to kill that process first
 	if c.spec.StopProcessName != "" {
 		if err := c.stopByProcessName(c.spec.StopProcessName, true, 0); err == nil {
-			// Successfully killed by process name
 			return nil
 		}
-		// If killing by process name failed, continue with the normal process killing
 	}
 
 	if c.cmd == nil || c.cmd.Process == nil {
-		return fmt.Errorf("no process to kill")
-	}
-	return c.cmd.Process.Kill()
-}
-
-// IsRunning checks if the controlled process is still running
-func (c *Controller) IsRunning() bool {
-	// Special case: Steam/Epic launchers exit quickly but game continues
-	// If we have a StopProcessName configured, we can track the actual game process
-	if c.spec.Mode == "SteamAppId" || c.spec.Mode == "EpicAppId" {
-		if c.spec.StopProcessName != "" {
-			// We can track the actual game process by name
-			pids, err := findProcessesByName(c.spec.StopProcessName)
-			if err != nil {
-				// If we can't check processes, assume not running
-				return false
-			}
-			// If we found processes with this name, the game is running
-			return len(pids) > 0
+		return &ProcessError{
+			Type:    ProcessErrorTypeStop,
+			Context: "no process to kill",
+			Err:     fmt.Errorf("no process available"),
 		}
-
-		// Without StopProcessName, we can't track launcher-based games
-		// The launcher process itself exits quickly, but the game continues independently
-		return false
 	}
 
-	// For direct processes, check the managed process
-	if c.cmd == nil || c.cmd.Process == nil {
-		return false
+	err := c.cmd.Process.Kill()
+	if err != nil {
+		return &ProcessError{
+			Type:    ProcessErrorTypeStop,
+			Context: fmt.Sprintf("failed to kill %s", c.spec.GameId),
+			Err:     err,
+		}
 	}
-
-	// First try to see if the process has already been waited for
-	if c.cmd.ProcessState != nil {
-		// Process has exited
-		return false
-	}
-
-	// Try to signal the process with signal 0 (doesn't affect the process, just checks existence)
-	// This is the most reliable cross-platform approach
-	err := c.cmd.Process.Signal(syscall.Signal(0))
-	return err == nil
+	return nil
 }
 
-// GetPID returns the process ID if available
-func (c *Controller) GetPID() int {
-	if c.cmd == nil || c.cmd.Process == nil {
-		return 0
-	}
-	return c.cmd.Process.Pid
-}
-
-// GetLaunchMode returns the launch mode for this controller
-func (c *Controller) GetLaunchMode() string {
-	return c.spec.Mode
-}
-
-// GetStopProcessName returns the stop process name for this controller
-func (c *Controller) GetStopProcessName() string {
-	return c.spec.StopProcessName
-}
-
-// IsLauncherProcessRunning checks if the launcher process itself is still running
-// This is different from IsRunning() which checks the actual game process
-func (c *Controller) IsLauncherProcessRunning() bool {
-	if c.cmd == nil || c.cmd.Process == nil {
-		return false
-	}
-
-	// Check if the process has already been waited for
-	if c.cmd.ProcessState != nil {
-		return false
-	}
-
-	// Try to signal the launcher process
-	err := c.cmd.Process.Signal(syscall.Signal(0))
-	return err == nil
-}
-
+// Restart stops and then starts the process
 func (c *Controller) Restart() error {
 	// Stop then Start, preserving spec
 	if err := c.Stop(3 * time.Second); err != nil {
@@ -273,12 +311,40 @@ func (c *Controller) Restart() error {
 	return c.Start()
 }
 
-// Platform-specific helpers
+// GetPID returns the process ID if available
+func (c *Controller) GetPID() int {
+	if c.cmd == nil || c.cmd.Process == nil {
+		return 0
+	}
+	return c.cmd.Process.Pid
+}
 
+// GetLaunchMode returns the launch mode
+func (c *Controller) GetLaunchMode() string {
+	return c.spec.Mode
+}
+
+// GetStopProcessName returns the stop process name
+func (c *Controller) GetStopProcessName() string {
+	return c.spec.StopProcessName
+}
+
+// IsLauncherProcessRunning checks if the launcher process itself is still running
+func (c *Controller) IsLauncherProcessRunning() bool {
+	if c.cmd == nil || c.cmd.Process == nil {
+		return false
+	}
+
+	if c.cmd.ProcessState != nil {
+		return false
+	}
+
+	err := c.cmd.Process.Signal(syscall.Signal(0))
+	return err == nil
+}
+
+// Helper methods
 func (c *Controller) getSteamLauncher() string {
-	// Note: We *could* add direct Steam executable detection for better reliability,
-	// maybe check common Steam installation paths and use steam.exe directly
-	// instead of relying on system URL handlers, which provides better error handling
 	switch runtime.GOOS {
 	case "windows":
 		return "cmd"
@@ -300,16 +366,14 @@ func (c *Controller) getSystemOpenCommand() string {
 	}
 }
 
-func getTerminationSignal() os.Signal {
-	switch runtime.GOOS {
-	case "windows":
-		return os.Interrupt
-	default:
-		return syscall.SIGTERM
+func (c *Controller) getBridgePath() string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".gabs", c.spec.GameId, "bridge.json")
 	}
+	return filepath.Join(homeDir, ".gabs", c.spec.GameId, "bridge.json")
 }
 
-// stopByProcessName tries to find and stop a process by its name
 func (c *Controller) stopByProcessName(processName string, force bool, grace time.Duration) error {
 	pids, err := findProcessesByName(processName)
 	if err != nil {
@@ -320,7 +384,6 @@ func (c *Controller) stopByProcessName(processName string, force bool, grace tim
 		return fmt.Errorf("no processes found with name '%s'", processName)
 	}
 
-	// Try to stop all found processes
 	var lastErr error
 	stopped := 0
 	for _, pid := range pids {
@@ -349,124 +412,48 @@ func (c *Controller) stopByProcessName(processName string, force bool, grace tim
 	return nil
 }
 
-// findProcessesByName finds all processes with the given name and returns their PIDs
-func findProcessesByName(processName string) ([]int, error) {
+// ProcessError represents different types of process-related errors
+type ProcessError struct {
+	Type    ProcessErrorType
+	Context string
+	Err     error
+}
+
+type ProcessErrorType int
+
+const (
+	ProcessErrorTypeConfiguration ProcessErrorType = iota
+	ProcessErrorTypeStart
+	ProcessErrorTypeStop
+	ProcessErrorTypeStatus
+	ProcessErrorTypeNotFound
+)
+
+func (e *ProcessError) Error() string {
+	switch e.Type {
+	case ProcessErrorTypeConfiguration:
+		return fmt.Sprintf("configuration error (%s): %v", e.Context, e.Err)
+	case ProcessErrorTypeStart:
+		return fmt.Sprintf("start error (%s): %v", e.Context, e.Err)
+	case ProcessErrorTypeStop:
+		return fmt.Sprintf("stop error (%s): %v", e.Context, e.Err)
+	case ProcessErrorTypeStatus:
+		return fmt.Sprintf("status check error (%s): %v", e.Context, e.Err)
+	case ProcessErrorTypeNotFound:
+		return fmt.Sprintf("process not found (%s): %v", e.Context, e.Err)
+	default:
+		return fmt.Sprintf("process error (%s): %v", e.Context, e.Err)
+	}
+}
+
+// Helper functions for cross-platform process management
+func getTerminationSignal() os.Signal {
 	switch runtime.GOOS {
 	case "windows":
-		return findProcessesWindows(processName)
-	case "darwin":
-		return findProcessesDarwin(processName)
+		return os.Interrupt
 	default:
-		return findProcessesLinux(processName)
+		return syscall.SIGTERM
 	}
-}
-
-// findProcessesWindows finds processes on Windows using tasklist
-func findProcessesWindows(processName string) ([]int, error) {
-	// Add .exe extension if not present
-	if !strings.HasSuffix(strings.ToLower(processName), ".exe") {
-		processName += ".exe"
-	}
-
-	cmd := exec.Command("tasklist", "/FO", "CSV", "/NH")
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("failed to run tasklist: %w", err)
-	}
-
-	var pids []int
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		// Parse CSV format: "ImageName","PID","SessionName","Session#","MemUsage"
-		parts := strings.Split(line, ",")
-		if len(parts) >= 2 {
-			imageName := strings.Trim(parts[0], "\"")
-			pidStr := strings.Trim(parts[1], "\"")
-
-			if strings.EqualFold(imageName, processName) {
-				if pid, err := strconv.Atoi(pidStr); err == nil {
-					pids = append(pids, pid)
-				}
-			}
-		}
-	}
-
-	return pids, nil
-}
-
-// findProcessesDarwin finds processes on macOS using ps
-func findProcessesDarwin(processName string) ([]int, error) {
-	cmd := exec.Command("ps", "axo", "pid,comm")
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("failed to run ps: %w", err)
-	}
-
-	var pids []int
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines[1:] { // Skip header
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		parts := strings.Fields(line)
-		if len(parts) >= 2 {
-			pidStr := parts[0]
-			comm := strings.Join(parts[1:], " ")
-
-			// Tighten matching: require exact basename match or exact full path match
-			// This prevents accidental termination of unrelated processes
-			commBasename := filepath.Base(comm)
-			if commBasename == processName || comm == processName {
-				if pid, err := strconv.Atoi(pidStr); err == nil {
-					pids = append(pids, pid)
-				}
-			}
-		}
-	}
-
-	return pids, nil
-}
-
-// findProcessesLinux finds processes on Linux using ps
-func findProcessesLinux(processName string) ([]int, error) {
-	cmd := exec.Command("ps", "axo", "pid,comm")
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("failed to run ps: %w", err)
-	}
-
-	var pids []int
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines[1:] { // Skip header
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		parts := strings.Fields(line)
-		if len(parts) >= 2 {
-			pidStr := parts[0]
-			comm := strings.Join(parts[1:], " ")
-
-			// Tighten matching: require exact basename match or exact full path match
-			// This prevents accidental termination of unrelated processes
-			commBasename := filepath.Base(comm)
-			if commBasename == processName || comm == processName {
-				if pid, err := strconv.Atoi(pidStr); err == nil {
-					pids = append(pids, pid)
-				}
-			}
-		}
-	}
-
-	return pids, nil
 }
 
 // killProcess forcefully terminates a process by PID
@@ -540,12 +527,53 @@ func terminateProcess(pid int, grace time.Duration) error {
 	}
 }
 
-// getBridgePath returns the path to the bridge.json file for this game
-func (c *Controller) getBridgePath() string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		// Fallback to relative path if we can't get home directory
-		return filepath.Join(".gabs", c.spec.GameId, "bridge.json")
+// findProcessesByName finds all processes with the given name
+func findProcessesByName(name string) ([]int, error) {
+	var pids []int
+
+	switch runtime.GOOS {
+	case "windows":
+		// Use tasklist command on Windows
+		cmd := exec.Command("tasklist", "/FI", "IMAGENAME eq "+name, "/FO", "CSV", "/NH")
+		output, err := cmd.Output()
+		if err != nil {
+			return nil, err
+		}
+
+		lines := strings.Split(string(output), "\n")
+		for _, line := range lines {
+			if strings.Contains(line, name) {
+				// Parse CSV: "ProcessName","PID","SessionName","Session#","MemUsage"
+				parts := strings.Split(line, ",")
+				if len(parts) >= 2 {
+					pidStr := strings.Trim(parts[1], "\"")
+					if pid, err := strconv.Atoi(pidStr); err == nil {
+						pids = append(pids, pid)
+					}
+				}
+			}
+		}
+	default:
+		// Use pgrep command on Unix-like systems
+		cmd := exec.Command("pgrep", "-x", name)
+		output, err := cmd.Output()
+		if err != nil {
+			// pgrep returns exit code 1 if no processes found, which is not an error for us
+			if exitError, ok := err.(*exec.ExitError); ok && exitError.ExitCode() == 1 {
+				return pids, nil // Return empty slice, no error
+			}
+			return nil, err
+		}
+
+		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+		for _, line := range lines {
+			if line != "" {
+				if pid, err := strconv.Atoi(line); err == nil {
+					pids = append(pids, pid)
+				}
+			}
+		}
 	}
-	return filepath.Join(homeDir, ".gabs", c.spec.GameId, "bridge.json")
+
+	return pids, nil
 }

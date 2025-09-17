@@ -37,7 +37,7 @@ func TestGameStatusNoDeadlock(t *testing.T) {
 
 	// Create MCP server
 	log := util.NewLogger("info")
-	server := NewServer(log)
+	server := NewServerForTesting(log)
 	server.SetConfigDir(tmpDir)
 
 	// Register game management tools
