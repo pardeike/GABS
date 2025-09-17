@@ -159,8 +159,9 @@ func TestApplicationLifecycleManagement(t *testing.T) {
 		responseStr2 := string(respBytes2)
 		t.Logf("Steam game start (Steam App ID): %s", responseStr2)
 
-		// Both should resolve to the same game - either both succeed or both recognize the game
-		if strings.Contains(responseStr, "not found") || strings.Contains(responseStr2, "not found") {
+		// Both should resolve to the same game - either both succeed or both recognize the game configuration
+		if strings.Contains(responseStr, "game not found") || strings.Contains(responseStr2, "game not found") ||
+		   strings.Contains(responseStr, "configuration not found") || strings.Contains(responseStr2, "configuration not found") {
 			t.Error("Steam App ID should resolve to configured game")
 		}
 

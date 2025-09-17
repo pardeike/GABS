@@ -151,8 +151,8 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 		responseStr := string(respBytes)
 		t.Logf("games.start with 'rimworld': %s", responseStr)
 
-		// Should find the game (even if start fails)
-		if strings.Contains(responseStr, "not found") {
+		// Should find the game configuration (even if process start fails)
+		if strings.Contains(responseStr, "game not found") || strings.Contains(responseStr, "configuration not found") {
 			t.Error("Should find game 'rimworld'")
 		}
 	})
@@ -182,12 +182,12 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 
 		// After our fix, both the game ID and Steam App ID should work
 		// The command should resolve the Steam App ID to the actual game
-		if strings.Contains(responseStr, "not found") {
+		if strings.Contains(responseStr, "game not found") || strings.Contains(responseStr, "configuration not found") {
 			t.Error("After fix, Steam App ID should be accepted and resolved to game")
 		}
 
-		// Should either succeed or fail with game-specific error (not "not found")
-		if strings.Contains(responseStr, "294100") && !strings.Contains(responseStr, "not found") {
+		// Should either succeed or fail with game-specific error (not configuration not found)
+		if strings.Contains(responseStr, "294100") && !strings.Contains(responseStr, "game not found") {
 			t.Log("Steam App ID successfully resolved - this is the fix!")
 		}
 	})

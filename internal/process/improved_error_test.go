@@ -34,7 +34,7 @@ func TestImprovedProcessErrorReporting(t *testing.T) {
 		if !strings.Contains(errMsg, "/nonexistent/invalid/path/to/game.exe") {
 			t.Errorf("Error message should include the specific path: %s", errMsg)
 		}
-		if !strings.Contains(errMsg, "failed to start process") {
+		if !strings.Contains(errMsg, "failed to start test-game") {
 			t.Errorf("Error message should mention process start failure: %s", errMsg)
 		}
 		
