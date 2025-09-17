@@ -109,7 +109,12 @@ func (c *Controller) Start() error {
 		)
 	}
 
-	c.cmd.Env = append(os.Environ(), bridgeEnvVars...)
+	// Some agents strip environment variables, ensure essential ones are present
+	env := os.Environ()
+	if os.Getenv("SystemRoot") == "" {
+		env = append(env, "SystemRoot=C:\\Windows", "WINDIR=C:\\Windows")
+	}
+	c.cmd.Env = append(env, bridgeEnvVars...)
 
 	// For Steam/Epic launchers, we need different handling since the launcher
 	// process exits quickly but the game continues running independently
