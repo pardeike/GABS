@@ -246,12 +246,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				}, nil
 			}
 
-			statusDesc := s.getStatusDescription(game.ID, game)
+			// Get status once to avoid double mutex lock
+			status := s.checkGameStatus(game.ID)
+			statusDesc := s.getStatusDescriptionFromStatus(status, game)
 			content.WriteString(fmt.Sprintf("**%s** (%s): %s\n", game.ID, game.Name, statusDesc))
 
 			// Add helpful info for launcher games ONLY when we cannot track them
 			if game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId" {
-				status := s.checkGameStatus(game.ID)
 				if status == "launcher-triggered" {
 					// Only show the warning if we don't have stopProcessName configured
 					if game.StopProcessName == "" {
@@ -557,7 +558,12 @@ func (s *Server) getGameSpecificTools(gameID string) []Tool {
 // getStatusDescription provides a user-friendly description of the game status
 func (s *Server) getStatusDescription(gameID string, gameConfig *config.GameConfig) string {
 	status := s.checkGameStatus(gameID)
+	return s.getStatusDescriptionFromStatus(status, gameConfig)
+}
 
+// getStatusDescriptionFromStatus provides a user-friendly description from a status string
+// This avoids calling checkGameStatus again when the status is already known
+func (s *Server) getStatusDescriptionFromStatus(status string, gameConfig *config.GameConfig) string {
 	switch status {
 	case "running":
 		// Check if this is a launcher-based game with process tracking

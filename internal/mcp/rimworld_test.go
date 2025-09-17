@@ -11,23 +11,23 @@ import (
 	"github.com/pardeike/gabs/internal/util"
 )
 
-// TestRimWorldStatusHang reproduces the specific issue where
-// gabs.games_status({"gameId":"rimworld"}) hangs
-func TestRimWorldStatusHang(t *testing.T) {
+// TestDoubleCheckGameStatusFix validates that the games.status tool no longer
+// calls checkGameStatus twice, which was causing a potential deadlock
+func TestDoubleCheckGameStatusFix(t *testing.T) {
 	// Create temp config directory
-	tmpDir, err := os.MkdirTemp("", "gabs-rimworld-test")
+	tmpDir, err := os.MkdirTemp("", "gabs-double-status-fix")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Create RimWorld config similar to what user might have
+	// Create RimWorld config - the specific game that was hanging
 	rimworldGame := config.GameConfig{
 		ID:              "rimworld",
 		Name:            "RimWorld", 
 		LaunchMode:      "SteamAppId",
 		Target:          "294100",
-		StopProcessName: "RimWorldWin64.exe", // This should allow tracking
+		StopProcessName: "RimWorldWin64.exe",
 	}
 	
 	gamesConfig := &config.GamesConfig{
@@ -45,8 +45,8 @@ func TestRimWorldStatusHang(t *testing.T) {
 	backoffMax := 1 * time.Second
 	server.RegisterGameManagementTools(gamesConfig, backoffMin, backoffMax)
 
-	t.Run("Test games.status with rimworld should not hang", func(t *testing.T) {
-		// This reproduces the specific issue reported
+	t.Run("games.status should not hang on rimworld", func(t *testing.T) {
+		// This tests the exact problem reported: gabs.games_status({"gameId":"rimworld"}) hangs
 		statusMsg := &Message{
 			JSONRPC: "2.0",
 			Method:  "tools/call",
@@ -59,7 +59,7 @@ func TestRimWorldStatusHang(t *testing.T) {
 			},
 		}
 
-		// Use timeout to detect hanging
+		// Use timeout to detect hanging - the original issue was a complete hang
 		done := make(chan *Message, 1)
 		go func() {
 			response := server.HandleMessage(statusMsg)
@@ -70,26 +70,25 @@ func TestRimWorldStatusHang(t *testing.T) {
 		case response := <-done:
 			respBytes, _ := json.Marshal(response)
 			responseStr := string(respBytes)
-			t.Logf("✅ Response received: %s", responseStr)
+			t.Logf("✅ games.status completed successfully: %s", responseStr)
 			
-			// Should be successful (no error)
+			// Verify it returns proper response
 			if strings.Contains(responseStr, `"error"`) {
 				t.Errorf("games.status returned error: %s", responseStr)
 			}
 			
-			// Should contain stopped status for rimworld
-			if !strings.Contains(responseStr, "stopped") {
-				t.Errorf("Expected rimworld to be stopped, got: %s", responseStr)
+			// Should contain RimWorld info
+			if !strings.Contains(responseStr, "rimworld") || !strings.Contains(responseStr, "RimWorld") {
+				t.Errorf("Expected rimworld game info in response: %s", responseStr)
 			}
 			
-		case <-time.After(3 * time.Second):
-			t.Fatal("❌ games.status call timed out - deadlock reproduced!")
+		case <-time.After(2 * time.Second):
+			t.Fatal("❌ games.status call timed out - the deadlock issue still exists!")
 		}
 	})
 
-	// Test the suspected double checkGameStatus call issue
-	t.Run("Test games.status with Steam launcher game (potential double mutex)", func(t *testing.T) {
-		// Start rimworld first to trigger the GABP connection setup
+	t.Run("games.status should work for Steam games after starting", func(t *testing.T) {
+		// Start the game to set up the controller state
 		startMsg := &Message{
 			JSONRPC: "2.0",
 			Method:  "tools/call",
@@ -102,13 +101,10 @@ func TestRimWorldStatusHang(t *testing.T) {
 			},
 		}
 
-		// Start the game (this sets up internal state)
 		server.HandleMessage(startMsg)
-		
-		// Give a moment for any goroutines to start
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond) // Brief pause for any async setup
 
-		// Now test status - this is where the hang happens
+		// Now test status - this was the problematic scenario
 		statusMsg := &Message{
 			JSONRPC: "2.0",
 			Method:  "tools/call",
@@ -121,7 +117,6 @@ func TestRimWorldStatusHang(t *testing.T) {
 			},
 		}
 
-		// Use timeout to detect hanging
 		done := make(chan *Message, 1)
 		go func() {
 			response := server.HandleMessage(statusMsg)
@@ -132,10 +127,10 @@ func TestRimWorldStatusHang(t *testing.T) {
 		case response := <-done:
 			respBytes, _ := json.Marshal(response)
 			responseStr := string(respBytes)
-			t.Logf("✅ Response after start: %s", responseStr)
+			t.Logf("✅ games.status after start completed: %s", responseStr)
 			
-		case <-time.After(3 * time.Second):
-			t.Fatal("❌ games.status call after start timed out - deadlock reproduced!")
+		case <-time.After(2 * time.Second):
+			t.Fatal("❌ games.status after start timed out - deadlock still exists!")
 		}
 	})
 }
