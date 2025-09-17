@@ -54,7 +54,7 @@ func TestGameStopFix(t *testing.T) {
 	}
 
 	logger := util.NewLogger("info")
-	server := NewServer(logger)
+	server := NewServerForTesting(logger)
 	server.RegisterGameManagementTools(loadedConfig, 0, 0)
 
 	t.Run("DirectGameStopWorksCorrectly", func(t *testing.T) {
@@ -293,7 +293,7 @@ func TestGameStopFix(t *testing.T) {
 			},
 		}
 
-		serverWithTracking := NewServer(logger)
+		serverWithTracking := NewServerForTesting(logger)
 		serverWithTracking.RegisterGameManagementTools(gamesConfigWithProcessName, 0, 0)
 
 		// Start the game
@@ -351,7 +351,7 @@ func TestGameStopFix(t *testing.T) {
 // TestImprovedStatusReporting verifies the enhanced status descriptions
 func TestImprovedStatusReporting(t *testing.T) {
 	logger := util.NewLogger("info")
-	server := NewServer(logger)
+	server := NewServerForTesting(logger)
 
 	// Test the status description logic by checking actual behavior
 	// rather than trying to mock internal state

@@ -111,7 +111,7 @@ func TestGABPMirroringFunctionality(t *testing.T) {
 	log := util.NewLogger("debug")
 
 	// Create server
-	server := NewServer(log)
+	server := NewServerForTesting(log)
 
 	// Create mock GABP client with some test tools
 	mockClient := &MockGABPClient{
@@ -219,7 +219,7 @@ func TestGABPConnectionCleanup(t *testing.T) {
 	log := util.NewLogger("debug")
 
 	// Create server
-	server := NewServer(log)
+	server := NewServerForTesting(log)
 
 	gameID := "test-game"
 
@@ -298,7 +298,7 @@ func TestEstablishGABPConnectionWorkflow(t *testing.T) {
 	// and GABP connection is established (using a mock instead of real connection)
 
 	log := util.NewLogger("debug")
-	server := NewServer(log)
+	server := NewServerForTesting(log)
 
 	gameID := "test-game"
 

@@ -61,6 +61,22 @@ func NewServer(log util.Logger) *Server {
 	}
 }
 
+// NewServerForTesting creates a server with shorter timeouts for testing
+func NewServerForTesting(log util.Logger) *Server {
+	return &Server{
+		log:           log,
+		tools:         make(map[string]*ToolHandler),
+		resources:     make(map[string]*ResourceHandler),
+		games:         make(map[string]process.ControllerInterface),
+		configDir:     "", // Will be set by SetConfigDir
+		writers:       make([]util.FrameWriter, 0),
+		gameTools:     make(map[string][]string),
+		gameResources: make(map[string][]string),
+		gabpClients:   make(map[string]*gabp.Client),
+		starter:       process.NewSerializedStarterForTesting(), // Use testing timeouts
+	}
+}
+
 // RegisterTool registers a tool with its handler, applying normalization if configured
 func (s *Server) RegisterTool(tool Tool, handler func(args map[string]interface{}) (*ToolResult, error)) {
 	s.RegisterToolWithConfig(tool, handler, nil)

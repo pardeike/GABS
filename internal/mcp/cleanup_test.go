@@ -11,7 +11,7 @@ import (
 
 func TestGameResourceCleanup(t *testing.T) {
 	log := util.NewLogger("error")
-	server := NewServer(log)
+	server := NewServerForTesting(log)
 
 	gameId := "test-game"
 
@@ -91,7 +91,7 @@ func TestGameResourceCleanup(t *testing.T) {
 
 func TestBridgeConfigCleanup(t *testing.T) {
 	log := util.NewLogger("error")
-	server := NewServer(log)
+	server := NewServerForTesting(log)
 
 	gameId := "cleanup-test-game"
 
@@ -125,7 +125,7 @@ func TestBridgeConfigCleanup(t *testing.T) {
 
 func TestMixedGameCleanup(t *testing.T) {
 	log := util.NewLogger("error")
-	server := NewServer(log)
+	server := NewServerForTesting(log)
 
 	game1 := "game1"
 	game2 := "game2"

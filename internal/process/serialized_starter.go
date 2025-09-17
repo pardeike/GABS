@@ -30,6 +30,14 @@ func NewSerializedStarter() *SerializedStarter {
 	}
 }
 
+// NewSerializedStarterForTesting creates a serialized starter with shorter timeouts for testing
+func NewSerializedStarterForTesting() *SerializedStarter {
+	return &SerializedStarter{
+		processStartTimeout: 3 * time.Second, // Shorter timeout for tests
+		gabpConnectTimeout:  2 * time.Second, // Much shorter GABP timeout for tests
+	}
+}
+
 // StartWithVerification starts a process with full verification
 // This method serializes the starting process as requested by @pardeike
 func (s *SerializedStarter) StartWithVerification(
@@ -39,13 +47,15 @@ func (s *SerializedStarter) StartWithVerification(
 	port int,
 	token string,
 ) *ProcessStartResult {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	result := &ProcessStartResult{}
+
+	// Phase 1 & 2: Serialize the critical process starting and verification
+	// Only hold the lock for the environment setup and process starting
+	s.mu.Lock()
 
 	// Phase 1: Start the process
 	if err := controller.Start(); err != nil {
+		s.mu.Unlock() // Release lock before returning
 		result.Error = &ProcessError{
 			Type:    ProcessErrorTypeStart,
 			Context: fmt.Sprintf("failed to start process for %s", gameID),
@@ -58,6 +68,7 @@ func (s *SerializedStarter) StartWithVerification(
 	// This is important for launcher-based games where there's a delay
 	if controller, ok := controller.(*Controller); ok {
 		if err := controller.WaitForProcessStart(s.processStartTimeout); err != nil {
+			s.mu.Unlock() // Release lock before returning
 			// Process didn't start or isn't detectable
 			result.Error = err
 			return result
@@ -66,13 +77,18 @@ func (s *SerializedStarter) StartWithVerification(
 
 	// If we reach here, the process is started and detectable
 	result.ProcessStarted = true
+	
+	// Release the serialization lock - GABP connection can happen concurrently
+	s.mu.Unlock()
 
-	// Phase 3: Attempt GABP connection (if we have a connector)
+	// Phase 3: Attempt GABP connection (NOT serialized - can happen concurrently)
+	// This doesn't need to be serialized since it doesn't affect environment variables
+	// and multiple GABP connections can be attempted simultaneously
 	if gabpConnector != nil {
 		connected := s.attemptGABPConnection(gabpConnector, gameID, port, token)
 		result.GABPConnected = connected
 		
-		// Note: GABP connection failure is not considered an error for the process start
+		// Note: GABP connection failure is not considered an error for the process start  
 		// The process is running, we just can't control it via GABP
 	}
 

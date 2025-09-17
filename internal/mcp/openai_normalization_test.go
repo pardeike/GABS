@@ -11,7 +11,7 @@ import (
 // TestOpenAINormalizationIntegration tests the complete integration of OpenAI tool name normalization
 func TestOpenAINormalizationIntegration(t *testing.T) {
 	logger := util.NewLogger("info")
-	server := NewServer(logger)
+	server := NewServerForTesting(logger)
 
 	// Test with OpenAI normalization enabled
 	normalizationConfig := &config.ToolNormalizationConfig{
@@ -113,7 +113,7 @@ func TestOpenAINormalizationIntegration(t *testing.T) {
 // TestOpenAINormalizationDisabled tests that normalization is skipped when disabled
 func TestOpenAINormalizationDisabled(t *testing.T) {
 	logger := util.NewLogger("info")
-	server := NewServer(logger)
+	server := NewServerForTesting(logger)
 
 	// Test with OpenAI normalization disabled
 	normalizationConfig := &config.ToolNormalizationConfig{
@@ -161,7 +161,7 @@ func TestOpenAINormalizationDisabled(t *testing.T) {
 // TestRegisterToolBackwardCompatibility tests that RegisterTool still works without normalization
 func TestRegisterToolBackwardCompatibility(t *testing.T) {
 	logger := util.NewLogger("info")
-	server := NewServer(logger)
+	server := NewServerForTesting(logger)
 
 	originalTool := Tool{
 		Name:        "minecraft.inventory.get",

@@ -54,7 +54,7 @@ func TestApplicationLifecycleManagement(t *testing.T) {
 	}
 
 	logger := util.NewLogger("info")
-	server := NewServer(logger)
+	server := NewServerForTesting(logger)
 	server.RegisterGameManagementTools(loadedConfig, 0, 0)
 
 	t.Run("DirectPathApplication", func(t *testing.T) {
