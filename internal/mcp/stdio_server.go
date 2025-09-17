@@ -31,6 +31,7 @@ type Server struct {
 	gameTools   map[string][]string         // Track which tools belong to which games
 	gameResources map[string][]string       // Track which resources belong to which games
 	gabpClients map[string]*gabp.Client     // Track GABP connections per game
+	starter     *process.SerializedStarter  // Serialized process starter
 }
 
 // ToolHandler represents a tool handler function
@@ -56,6 +57,7 @@ func NewServer(log util.Logger) *Server {
 		gameTools:     make(map[string][]string),
 		gameResources: make(map[string][]string),
 		gabpClients:   make(map[string]*gabp.Client),
+		starter:       process.NewSerializedStarter(), // Initialize serialized starter
 	}
 }
 
@@ -573,13 +575,6 @@ func (s *Server) getStatusDescriptionFromStatus(status string, gameConfig *confi
 			}
 		}
 		return "running (GABS controls the process)"
-	case "starting":
-		if gameConfig.LaunchMode == "SteamAppId" || gameConfig.LaunchMode == "EpicAppId" {
-			return fmt.Sprintf("starting (launching via %s)", gameConfig.LaunchMode)
-		}
-		return "starting"
-	case "stopping":
-		return "stopping"
 	case "stopped":
 		return "stopped"
 	case "launcher-running":
@@ -600,48 +595,20 @@ func (s *Server) checkGameStatus(gameID string) string {
 		return "stopped"
 	}
 
-	// Try to get improved state if available
-	if adapter, ok := controller.(*process.ControllerAdapter); ok {
-		state := adapter.GetState()
-		launchMode := controller.GetLaunchMode()
-		
-		// Use the improved state management
-		switch state {
-		case process.ProcessStateRunning:
-			return "running"
-		case process.ProcessStateStarting:
-			// For launcher games, this might mean we're waiting for the game to start
-			if launchMode == "SteamAppId" || launchMode == "EpicAppId" {
-				return "starting" // More accurate than just "running"
-			}
-			return "starting"
-		case process.ProcessStateStopping:
-			return "stopping"
-		case process.ProcessStateUnknown:
-			// For launcher games without tracking capability
-			return "launcher-triggered"
-		case process.ProcessStateStopped:
-			// Clean up the stopped process
-			s.cleanupStoppedGame(gameID)
-			return "stopped"
-		}
-	}
-
-	// Fallback to old logic for compatibility
+	// Simple stateless approach: directly query the system state
 	launchMode := controller.GetLaunchMode()
 
-	// For Steam/Epic launcher games, we use different status reporting
+	// For Steam/Epic launcher games, check the actual game process
 	if launchMode == "SteamAppId" || launchMode == "EpicAppId" {
-		// Check if we can track the actual game process
 		if controller.IsRunning() {
 			return "running" // We can track it and it's running
 		} else {
-			// Check if the launcher process is still active (shouldn't normally happen)
+			// Check if the launcher process is still active
 			if controller.IsLauncherProcessRunning() {
 				return "launcher-running" // Launcher process is still active
 			}
 			
-			// Launcher has exited (normal) - determine if we have tracking capability
+			// Launcher has exited - determine if we have tracking capability
 			game := s.getGameFromController(controller)
 			if game != nil && game.StopProcessName != "" {
 				// We have tracking capability but game is not running
@@ -655,7 +622,7 @@ func (s *Server) checkGameStatus(gameID string) string {
 	}
 
 	// For direct processes, check if the process is actually running
-	if controller != nil && controller.IsRunning() {
+	if controller.IsRunning() {
 		return "running"
 	}
 
@@ -666,15 +633,8 @@ func (s *Server) checkGameStatus(gameID string) string {
 
 // cleanupStoppedGame centralizes the cleanup logic for stopped games
 func (s *Server) cleanupStoppedGame(gameID string) {
-	// Remove from games map
-	if controller, exists := s.games[gameID]; exists {
-		delete(s.games, gameID)
-		
-		// Clean up controller resources if it supports it
-		if adapter, ok := controller.(*process.ControllerAdapter); ok {
-			adapter.Cleanup()
-		}
-	}
+	// Remove from games map - no need for complex cleanup in stateless approach
+	delete(s.games, gameID)
 	
 	// Note: The mutex is already held when this is called from checkGameStatus
 	// So we call internal cleanup methods that don't acquire locks
@@ -684,21 +644,21 @@ func (s *Server) cleanupStoppedGame(gameID string) {
 	s.log.Debugw("cleaned up dead game process and resources", "gameId", gameID)
 }
 
-// startGame starts a game process using the process controller and sets up GABP bridge
+// startGame starts a game process using the serialized starter approach
+// This implements @pardeike's requirements for serialized, verified process starting
 func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration) error {
+	// Check if already running (this is still needed for safety)
 	s.mu.Lock()
-	
-	// Check if already running
 	if controller, exists := s.games[game.ID]; exists && controller != nil && controller.IsRunning() {
 		s.mu.Unlock()
 		return fmt.Errorf("game %s is already running", game.ID)
 	}
-
+	
 	// Clean up any stale controller reference
 	delete(s.games, game.ID)
 	s.mu.Unlock()
 
-	// Create GABP bridge configuration (always local for GABS)
+	// Create GABP bridge configuration (prepare environment variables)
 	port, token, bridgePath, err := config.WriteBridgeJSONWithConfig(game.ID, s.configDir, gamesConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create bridge config for game '%s': %w", game.ID, err)
@@ -726,24 +686,33 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	// Set bridge connection info for environment variables
 	controller.SetBridgeInfo(port, token)
 
-	// Start the game
-	if err := controller.Start(); err != nil {
+	// Use serialized starter with verification
+	// This implements the asynchronous handling requested by @pardeike
+	gabpConnector := NewServerGABPConnector(s)
+	result := s.starter.StartWithVerification(controller, gabpConnector, game.ID, port, token)
+	
+	if result.Error != nil {
 		return fmt.Errorf("failed to start game '%s' (mode: %s, target: %s): %w", 
-			game.ID, game.LaunchMode, game.Target, err)
+			game.ID, game.LaunchMode, game.Target, result.Error)
 	}
 
-	// Track the running game - need to acquire lock again for this operation
+	// Track the running game
 	s.mu.Lock()
 	s.games[game.ID] = controller
 	s.mu.Unlock()
 
-	s.log.Infow("game started with GABP bridge", "gameId", game.ID, "mode", game.LaunchMode, "pid", controller.GetPID(), "gabpPort", port)
-
-	// Start GABP connection attempt in background with retry logic
-	// This ensures AI agents are notified when tool sets expand dynamically
-	// NOTE: We launch this goroutine after releasing the mutex to prevent deadlock
-	// since establishGABPConnection will eventually call RegisterGameTool which needs the mutex
-	go s.establishGABPConnection(game.ID, port, token, backoffMin, backoffMax)
+	// Log the result with detailed status
+	logMsg := fmt.Sprintf("game started with GABP bridge (pid: %d, port: %d)", controller.GetPID(), port)
+	if result.ProcessStarted {
+		logMsg += ", process verified"
+	}
+	if result.GABPConnected {
+		logMsg += ", GABP connected"
+	} else {
+		logMsg += ", GABP connection failed/timeout"
+	}
+	
+	s.log.Infow(logMsg, "gameId", game.ID, "mode", game.LaunchMode, "processStarted", result.ProcessStarted, "gabpConnected", result.GABPConnected)
 
 	return nil
 }
