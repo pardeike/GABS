@@ -56,8 +56,8 @@ func (s *SerializedStarter) StartWithVerification(
 
 	// Phase 2: Wait for process to be detectable in system
 	// This is important for launcher-based games where there's a delay
-	if refactoredController, ok := controller.(*RefactoredController); ok {
-		if err := refactoredController.WaitForProcessStart(s.processStartTimeout); err != nil {
+	if controller, ok := controller.(*Controller); ok {
+		if err := controller.WaitForProcessStart(s.processStartTimeout); err != nil {
 			// Process didn't start or isn't detectable
 			result.Error = err
 			return result
@@ -118,19 +118,4 @@ func (s *SerializedStarter) SetTimeouts(processStart, gabpConnect time.Duration)
 // GABPConnector interface for testing and abstraction
 type GABPConnector interface {
 	AttemptConnection(gameID string, port int, token string) bool
-}
-
-// ControllerInterface defines the methods needed from a controller
-// This allows using either the original or refactored controller
-type ControllerInterface interface {
-	Configure(spec LaunchSpec) error
-	SetBridgeInfo(port int, token string)
-	Start() error
-	Stop(grace time.Duration) error
-	Kill() error
-	IsRunning() bool
-	GetPID() int
-	GetLaunchMode() string
-	GetStopProcessName() string
-	IsLauncherProcessRunning() bool
 }
