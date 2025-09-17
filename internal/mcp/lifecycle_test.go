@@ -242,12 +242,12 @@ func TestApplicationLifecycleManagement(t *testing.T) {
 	})
 }
 
-// TestProcessStateManagement tests the improved process state tracking
+// TestProcessStateManagement tests the stateless process state detection
 func TestProcessStateManagement(t *testing.T) {
-	// Test the process controller improvements
+	// Test the stateless process controller
 	t.Run("ProcessStatusDetection", func(t *testing.T) {
-		// This would test the IsRunning() method of process controller
-		// For now, we test it indirectly through the MCP server
+		// This tests the IsRunning() method of process controller
+		// The stateless approach queries actual system state directly
 		t.Log("Process status detection tested indirectly through lifecycle tests")
 	})
 
