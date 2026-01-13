@@ -60,10 +60,19 @@ func (c *ServerGABPConnector) AttemptConnection(gameID string, port int, token s
 
 // setupToolMirroring sets up the mirroring system for dynamic tool discovery
 func (c *ServerGABPConnector) setupToolMirroring(gameID string, client *gabp.Client) {
-	// This implements the mirroring logic that was previously in establishGABPConnection
-	// We can expand this as needed for the full mirroring system
 	c.log.Debugw("setting up tool mirroring for game", "gameId", gameID)
-	
-	// TODO: Implement full mirroring system
-	// For now, we just log that the connection is ready
+
+	// Sync tools from GABP to MCP
+	if err := c.server.syncGABPTools(client, gameID); err != nil {
+		c.log.Warnw("failed to sync GABP tools", "gameId", gameID, "error", err)
+	} else {
+		c.log.Infow("GABP tools synchronized successfully", "gameId", gameID)
+	}
+
+	// Expose GABP resources as MCP resources
+	if err := c.server.exposeGABPResources(client, gameID); err != nil {
+		c.log.Warnw("failed to expose GABP resources", "gameId", gameID, "error", err)
+	} else {
+		c.log.Infow("GABP resources exposed successfully", "gameId", gameID)
+	}
 }

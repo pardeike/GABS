@@ -292,6 +292,24 @@ func (c *Client) sendRequest(method string, params interface{}) (interface{}, er
 	}
 }
 
+// ToolParameter represents a tool parameter from Lib.GAB
+type ToolParameter struct {
+	Name         string      `json:"name"`
+	Type         string      `json:"type"`
+	Description  string      `json:"description,omitempty"`
+	Required     bool        `json:"required"`
+	DefaultValue interface{} `json:"defaultValue,omitempty"`
+}
+
+// ToolDescriptorRaw is the raw format from Lib.GAB
+type ToolDescriptorRaw struct {
+	Name         string          `json:"name"`
+	Description  string          `json:"description,omitempty"`
+	Parameters   []ToolParameter `json:"parameters,omitempty"`
+	RequiresAuth bool            `json:"requiresAuth,omitempty"`
+}
+
+// ToolDescriptor is the normalized format for MCP
 type ToolDescriptor struct {
 	Name         string                 `json:"name"`
 	Title        string                 `json:"title,omitempty"`
@@ -301,15 +319,88 @@ type ToolDescriptor struct {
 	Tags         []string               `json:"tags,omitempty"`
 }
 
+// convertToToolDescriptor converts a raw Lib.GAB tool descriptor to MCP format
+func convertToToolDescriptor(raw ToolDescriptorRaw) ToolDescriptor {
+	// Build JSON Schema from parameters
+	properties := make(map[string]interface{})
+	required := []string{}
+
+	for _, p := range raw.Parameters {
+		prop := map[string]interface{}{
+			"type": mapTypeToJSONSchema(p.Type),
+		}
+		if p.Description != "" {
+			prop["description"] = p.Description
+		}
+		if p.DefaultValue != nil {
+			prop["default"] = p.DefaultValue
+		}
+		properties[p.Name] = prop
+
+		if p.Required {
+			required = append(required, p.Name)
+		}
+	}
+
+	inputSchema := map[string]interface{}{
+		"type":       "object",
+		"properties": properties,
+	}
+	if len(required) > 0 {
+		inputSchema["required"] = required
+	}
+
+	return ToolDescriptor{
+		Name:        raw.Name,
+		Description: raw.Description,
+		InputSchema: inputSchema,
+	}
+}
+
+// mapTypeToJSONSchema converts C# type names to JSON Schema types
+func mapTypeToJSONSchema(typeName string) string {
+	switch typeName {
+	case "String", "string":
+		return "string"
+	case "Int32", "Int64", "int", "long":
+		return "integer"
+	case "Single", "Double", "float", "double":
+		return "number"
+	case "Boolean", "bool":
+		return "boolean"
+	default:
+		return "string"
+	}
+}
+
 func (c *Client) ListTools() ([]ToolDescriptor, error) {
 	result, err := c.sendRequest("tools/list", map[string]interface{}{})
 	if err != nil {
 		return nil, err
 	}
 
-	var tools []ToolDescriptor
-	if err := mapToStruct(result, &tools); err != nil {
+	// The response is { "tools": [...] }, so extract the tools array
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("unexpected response type: %T", result)
+	}
+
+	toolsData, exists := resultMap["tools"]
+	if !exists {
+		// No tools registered
+		return []ToolDescriptor{}, nil
+	}
+
+	// Parse as raw format from Lib.GAB
+	var rawTools []ToolDescriptorRaw
+	if err := mapToStruct(toolsData, &rawTools); err != nil {
 		return nil, fmt.Errorf("failed to parse tools: %w", err)
+	}
+
+	// Convert to MCP format
+	tools := make([]ToolDescriptor, len(rawTools))
+	for i, raw := range rawTools {
+		tools[i] = convertToToolDescriptor(raw)
 	}
 
 	return tools, nil
