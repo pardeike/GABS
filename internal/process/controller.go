@@ -182,10 +182,15 @@ func (c *Controller) IsRunning() bool {
 		return c.isRunningByName()
 	}
 
-	// On Windows, Signal(0) is not supported and always returns an error.
-	// Fall back to process name lookup which uses tasklist.
+	// On Windows, Signal(0) is not supported. Use tasklist to check the child PID directly.
 	if runtime.GOOS == "windows" {
-		// Try to reap the process to update ProcessState for future calls
+		pid := strconv.Itoa(c.cmd.Process.Pid)
+		checkCmd := exec.Command("tasklist", "/FI", "PID eq "+pid, "/FO", "CSV", "/NH")
+		output, err := checkCmd.Output()
+		if err == nil && strings.Contains(string(output), pid) {
+			return true
+		}
+		// Child process is dead — reap it and fall back to name lookup
 		go func() {
 			c.cmd.Wait()
 		}()
