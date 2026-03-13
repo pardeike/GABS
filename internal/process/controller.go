@@ -182,33 +182,18 @@ func (c *Controller) IsRunning() bool {
 		return c.isRunningByName()
 	}
 
-	// On Windows, Signal(0) is not supported. Use tasklist to check the child PID directly.
-	if runtime.GOOS == "windows" {
-		pid := strconv.Itoa(c.cmd.Process.Pid)
-		checkCmd := exec.Command("tasklist", "/FI", "PID eq "+pid, "/FO", "CSV", "/NH")
-		output, err := checkCmd.Output()
-		if err == nil && strings.Contains(string(output), pid) {
-			return true
-		}
-		// Child process is dead — reap it and fall back to name lookup
-		go func() {
-			c.cmd.Wait()
-		}()
-		return c.isRunningByName()
+	// Check if the child process is still alive using a lightweight OS call
+	// (Windows: OpenProcess+GetExitCodeProcess, Unix: Signal(0))
+	if isProcessAlive(c.cmd.Process.Pid) {
+		return true
 	}
 
-	// On Unix, signal 0 checks process existence without affecting it
-	err := c.cmd.Process.Signal(syscall.Signal(0))
-	if err != nil {
-		// Process is dead, try to reap it to update ProcessState
-		go func() {
-			c.cmd.Wait() // This will set ProcessState for future calls
-		}()
-		// The spawned process may have been a launcher that exited after starting
-		// the actual game process — fall back to checking by process name
-		return c.isRunningByName()
-	}
-	return true
+	// Child process is dead — reap it and fall back to name lookup
+	// (the launched exe may have been a launcher that spawned the real game and exited)
+	go func() {
+		c.cmd.Wait()
+	}()
+	return c.isRunningByName()
 }
 
 // isRunningByName checks if the game process is running by its StopProcessName.
