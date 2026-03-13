@@ -182,8 +182,13 @@ func (c *Controller) IsRunning() bool {
 		return c.isRunningByName()
 	}
 
-	// Try to signal the process with signal 0 (doesn't affect the process, just checks existence)
-	// This is the most reliable cross-platform approach
+	// On Windows, Signal(0) is not supported and always returns an error.
+	// Since ProcessState is nil (checked above), the process hasn't exited yet.
+	if runtime.GOOS == "windows" {
+		return true
+	}
+
+	// On Unix, signal 0 checks process existence without affecting it
 	err := c.cmd.Process.Signal(syscall.Signal(0))
 	if err != nil {
 		// Process is dead, try to reap it to update ProcessState
