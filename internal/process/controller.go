@@ -174,12 +174,12 @@ func (c *Controller) IsRunning() bool {
 
 	// For direct processes, check the managed process
 	if c.cmd == nil || c.cmd.Process == nil {
-		return false
+		return c.isRunningByName()
 	}
 
 	// Check if the process has already been waited for
 	if c.cmd.ProcessState != nil {
-		return false
+		return c.isRunningByName()
 	}
 
 	// Try to signal the process with signal 0 (doesn't affect the process, just checks existence)
@@ -190,9 +190,26 @@ func (c *Controller) IsRunning() bool {
 		go func() {
 			c.cmd.Wait() // This will set ProcessState for future calls
 		}()
-		return false
+		// The spawned process may have been a launcher that exited after starting
+		// the actual game process — fall back to checking by process name
+		return c.isRunningByName()
 	}
 	return true
+}
+
+// isRunningByName checks if the game process is running by its StopProcessName.
+// This is used as a fallback when the direct child process has exited, which happens
+// when the launched executable is a launcher/loader that spawns the actual game process
+// and then exits (e.g., BLSE for Bannerlord, mod loaders, etc.).
+func (c *Controller) isRunningByName() bool {
+	if c.spec.StopProcessName == "" {
+		return false
+	}
+	pids, err := findProcessesByName(c.spec.StopProcessName)
+	if err != nil {
+		return false
+	}
+	return len(pids) > 0
 }
 
 // WaitForProcessStart waits for the process to be detectable in the system
