@@ -183,9 +183,13 @@ func (c *Controller) IsRunning() bool {
 	}
 
 	// On Windows, Signal(0) is not supported and always returns an error.
-	// Since ProcessState is nil (checked above), the process hasn't exited yet.
+	// Fall back to process name lookup which uses tasklist.
 	if runtime.GOOS == "windows" {
-		return true
+		// Try to reap the process to update ProcessState for future calls
+		go func() {
+			c.cmd.Wait()
+		}()
+		return c.isRunningByName()
 	}
 
 	// On Unix, signal 0 checks process existence without affecting it
