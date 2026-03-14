@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -278,7 +279,9 @@ func TestGABPConnectionBackoffLogic(t *testing.T) {
 	backoffMax := 5 * time.Second
 
 	// This will fail to connect to a non-existent server, but it should try with proper backoff
-	err := client.Connect("127.0.0.1:12345", "fake-token", backoffMin, backoffMax)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := client.Connect(ctx, "127.0.0.1:12345", "fake-token", backoffMin, backoffMax)
 	
 	// We expect this to fail - we're just testing that the interface works
 	if err == nil {

@@ -63,7 +63,7 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 		t.Logf("Phase 1 - Available tools: %s", responseStr)
 
 		// Verify AI sees only core game management tools
-		expectedCoreTools := []string{"games.list", "games.start", "games.stop", "games.kill", "games.status", "games.tools"}
+		expectedCoreTools := []string{"games.list", "games.start", "games.stop", "games.kill", "games.status", "games.tools", "games.connect", "games.call_tool"}
 		for _, tool := range expectedCoreTools {
 			if !strings.Contains(responseStr, tool) {
 				t.Errorf("Expected core tool '%s' not found", tool)

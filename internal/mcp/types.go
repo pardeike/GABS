@@ -87,11 +87,11 @@ type ServerInfo struct {
 
 // Tool represents a tool definition
 type Tool struct {
-	Name        string                 `json:"name"`
-	Description string                 `json:"description,omitempty"`
-	InputSchema map[string]interface{} `json:"inputSchema"`
-	// Meta field to store original name and other metadata
-	Meta map[string]interface{} `json:"_meta,omitempty"`
+	Name         string                 `json:"name"`
+	Description  string                 `json:"description,omitempty"`
+	InputSchema  map[string]interface{} `json:"inputSchema"`
+	OutputSchema map[string]interface{} `json:"outputSchema,omitempty"`
+	Meta         map[string]interface{} `json:"_meta,omitempty"`
 }
 
 // ToolsListResult represents the tools/list response

@@ -1,6 +1,7 @@
 package gabp
 
 import (
+	"context"
 	"math"
 	"net"
 	"testing"
@@ -28,36 +29,27 @@ func TestExponentialBackoff(t *testing.T) {
 		t.Skip("Test port is actually in use, skipping backoff test")
 	}
 
+	timeout := 200 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
 	start := time.Now()
-	err := client.Connect(nonExistentAddr, "test-token", backoffMin, backoffMax)
+	err := client.Connect(ctx, nonExistentAddr, "test-token", backoffMin, backoffMax)
 	duration := time.Since(start)
 
-	// Should fail after all retries
 	if err == nil {
 		t.Fatal("Expected connection to fail")
 	}
 
-	// With 5 attempts and exponential backoff:
-	// Attempt 1: immediate
-	// Attempt 2: wait ~10ms (backoffMin * 2^0 = 10ms)
-	// Attempt 3: wait ~20ms (backoffMin * 2^1 = 20ms) 
-	// Attempt 4: wait ~40ms (backoffMin * 2^2 = 40ms)
-	// Attempt 5: wait ~80ms (backoffMin * 2^3 = 80ms)
-	// Total expected: ~150ms, but with jitter it could vary ±25%
-	
-	expectedMin := time.Duration(float64(10+20+40+80) * 0.75 * float64(time.Millisecond)) // 112.5ms with jitter
-	expectedMax := time.Duration(float64(10+20+40+80) * 1.25 * float64(time.Millisecond)) // 187.5ms with jitter
-	
-	// Allow some tolerance for system scheduling
-	if duration < expectedMin/2 {
-		t.Errorf("Backoff too short: expected at least %v, got %v", expectedMin/2, duration)
+	// Should run until the context deadline, retrying with backoff
+	if duration < timeout/2 {
+		t.Errorf("Backoff too short: expected ~%v, got %v", timeout, duration)
 	}
-	
-	if duration > expectedMax*2 {
-		t.Errorf("Backoff too long: expected at most %v, got %v", expectedMax*2, duration)
+	if duration > timeout+100*time.Millisecond {
+		t.Errorf("Didn't stop promptly after context cancellation: %v", duration)
 	}
 
-	t.Logf("Total backoff duration: %v (expected range: %v - %v)", duration, expectedMin, expectedMax)
+	t.Logf("Total backoff duration: %v (timeout: %v)", duration, timeout)
 }
 
 // Test that backoff respects the maximum delay
@@ -76,23 +68,24 @@ func TestBackoffMaximum(t *testing.T) {
 		t.Skip("Test port is actually in use, skipping backoff test")
 	}
 
+	timeout := 50 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
 	start := time.Now()
-	err := client.Connect(nonExistentAddr, "test-token", backoffMin, backoffMax)
+	err := client.Connect(ctx, nonExistentAddr, "test-token", backoffMin, backoffMax)
 	duration := time.Since(start)
 
 	if err == nil {
 		t.Fatal("Expected connection to fail")
 	}
 
-	// With max of 5ms, later attempts should be capped
-	// All delays should be ≤ 5ms * 1.25 (jitter) = 6.25ms
-	maxExpected := time.Duration(float64(5*4) * 1.25 * float64(time.Millisecond)) // 4 waits, max 5ms each with jitter
-	
-	if duration > maxExpected*2 { // Allow system tolerance  
-		t.Errorf("Backoff exceeded maximum: expected at most %v, got %v", maxExpected*2, duration)
+	// With 5ms max backoff, should get many attempts within the timeout
+	if duration > timeout+100*time.Millisecond {
+		t.Errorf("Didn't stop promptly after context cancellation: %v", duration)
 	}
 
-	t.Logf("Capped backoff duration: %v (max expected: %v)", duration, maxExpected)
+	t.Logf("Capped backoff duration: %v (timeout: %v)", duration, timeout)
 }
 
 // Test that jitter provides variation in delays
@@ -115,7 +108,9 @@ func TestBackoffJitter(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		client := NewClient(log)
 		start := time.Now()
-		client.Connect(nonExistentAddr, "test-token", backoffMin, backoffMax)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		client.Connect(ctx, nonExistentAddr, "test-token", backoffMin, backoffMax)
 		durations = append(durations, time.Since(start))
 	}
 

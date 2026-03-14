@@ -60,9 +60,10 @@ func (m *Mirror) SyncTools() error {
 		gameSpecificName := fmt.Sprintf("%s.%s", m.gameId, sanitizedToolName)
 
 		mcpTool := mcp.Tool{
-			Name:        gameSpecificName,
-			Description: fmt.Sprintf("%s (Game: %s)", tool.Description, m.gameId),
-			InputSchema: tool.InputSchema,
+			Name:         gameSpecificName,
+			Description:  fmt.Sprintf("%s (Game: %s)", tool.Description, m.gameId),
+			InputSchema:  tool.InputSchema,
+			OutputSchema: tool.OutputSchema,
 		}
 
 		// Create handler that forwards to GABP with original tool name

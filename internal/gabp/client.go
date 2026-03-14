@@ -1,6 +1,7 @@
 package gabp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -100,57 +101,53 @@ func NewClient(log util.Logger) *Client {
 	}
 }
 
-func (c *Client) Connect(addr string, token string, backoffMin, backoffMax time.Duration) error {
+// Connect dials the GABP server and performs the handshake.
+// Retries with exponential backoff until ctx is cancelled.
+func (c *Client) Connect(ctx context.Context, addr string, token string, backoffMin, backoffMax time.Duration) error {
 	c.token = token
 
-	// Connect with retry/backoff
 	var conn net.Conn
 	var err error
 
-	// Implement proper exponential backoff with jitter
-	// Respects backoffMin and backoffMax parameters with exponential growth
-	// and randomized jitter to avoid thundering herd problems when multiple games
-	// try to connect simultaneously.
-	for attempts := 0; attempts < 5; attempts++ {
-		conn, err = net.Dial("tcp", addr)
+	for attempts := 0; ; attempts++ {
+		if ctx.Err() != nil {
+			return fmt.Errorf("connect cancelled: %w", ctx.Err())
+		}
+
+		var d net.Dialer
+		conn, err = d.DialContext(ctx, "tcp", addr)
 		if err == nil {
 			break
 		}
 		c.log.Warnw("connection attempt failed", "attempt", attempts+1, "error", err)
-		
-		// Don't wait after the last attempt
-		if attempts == 4 {
-			break
+
+		if ctx.Err() != nil {
+			return fmt.Errorf("connect cancelled after %d attempts: %w", attempts+1, ctx.Err())
 		}
-		
-		// Calculate exponential backoff: backoffMin * 2^attempts
+
 		multiplier := math.Pow(2, float64(attempts))
 		backoffDelay := time.Duration(float64(backoffMin) * multiplier)
-		
-		// Cap at backoffMax
 		if backoffDelay > backoffMax {
 			backoffDelay = backoffMax
 		}
-		
-		// Add jitter: ±25% randomization to prevent thundering herd
+
+		// Add ±25% jitter
 		jitterRange := float64(backoffDelay) * 0.25
 		jitter := time.Duration(rand.Float64()*2*jitterRange - jitterRange)
 		finalDelay := backoffDelay + jitter
-		
-		// Ensure we never go below backoffMin or above backoffMax
 		if finalDelay < backoffMin {
 			finalDelay = backoffMin
 		}
 		if finalDelay > backoffMax {
 			finalDelay = backoffMax
 		}
-		
-		c.log.Debugw("backing off before retry", "attempt", attempts+1, "delay", finalDelay, "baseDelay", backoffDelay)
-		time.Sleep(finalDelay)
-	}
 
-	if err != nil {
-		return fmt.Errorf("failed to connect after retries: %w", err)
+		c.log.Debugw("backing off before retry", "attempt", attempts+1, "delay", finalDelay)
+		select {
+		case <-time.After(finalDelay):
+		case <-ctx.Done():
+			return fmt.Errorf("connect cancelled during backoff: %w", ctx.Err())
+		}
 	}
 
 	c.conn = conn
@@ -260,6 +257,10 @@ func (c *Client) handleEvent(msg *util.GABPMessage) {
 }
 
 func (c *Client) sendRequest(method string, params interface{}) (interface{}, error) {
+	return c.sendRequestWithTimeout(method, params, 30*time.Second)
+}
+
+func (c *Client) sendRequestWithTimeout(method string, params interface{}, timeout time.Duration) (interface{}, error) {
 	req := util.NewGABPRequest(method, params)
 
 	// Register response channel
@@ -287,8 +288,8 @@ func (c *Client) sendRequest(method string, params interface{}) (interface{}, er
 			return nil, fmt.Errorf("GABP error %d: %s", resp.Error.Code, resp.Error.Message)
 		}
 		return resp.Result, nil
-	case <-time.After(30 * time.Second):
-		return nil, fmt.Errorf("request timeout")
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("request timeout after %s", timeout)
 	}
 }
 
@@ -303,10 +304,11 @@ type ToolParameter struct {
 
 // ToolDescriptorRaw is the raw format from Lib.GAB
 type ToolDescriptorRaw struct {
-	Name         string          `json:"name"`
-	Description  string          `json:"description,omitempty"`
-	Parameters   []ToolParameter `json:"parameters,omitempty"`
-	RequiresAuth bool            `json:"requiresAuth,omitempty"`
+	Name         string                 `json:"name"`
+	Description  string                 `json:"description,omitempty"`
+	Parameters   []ToolParameter        `json:"parameters,omitempty"`
+	OutputSchema map[string]interface{} `json:"outputSchema,omitempty"`
+	RequiresAuth bool                   `json:"requiresAuth,omitempty"`
 }
 
 // ToolDescriptor is the normalized format for MCP
@@ -321,7 +323,6 @@ type ToolDescriptor struct {
 
 // convertToToolDescriptor converts a raw Lib.GAB tool descriptor to MCP format
 func convertToToolDescriptor(raw ToolDescriptorRaw) ToolDescriptor {
-	// Build JSON Schema from parameters
 	properties := make(map[string]interface{})
 	required := []string{}
 
@@ -351,9 +352,10 @@ func convertToToolDescriptor(raw ToolDescriptorRaw) ToolDescriptor {
 	}
 
 	return ToolDescriptor{
-		Name:        raw.Name,
-		Description: raw.Description,
-		InputSchema: inputSchema,
+		Name:         raw.Name,
+		Description:  raw.Description,
+		InputSchema:  inputSchema,
+		OutputSchema: raw.OutputSchema,
 	}
 }
 
@@ -387,7 +389,6 @@ func (c *Client) ListTools() ([]ToolDescriptor, error) {
 
 	toolsData, exists := resultMap["tools"]
 	if !exists {
-		// No tools registered
 		return []ToolDescriptor{}, nil
 	}
 
@@ -407,12 +408,17 @@ func (c *Client) ListTools() ([]ToolDescriptor, error) {
 }
 
 func (c *Client) CallTool(name string, args map[string]any) (map[string]any, bool, error) {
+	return c.CallToolWithTimeout(name, args, 30*time.Second)
+}
+
+// CallToolWithTimeout calls a tool with a custom timeout
+func (c *Client) CallToolWithTimeout(name string, args map[string]any, timeout time.Duration) (map[string]any, bool, error) {
 	params := map[string]interface{}{
 		"name":       name,
 		"parameters": args,
 	}
 
-	result, err := c.sendRequest("tools/call", params)
+	result, err := c.sendRequestWithTimeout("tools/call", params, timeout)
 	if err != nil {
 		return nil, true, err
 	}

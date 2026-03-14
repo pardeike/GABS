@@ -538,7 +538,6 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		// Resolve game ID
 		game, exists := s.resolveGameId(gamesConfig, gameIdArg)
 		if !exists {
 			return &ToolResult{
@@ -547,7 +546,6 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		// Check if game is running
 		status := s.checkGameStatus(game.ID)
 		if status != "running" {
 			return &ToolResult{
@@ -556,55 +554,159 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		// Read bridge config to get port and token
 		_, port, token, err := config.ReadBridgeJSON(game.ID, s.configDir)
 		if err != nil {
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to read bridge config for '%s': %v. The game may not have been started via GABS.", game.ID, err)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to read bridge config for '%s': %v", game.ID, err)}},
 				IsError: true,
 			}, nil
 		}
 
-		// Check if already connected
+		// Check if already connected - re-sync tools
 		s.mu.RLock()
-		_, alreadyConnected := s.gabpClients[game.ID]
+		existingClient, alreadyConnected := s.gabpClients[game.ID]
 		s.mu.RUnlock()
 
 		if alreadyConnected {
-			// Already connected - just sync tools again
-			s.mu.RLock()
-			client := s.gabpClients[game.ID]
-			s.mu.RUnlock()
-
-			if err := s.syncGABPTools(client, game.ID); err != nil {
+			if err := s.syncGABPTools(existingClient, game.ID); err != nil {
 				return &ToolResult{
 					Content: []Content{{Type: "text", Text: fmt.Sprintf("Already connected to '%s' but failed to sync tools: %v", game.ID, err)}},
 					IsError: true,
 				}, nil
 			}
-
 			toolCount := len(s.getGameSpecificTools(game.ID))
 			return &ToolResult{
 				Content: []Content{{Type: "text", Text: fmt.Sprintf("Already connected to '%s'. Re-synced %d tools.", game.ID, toolCount)}},
 			}, nil
 		}
 
-		// Attempt GABP connection
 		connector := NewServerGABPConnector(s)
-		success := connector.AttemptConnection(game.ID, port, token)
-
+		connectCtx, connectCancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer connectCancel()
+		success := connector.AttemptConnection(connectCtx, game.ID, port, token)
 		if !success {
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to connect to GABP server for '%s' on port %d. Make sure the game mod is loaded and the GABP server is running.", game.ID, port)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to connect to GABP server for '%s' on port %d. Make sure the game mod is loaded.", game.ID, port)}},
 				IsError: true,
 			}, nil
 		}
 
-		// Get tool count after connection
 		toolCount := len(s.getGameSpecificTools(game.ID))
-
 		return &ToolResult{
 			Content: []Content{{Type: "text", Text: fmt.Sprintf("Successfully connected to '%s' GABP server on port %d. Discovered %d tools.", game.ID, port, toolCount)}},
+		}, nil
+	}, normalizationConfig)
+
+	// games.call_tool - Proxy tool calls to a game's GABP server
+	s.RegisterToolWithConfig(Tool{
+		Name:        "games.call_tool",
+		Description: "Call a game-specific tool on a running game via its GABP connection. Use games.tools to discover available tools first.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"gameId": map[string]interface{}{
+					"type":        "string",
+					"description": "Game ID to call the tool on (required)",
+				},
+				"tool": map[string]interface{}{
+					"type":        "string",
+					"description": "Tool name as returned by games.tools (required). Use the full name including any namespace prefix, e.g. 'bannerlord.core/ping'.",
+				},
+				"arguments": map[string]interface{}{
+					"type":        "object",
+					"description": "Arguments to pass to the tool (optional, depends on tool)",
+				},
+				"timeout": map[string]interface{}{
+					"type":        "integer",
+					"description": "Request timeout in seconds (optional, default 30). Increase for long-running tools like wait_for_screen.",
+				},
+			},
+			"required": []string{"gameId", "tool"},
+		},
+	}, func(args map[string]interface{}) (*ToolResult, error) {
+		gameIdArg, ok := args["gameId"].(string)
+		if !ok || gameIdArg == "" {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: "Missing required argument: gameId"}},
+				IsError: true,
+			}, nil
+		}
+
+		toolName, ok := args["tool"].(string)
+		if !ok || toolName == "" {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: "Missing required argument: tool"}},
+				IsError: true,
+			}, nil
+		}
+
+		toolArgs, _ := args["arguments"].(map[string]interface{})
+		if toolArgs == nil {
+			toolArgs = map[string]interface{}{}
+		}
+
+		// Parse optional timeout (in seconds), default 30s, max 120s
+		timeout := 30 * time.Second
+		if timeoutArg, ok := args["timeout"].(float64); ok && timeoutArg > 0 {
+			timeout = time.Duration(timeoutArg) * time.Second
+			if timeout > 120*time.Second {
+				timeout = 120 * time.Second
+			}
+		}
+
+		game, exists := s.resolveGameId(gamesConfig, gameIdArg)
+		if !exists {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games.list to see available games.", gameIdArg)}},
+				IsError: true,
+			}, nil
+		}
+
+		// Get the GABP client for this game
+		s.mu.RLock()
+		client, connected := s.gabpClients[game.ID]
+		s.mu.RUnlock()
+
+		if !connected {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' is not connected via GABP. Use games.connect to establish a connection first.", game.ID)}},
+				IsError: true,
+			}, nil
+		}
+
+		// Forward the tool call to the game's GABP server
+		result, isError, err := client.CallToolWithTimeout(toolName, toolArgs, timeout)
+		if err != nil {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("GABP tool call failed: %v", err)}},
+				IsError: true,
+			}, nil
+		}
+
+		if isError {
+			return &ToolResult{
+				Content:           []Content{{Type: "text", Text: fmt.Sprintf("Tool error: %v", result)}},
+				StructuredContent: result,
+				IsError:           true,
+			}, nil
+		}
+
+		// Convert result to text content
+		content := []Content{}
+		if resultText, ok := result["text"].(string); ok {
+			content = append(content, Content{Type: "text", Text: resultText})
+		} else {
+			if jsonData, err := json.Marshal(result); err != nil {
+				content = append(content, Content{Type: "text", Text: fmt.Sprintf("%v", result)})
+			} else {
+				content = append(content, Content{Type: "text", Text: string(jsonData)})
+			}
+		}
+
+		return &ToolResult{
+			Content:           content,
+			StructuredContent: result,
+			IsError:           false,
 		}, nil
 	}, normalizationConfig)
 }
@@ -845,7 +947,9 @@ func (s *Server) establishGABPConnection(gameID string, port int, token string, 
 	s.mu.Unlock()
 
 	// Attempt connection with retry logic (handles game mod startup delays)
-	err := client.Connect(addr, token, backoffMin, backoffMax)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	err := client.Connect(ctx, addr, token, backoffMin, backoffMax)
 	if err != nil {
 		s.log.Warnw("failed to establish GABP connection - game may not support GABP", 
 			"gameId", gameID, "addr", addr, "error", err)

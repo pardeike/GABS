@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -23,27 +24,23 @@ func NewServerGABPConnector(server *Server) *ServerGABPConnector {
 }
 
 // AttemptConnection implements the GABPConnector interface
-func (c *ServerGABPConnector) AttemptConnection(gameID string, port int, token string) bool {
+func (c *ServerGABPConnector) AttemptConnection(ctx context.Context, gameID string, port int, token string) bool {
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	c.log.Debugw("attempting GABP connection for game", "gameId", gameID, "addr", addr)
 
-	// Create GABP client
 	client := gabp.NewClient(c.log)
 
-	// Store client reference for cleanup
 	c.server.mu.Lock()
 	c.server.gabpClients[gameID] = client
 	c.server.mu.Unlock()
 
-	// Attempt connection with retry logic
 	backoffMin := 100 * time.Millisecond
 	backoffMax := 2 * time.Second
-	
-	err := client.Connect(addr, token, backoffMin, backoffMax)
+
+	err := client.Connect(ctx, addr, token, backoffMin, backoffMax)
 	if err != nil {
 		c.log.Debugw("GABP connection failed", "gameId", gameID, "addr", addr, "error", err)
-		
-		// Clean up client reference on failure
+
 		c.server.mu.Lock()
 		delete(c.server.gabpClients, gameID)
 		c.server.mu.Unlock()
@@ -52,13 +49,13 @@ func (c *ServerGABPConnector) AttemptConnection(gameID string, port int, token s
 
 	c.log.Infow("GABP connection established", "gameId", gameID, "addr", addr)
 
-	// Set up mirroring for dynamic tool discovery
-	go c.setupToolMirroring(gameID, client)
+	// Mirror synchronously so tools are registered before games.start returns
+	c.setupToolMirroring(gameID, client)
 
 	return true
 }
 
-// setupToolMirroring sets up the mirroring system for dynamic tool discovery
+// setupToolMirroring syncs GABP tools/resources to the MCP server
 func (c *ServerGABPConnector) setupToolMirroring(gameID string, client *gabp.Client) {
 	c.log.Debugw("setting up tool mirroring for game", "gameId", gameID)
 

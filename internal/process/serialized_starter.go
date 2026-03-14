@@ -26,7 +26,7 @@ type SerializedStarter struct {
 func NewSerializedStarter() *SerializedStarter {
 	return &SerializedStarter{
 		processStartTimeout: 10 * time.Second, // Time to wait for process to appear in system
-		gabpConnectTimeout:  30 * time.Second, // Time to wait for GABP connection
+		gabpConnectTimeout:  120 * time.Second,
 	}
 }
 
@@ -75,21 +75,13 @@ func (s *SerializedStarter) StartWithVerification(
 		}
 	}
 
-	// If we reach here, the process is started and detectable
 	result.ProcessStarted = true
-	
-	// Release the serialization lock - GABP connection can happen concurrently
 	s.mu.Unlock()
 
-	// Phase 3: Attempt GABP connection (NOT serialized - can happen concurrently)
-	// This doesn't need to be serialized since it doesn't affect environment variables
-	// and multiple GABP connections can be attempted simultaneously
+	// Phase 3: Attempt GABP connection (not serialized)
 	if gabpConnector != nil {
 		connected := s.attemptGABPConnection(gabpConnector, gameID, port, token)
 		result.GABPConnected = connected
-		
-		// Note: GABP connection failure is not considered an error for the process start  
-		// The process is running, we just can't control it via GABP
 	}
 
 	return result
@@ -105,24 +97,7 @@ func (s *SerializedStarter) attemptGABPConnection(
 	ctx, cancel := context.WithTimeout(context.Background(), s.gabpConnectTimeout)
 	defer cancel()
 
-	// Create a channel to receive connection result
-	connected := make(chan bool, 1)
-
-	go func() {
-		success := connector.AttemptConnection(gameID, port, token)
-		select {
-		case connected <- success:
-		case <-ctx.Done():
-		}
-	}()
-
-	select {
-	case success := <-connected:
-		return success
-	case <-ctx.Done():
-		// Timeout - GABP connection failed but process might still be running
-		return false
-	}
+	return connector.AttemptConnection(ctx, gameID, port, token)
 }
 
 // SetTimeouts allows customization of timeout values
@@ -133,5 +108,5 @@ func (s *SerializedStarter) SetTimeouts(processStart, gabpConnect time.Duration)
 
 // GABPConnector interface for testing and abstraction
 type GABPConnector interface {
-	AttemptConnection(gameID string, port int, token string) bool
+	AttemptConnection(ctx context.Context, gameID string, port int, token string) bool
 }
