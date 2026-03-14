@@ -28,12 +28,15 @@ func (c *ServerGABPConnector) AttemptConnection(ctx context.Context, gameID stri
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	c.log.Debugw("attempting GABP connection for game", "gameId", gameID, "addr", addr)
 
+	// Create GABP client
 	client := gabp.NewClient(c.log)
 
+	// Store client reference for cleanup
 	c.server.mu.Lock()
 	c.server.gabpClients[gameID] = client
 	c.server.mu.Unlock()
 
+	// Attempt connection with retry logic
 	backoffMin := 100 * time.Millisecond
 	backoffMax := 2 * time.Second
 
@@ -41,6 +44,7 @@ func (c *ServerGABPConnector) AttemptConnection(ctx context.Context, gameID stri
 	if err != nil {
 		c.log.Debugw("GABP connection failed", "gameId", gameID, "addr", addr, "error", err)
 
+		// Clean up client reference on failure
 		c.server.mu.Lock()
 		delete(c.server.gabpClients, gameID)
 		c.server.mu.Unlock()

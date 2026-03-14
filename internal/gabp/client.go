@@ -106,9 +106,14 @@ func NewClient(log util.Logger) *Client {
 func (c *Client) Connect(ctx context.Context, addr string, token string, backoffMin, backoffMax time.Duration) error {
 	c.token = token
 
+	// Connect with retry/backoff
 	var conn net.Conn
 	var err error
 
+	// Implement proper exponential backoff with jitter.
+	// Respects backoffMin and backoffMax parameters with exponential growth
+	// and randomized jitter to avoid thundering herd problems when multiple games
+	// try to connect simultaneously.
 	for attempts := 0; ; attempts++ {
 		if ctx.Err() != nil {
 			return fmt.Errorf("connect cancelled: %w", ctx.Err())
@@ -125,16 +130,19 @@ func (c *Client) Connect(ctx context.Context, addr string, token string, backoff
 			return fmt.Errorf("connect cancelled after %d attempts: %w", attempts+1, ctx.Err())
 		}
 
+		// Calculate exponential backoff: backoffMin * 2^attempts
 		multiplier := math.Pow(2, float64(attempts))
 		backoffDelay := time.Duration(float64(backoffMin) * multiplier)
+		// Cap at backoffMax
 		if backoffDelay > backoffMax {
 			backoffDelay = backoffMax
 		}
 
-		// Add ±25% jitter
+		// Add jitter: ±25% randomization to prevent thundering herd
 		jitterRange := float64(backoffDelay) * 0.25
 		jitter := time.Duration(rand.Float64()*2*jitterRange - jitterRange)
 		finalDelay := backoffDelay + jitter
+		// Ensure we never go below backoffMin or above backoffMax
 		if finalDelay < backoffMin {
 			finalDelay = backoffMin
 		}
@@ -142,7 +150,7 @@ func (c *Client) Connect(ctx context.Context, addr string, token string, backoff
 			finalDelay = backoffMax
 		}
 
-		c.log.Debugw("backing off before retry", "attempt", attempts+1, "delay", finalDelay)
+		c.log.Debugw("backing off before retry", "attempt", attempts+1, "delay", finalDelay, "baseDelay", backoffDelay)
 		select {
 		case <-time.After(finalDelay):
 		case <-ctx.Done():

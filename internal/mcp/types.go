@@ -91,7 +91,8 @@ type Tool struct {
 	Description  string                 `json:"description,omitempty"`
 	InputSchema  map[string]interface{} `json:"inputSchema"`
 	OutputSchema map[string]interface{} `json:"outputSchema,omitempty"`
-	Meta         map[string]interface{} `json:"_meta,omitempty"`
+	// Meta field to store original name and other metadata
+	Meta map[string]interface{} `json:"_meta,omitempty"`
 }
 
 // ToolsListResult represents the tools/list response
