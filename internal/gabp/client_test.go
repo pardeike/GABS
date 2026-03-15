@@ -108,9 +108,9 @@ func TestBackoffJitter(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		client := NewClient(log)
 		start := time.Now()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 		client.Connect(ctx, nonExistentAddr, "test-token", backoffMin, backoffMax)
+		cancel()
 		durations = append(durations, time.Since(start))
 	}
 

@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -33,6 +34,7 @@ type Controller struct {
 	spec       LaunchSpec
 	cmd        *exec.Cmd
 	bridgeInfo *BridgeInfo
+	waitOnce   sync.Once // guards c.cmd.Wait() to prevent multiple calls
 }
 
 // Configure sets up the controller with the given launch specification
@@ -188,11 +190,11 @@ func (c *Controller) IsRunning() bool {
 		return true
 	}
 
-	// Child process is dead — reap it and fall back to name lookup
+	// Child process is dead — reap it exactly once and fall back to name lookup
 	// (the launched exe may have been a launcher that spawned the real game and exited)
-	go func() {
-		c.cmd.Wait()
-	}()
+	c.waitOnce.Do(func() {
+		go c.cmd.Wait()
+	})
 	return c.isRunningByName()
 }
 
