@@ -480,7 +480,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				}
 			} else {
 				for _, tool := range gameTools {
-					content.WriteString(fmt.Sprintf("• **%s** - %s\n", tool.Name, tool.Description))
+					content.WriteString(fmt.Sprintf("• **%s** - %s", tool.Name, tool.Description))
+					writeToolParams(&content, tool)
+					content.WriteString("\n")
 				}
 			}
 		} else {
@@ -496,7 +498,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 					status := s.checkGameStatus(game.ID)
 					content.WriteString(fmt.Sprintf("**%s** (%s, %d tools):\n", game.ID, status, len(gameTools)))
 					for _, tool := range gameTools {
-						content.WriteString(fmt.Sprintf("  • %s - %s\n", tool.Name, tool.Description))
+						content.WriteString(fmt.Sprintf("  • %s - %s", tool.Name, tool.Description))
+						writeToolParams(&content, tool)
+						content.WriteString("\n")
 					}
 					content.WriteString("\n")
 				}
@@ -748,6 +752,69 @@ func (s *Server) resolveGameId(gamesConfig *config.GamesConfig, gameIdOrTarget s
 	}
 
 	return nil, false
+}
+
+// writeToolParams writes parameter and output schema info for a tool to the content builder
+func writeToolParams(content *strings.Builder, tool Tool) {
+	if tool.InputSchema != nil {
+		if props, ok := tool.InputSchema["properties"].(map[string]interface{}); ok && len(props) > 0 {
+			reqList := []string{}
+			if req, ok := tool.InputSchema["required"].([]string); ok {
+				reqList = req
+			}
+			content.WriteString("\n  Parameters:")
+			for paramName, paramDef := range props {
+				isRequired := false
+				for _, r := range reqList {
+					if r == paramName {
+						isRequired = true
+						break
+					}
+				}
+				paramType := "any"
+				paramDesc := ""
+				if pd, ok := paramDef.(map[string]interface{}); ok {
+					if t, ok := pd["type"].(string); ok {
+						paramType = t
+					}
+					if d, ok := pd["description"].(string); ok {
+						paramDesc = d
+					}
+				}
+				reqTag := ""
+				if !isRequired {
+					reqTag = ", optional"
+				}
+				if paramDesc != "" {
+					content.WriteString(fmt.Sprintf("\n    - `%s` (%s%s): %s", paramName, paramType, reqTag, paramDesc))
+				} else {
+					content.WriteString(fmt.Sprintf("\n    - `%s` (%s%s)", paramName, paramType, reqTag))
+				}
+			}
+		}
+	}
+	if tool.OutputSchema != nil {
+		if props, ok := tool.OutputSchema["properties"].(map[string]interface{}); ok && len(props) > 0 {
+			content.WriteString("\n  Returns:")
+			for fieldName, fieldDef := range props {
+				fieldType := "any"
+				fieldDesc := ""
+				if fd, ok := fieldDef.(map[string]interface{}); ok {
+					if t, ok := fd["type"].(string); ok {
+						fieldType = t
+					}
+					if d, ok := fd["description"].(string); ok {
+						fieldDesc = d
+					}
+				}
+				if fieldDesc != "" {
+					content.WriteString(fmt.Sprintf("\n    - `%s` (%s): %s", fieldName, fieldType, fieldDesc))
+				} else {
+					content.WriteString(fmt.Sprintf("\n    - `%s` (%s)", fieldName, fieldType))
+				}
+			}
+		}
+	}
 }
 
 // getGameSpecificTools returns tools that belong to a specific game
