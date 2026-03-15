@@ -7,11 +7,12 @@ import (
 	"math"
 	"math/rand"
 	"net"
-	"runtime"
+	goruntime "runtime"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	gabpruntime "github.com/pardeike/gabp-runtime/runtime"
 	"github.com/pardeike/gabs/internal/util"
 	"github.com/pardeike/gabs/internal/version"
 )
@@ -35,57 +36,13 @@ type Client struct {
 // EventHandler is a function that handles events
 type EventHandler func(channel string, seq int, payload interface{})
 
-// Capabilities represents server capabilities from welcome response
-type Capabilities struct {
-	Methods   []string `json:"methods"`
-	Events    []string `json:"events"`
-	Resources []string `json:"resources"`
-	Limits    *Limits  `json:"limits,omitempty"`
-}
-
-// Limits represents server limits
-type Limits struct {
-	MaxMessageSize        int `json:"maxMessageSize"`
-	MaxConcurrentRequests int `json:"maxConcurrentRequests"`
-	RequestTimeout        int `json:"requestTimeout"`
-}
-
-// SessionHelloParams represents the parameters for session/hello
-type SessionHelloParams struct {
-	Token         string      `json:"token"`
-	BridgeVersion string      `json:"bridgeVersion"`
-	Platform      string      `json:"platform"`
-	LaunchId      string      `json:"launchId"`
-	ClientInfo    *ClientInfo `json:"clientInfo,omitempty"`
-}
-
-// ClientInfo represents client information
-type ClientInfo struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-}
-
-// SessionWelcomeResult represents the result of session/welcome
-type SessionWelcomeResult struct {
-	AgentId       string       `json:"agentId"`
-	App           *AppInfo     `json:"app,omitempty"`
-	Capabilities  Capabilities `json:"capabilities"`
-	SchemaVersion string       `json:"schemaVersion"`
-	ServerInfo    *ServerInfo  `json:"serverInfo,omitempty"`
-}
-
-// AppInfo represents application information
-type AppInfo struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-}
-
-// ServerInfo represents server information
-type ServerInfo struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-	Author  string `json:"author,omitempty"`
-}
+type Capabilities = gabpruntime.Capabilities
+type Limits = gabpruntime.Limits
+type SessionHelloParams = gabpruntime.SessionHelloParams
+type ClientInfo = gabpruntime.ClientInfo
+type SessionWelcomeResult = gabpruntime.SessionWelcomeResult
+type AppInfo = gabpruntime.AppInfo
+type ServerInfo = gabpruntime.ServerInfo
 
 // NewClient creates a new GABP client
 func NewClient(log util.Logger) *Client {
@@ -198,16 +155,16 @@ func (c *Client) handshake() error {
 	launchId := uuid.New().String()
 	params := SessionHelloParams{
 		Token:         c.token,
-		BridgeVersion: version.Get(), // Use actual runtime version
-		Platform:      runtime.GOOS,  // Detect actual platform
-		LaunchId:      launchId,
+		BridgeVersion: version.Get(),  // Use actual runtime version
+		Platform:      goruntime.GOOS, // Detect actual platform
+		LaunchID:      launchId,
 		ClientInfo: &ClientInfo{
 			Name:    "gabs",
 			Version: version.Get(),
 		},
 	}
 
-	result, err := c.sendRequest("session/hello", params)
+	result, err := c.sendRequest(gabpruntime.MethodSessionHello, params)
 	if err != nil {
 		return fmt.Errorf("handshake failed: %w", err)
 	}
@@ -218,7 +175,7 @@ func (c *Client) handshake() error {
 		return fmt.Errorf("failed to parse welcome: %w", err)
 	}
 
-	c.agentId = welcome.AgentId
+	c.agentId = welcome.AgentID
 	c.capabilities = welcome.Capabilities
 
 	c.log.Infow("GABP handshake complete", "agentId", c.agentId, "methods", len(c.capabilities.Methods))
@@ -252,9 +209,9 @@ func (c *Client) messageHandler() {
 
 func (c *Client) handleMessage(msg *util.GABPMessage) {
 	switch msg.Type {
-	case "response":
+	case gabpruntime.MessageTypeResponse:
 		c.handleResponse(msg)
-	case "event":
+	case gabpruntime.MessageTypeEvent:
 		c.handleEvent(msg)
 	default:
 		c.log.Warnw("unknown message type", "type", msg.Type, "id", msg.ID)
@@ -424,7 +381,7 @@ func mapTypeToJSONSchema(typeName string) string {
 }
 
 func (c *Client) ListTools() ([]ToolDescriptor, error) {
-	result, err := c.sendRequest("tools/list", map[string]interface{}{})
+	result, err := c.sendRequest(gabpruntime.MethodToolsList, map[string]interface{}{})
 	if err != nil {
 		return nil, err
 	}
@@ -466,7 +423,7 @@ func (c *Client) CallToolWithTimeout(name string, args map[string]any, timeout t
 		"parameters": args,
 	}
 
-	result, err := c.sendRequestWithTimeout("tools/call", params, timeout)
+	result, err := c.sendRequestWithTimeout(gabpruntime.MethodToolsCall, params, timeout)
 	if err != nil {
 		return nil, true, err
 	}

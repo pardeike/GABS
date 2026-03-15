@@ -169,8 +169,8 @@ func serveTestGabpSession(listener net.Listener, expectedToken string, done chan
 			}
 
 			response := util.NewGABPResponse(request.ID, gabp.SessionWelcomeResult{
-				AgentId: "rimworld",
-				App: &gabp.AppInfo{
+				AgentID: "rimworld",
+				App: gabp.AppInfo{
 					Name:    "RimBridgeServer",
 					Version: "0.1.0",
 				},

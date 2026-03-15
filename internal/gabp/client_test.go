@@ -260,7 +260,7 @@ func TestConnectCompletesHandshakeWhenServerResponds(t *testing.T) {
 		}
 
 		response := util.NewGABPResponse(request.ID, SessionWelcomeResult{
-			AgentId: "rimworld",
+			AgentID: "rimworld",
 			Capabilities: Capabilities{
 				Methods:   []string{"tools/list", "tools/call"},
 				Events:    []string{"system/log"},
