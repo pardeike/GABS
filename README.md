@@ -16,7 +16,7 @@ GABS connects AI assistants to your games through a simple, secure bridge. Confi
 **For Modders:**
 - **AI-Powered Development**: Let AI help test and debug your mods
 - **Universal**: Works with any game that can add GABP support
-- **Easy Integration**: Simple JSON protocol for mod developers
+- **Easy Integration**: GABP/gabp-runtime-compatible handshake with canonical tool schemas
 
 ## How It Works
 
@@ -41,16 +41,16 @@ AI Agent ← MCP → GABS ← GABP → Game Mod ← Game API → Game
 - **Control with AI**: Natural commands through MCP tools
 - **Any game**: Works with modded games that support GABP
 - **Any AI**: Works with Claude, ChatGPT, and custom AI tools
-- **Live updates**: AI gets real-time notifications from your games
+- **Live discovery**: AI gets MCP `tools/list_changed` and `resources/list_changed` notifications as games connect
 
 ## Quick Start
 
 ### 1. Download GABS
 
 Get the latest version for your system:
-- **Windows**: [`gabs-windows-amd64.exe`](../../releases/latest)
-- **macOS**: [`gabs-darwin-arm64`](../../releases/latest)
-- **Linux**: [`gabs-linux-amd64`](../../releases/latest)
+- **Windows**: [`gabs-windows-amd64.exe`](releases/latest)
+- **macOS**: [`gabs-darwin-arm64`](releases/latest)
+- **Linux**: [`gabs-linux-amd64`](releases/latest)
 
 ### 2. Add Your Games
 
@@ -61,6 +61,9 @@ gabs games add rimworld
 
 # See what you've configured
 gabs games list
+
+# Validate one game's launch/stop setup
+gabs games show rimworld
 ```
 
 GABS will ask simple questions to set up each game:
@@ -70,6 +73,8 @@ GABS will ask simple questions to set up each game:
 - **Stop Process Name**: **Required for Steam/Epic games** - the actual game process name for proper stopping
 
 **Critical for Steam/Epic users:** GABS **requires** the actual game process name (like `RimWorldWin64.exe` for RimWorld, `java` for Minecraft) to properly stop games launched through Steam or Epic. Without this, GABS can start games but cannot stop them reliably.
+
+Use `gabs games show <game-id>` after setup to confirm the launch target and `stopProcessName` that AI will rely on.
 
 ### 3. Start the Server
 
@@ -112,35 +117,53 @@ args = ["server"]
 
 ## AI Tools Available
 
-Once connected, your AI can use these tools:
+Once connected, your AI starts with a stable MCP surface and can then discover dynamic game tools as mods connect.
 
-### Core Game Management Tools
-- **`games.list`** - Show all configured games and their status
+### Core MCP Tools
+- **`games.list`** - List configured game IDs
+- **`games.show`** - Show configuration and validation details for a specific game
 - **`games.start`** - Start a game: `{"gameId": "minecraft"}`
 - **`games.stop`** - Stop a game gracefully: `{"gameId": "minecraft"}`
 - **`games.kill`** - Force stop a game: `{"gameId": "minecraft"}`
-- **`games.status`** - Check game status: `{"gameId": "minecraft"}`
-- **`games.tools`** - List game-specific tools from connected mods
+- **`games.status`** - Check one game or all configured games
+- **`games.tools`** - List currently available game-specific tools, including parameter and return schemas
+- **`games.connect`** - Manually connect or reconnect to a running game's GABP server after the mod finishes loading or after a GABS restart
+- **`games.call_tool`** - Call a discovered game tool through the stable core surface: `{"gameId": "minecraft", "tool": "minecraft.inventory.get", "arguments": {"playerId": "steve"}}`
 
 ### Game-Specific Tools from Mods
 
-**The real power comes from GABP-compliant mods that expose their own tools!**
+**The real power comes from GABP-compliant mods that expose their own tools.**
 
-When your games have GABP mods installed, they add game-specific tools like:
-- **`minecraft.inventory.get`** - Get player inventory in Minecraft
-- **`minecraft.world.place_block`** - Place blocks in Minecraft world
-- **`rimworld.inventory.get`** - Get colonist inventory in RimWorld
-- **`rimworld.crafting.build`** - Build items in RimWorld
+GABP mods typically expose canonical tool names such as `inventory/get`, `world/place_block`, `crafting/build`, or `core/ping`. GABS now consumes the current `gabp-runtime` method surface (`session/hello`, `tools/list`, `tools/call`) and mirrors those into MCP-friendly, game-prefixed tool names such as:
+- **`minecraft.inventory.get`** - Mirrored from GABP `inventory/get`
+- **`minecraft.world.place_block`** - Mirrored from GABP `world/place_block`
+- **`rimworld.crafting.build`** - Mirrored from GABP `crafting/build`
+- **`bannerlord.core.ping`** - Mirrored from GABP `core/ping`
 
-**Game ID Prefixing**: To avoid conflicts when multiple games are running, mod tools are automatically prefixed with the game ID (e.g., `minecraft.`, `rimworld.`). This lets AI clearly specify which game to control.
+**Game ID Prefixing**: To avoid conflicts when multiple games are running, mirrored mod tools are automatically prefixed with the game ID (for example, `minecraft.` or `rimworld.`). This lets AI clearly specify which game to control, and GABS removes those mirrored tools again when the game disconnects.
 
-**Discovering Tools**: Use `games.tools` to see what tools each running game provides:
+**Discovery and Reconnect Flow**: Use the stable core tools to discover or resync a running game:
 ```
-AI: "List available tools for Minecraft"
-GABS: Shows minecraft.inventory.get, minecraft.world.place_block, etc.
+AI: "Reconnect to RimWorld and show me its mod tools"
+GABS: games.connect {"gameId": "rimworld"}
+GABS: games.tools {"gameId": "rimworld"}
 ```
 
-**Pro tip**: You can use game names (`"minecraft"`) or launch IDs (`"294100"` for Steam) interchangeably.
+If your MCP client supports dynamic tool refresh, it can call mirrored tools directly after the `tools/list_changed` notification. If it keeps a fixed tool surface, use `games.call_tool` with the mirrored name returned by `games.tools`:
+
+```json
+{
+  "gameId": "minecraft",
+  "tool": "minecraft.inventory.get",
+  "arguments": {
+    "playerId": "steve"
+  }
+}
+```
+
+Connected games also expose a state resource at `gab://<gameId>/state`.
+
+**Pro tip**: You can use game names (`"minecraft"`) or launch IDs (`"294100"` for Steam) interchangeably in the `games.*` tools. If OpenAI tool normalization is enabled, dotted MCP tool names may be normalized to underscores; the examples above use the canonical MCP names.
 
 ## Documentation
 
@@ -158,11 +181,13 @@ GABS: Shows minecraft.inventory.get, minecraft.world.place_block, etc.
 Want your game to work with GABS? Add GABP support to your mod:
 
 1. **Read GABP configuration** from environment variables when your game starts:
+   - `GABS_GAME_ID` - Your game's identifier
    - `GABP_SERVER_PORT` - Port your mod should listen on
    - `GABP_TOKEN` - Authentication token for GABS connections
-   - `GABS_GAME_ID` - Your game's identifier
-2. **Start a GABP server** to listen for GABS connections (your mod = server, GABS = client)
-3. **Expose game features** as tools, resources, and events
+   - `GABS_BRIDGE_PATH` - Optional `bridge.json` fallback/debug path
+2. **Start a local GABP server** to listen for GABS connections (your mod = server, GABS = client)
+3. **Implement the current GABP runtime methods** (`session/hello`, `tools/list`, `tools/call`) or use the official `gabp-runtime` library so your schemas match what GABS expects
+4. **Expose game features** as tools, resources, and events using canonical GABP tool names such as `inventory/get` or `core/ping`
 
 See the [Mod Development Guide](docs/MOD_DEVELOPMENT.md) for complete examples in C#, Java, and Python.
 
@@ -183,7 +208,7 @@ go build -ldflags "-X github.com/pardeike/gabs/internal/version.Version=v1.0.0" 
 
 ## Contributing & Support
 
-- **Issues & Ideas**: [GitHub Issues](../../issues)
+- **Issues & Ideas**: [GitHub Issues](issues)
 - **GABP Protocol**: [GABP Repository](https://github.com/pardeike/GABP)
 - **Example Configuration**: See `example-config.json` for sample configurations
 
