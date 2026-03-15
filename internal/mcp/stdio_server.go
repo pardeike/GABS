@@ -1472,26 +1472,25 @@ func (s *Server) cleanupBridgeConfigInternal(gameId string) {
 }
 
 func (s *Server) Serve(r io.Reader, w io.Writer) error {
-	// Implement newline-delimited JSON-RPC over stdio per MCP stdio transport
-	reader := util.NewNewlineFrameReader(r)
-	writer := util.NewNewlineFrameWriter(w)
-
-	// Track this writer for notifications
-	s.writersMu.Lock()
-	s.writers = append(s.writers, writer)
-	s.writersMu.Unlock()
+	// MCP stdio uses Content-Length framing. Keep newline-delimited JSON as a
+	// fallback so existing local clients keep working.
+	reader := util.NewAutoFrameReader(r)
+	writer := util.NewAutoFrameWriter(w)
+	writerRegistered := false
 
 	// Clean up writer on exit
 	defer func() {
-		s.writersMu.Lock()
-		// Find and remove writer from slice (safer than using index)
-		for i, w := range s.writers {
-			if w == writer {
-				s.writers = append(s.writers[:i], s.writers[i+1:]...)
-				break
+		if writerRegistered {
+			s.writersMu.Lock()
+			// Find and remove writer from slice (safer than using index)
+			for i, w := range s.writers {
+				if w == writer {
+					s.writers = append(s.writers[:i], s.writers[i+1:]...)
+					break
+				}
 			}
+			s.writersMu.Unlock()
 		}
-		s.writersMu.Unlock()
 	}()
 
 	for {
@@ -1502,6 +1501,14 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 			}
 			s.log.Errorw("failed to read message", "error", err)
 			continue
+		}
+
+		if !writerRegistered {
+			writer.SetMode(reader.Mode())
+			s.writersMu.Lock()
+			s.writers = append(s.writers, writer)
+			s.writersMu.Unlock()
+			writerRegistered = true
 		}
 
 		s.log.Debugw("received message", "method", msg.Method, "id", msg.ID)

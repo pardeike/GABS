@@ -11,10 +11,24 @@ import (
 	"github.com/google/uuid"
 )
 
+// FrameReader interface for JSON frame readers.
+type FrameReader interface {
+	ReadJSON(obj interface{}) error
+}
+
 // FrameWriter interface for JSON frame writers
 type FrameWriter interface {
 	WriteJSON(obj interface{}) error
 }
+
+// FramingMode describes how JSON messages are delimited on a stream.
+type FramingMode int
+
+const (
+	FramingUnknown FramingMode = iota
+	FramingLSP
+	FramingNewline
+)
 
 // Message represents a JSON-RPC 2.0 message
 type Message struct {
@@ -227,4 +241,103 @@ func (r *NewlineFrameReader) ReadJSON(obj interface{}) error {
 		return io.EOF
 	}
 	return json.Unmarshal(r.scanner.Bytes(), obj)
+}
+
+// AutoFrameReader detects the incoming stream framing and reads messages accordingly.
+type AutoFrameReader struct {
+	reader        *bufio.Reader
+	mode          FramingMode
+	newlineReader *NewlineFrameReader
+}
+
+// NewAutoFrameReader creates a reader that supports both Content-Length framing
+// and newline-delimited JSON. MCP stdio uses Content-Length framing, but the
+// newline variant is kept for backwards compatibility with existing clients.
+func NewAutoFrameReader(r io.Reader) *AutoFrameReader {
+	return &AutoFrameReader{
+		reader: bufio.NewReader(r),
+	}
+}
+
+// Mode returns the detected framing mode.
+func (r *AutoFrameReader) Mode() FramingMode {
+	return r.mode
+}
+
+// ReadJSON reads a single message using the detected framing.
+func (r *AutoFrameReader) ReadJSON(obj interface{}) error {
+	if r.mode == FramingUnknown {
+		mode, err := r.detectMode()
+		if err != nil {
+			return err
+		}
+		r.mode = mode
+	}
+
+	switch r.mode {
+	case FramingLSP:
+		data, err := (&LSPFrameReader{reader: r.reader}).ReadMessage()
+		if err != nil {
+			return err
+		}
+		return json.Unmarshal(data, obj)
+	case FramingNewline:
+		if r.newlineReader == nil {
+			r.newlineReader = NewNewlineFrameReader(r.reader)
+		}
+		return r.newlineReader.ReadJSON(obj)
+	default:
+		return fmt.Errorf("unsupported framing mode: %d", r.mode)
+	}
+}
+
+func (r *AutoFrameReader) detectMode() (FramingMode, error) {
+	for {
+		b, err := r.reader.Peek(1)
+		if err != nil {
+			return FramingUnknown, err
+		}
+
+		switch b[0] {
+		case '{', '[':
+			return FramingNewline, nil
+		case 'C', 'c':
+			return FramingLSP, nil
+		case ' ', '\t', '\r', '\n':
+			if _, err := r.reader.ReadByte(); err != nil {
+				return FramingUnknown, err
+			}
+		default:
+			return FramingUnknown, fmt.Errorf("unknown frame prefix %q", b[0])
+		}
+	}
+}
+
+// AutoFrameWriter writes responses using the chosen framing mode.
+type AutoFrameWriter struct {
+	writer io.Writer
+	mode   FramingMode
+}
+
+// NewAutoFrameWriter creates a writer whose framing mode is set once the first
+// client message is decoded.
+func NewAutoFrameWriter(w io.Writer) *AutoFrameWriter {
+	return &AutoFrameWriter{writer: w}
+}
+
+// SetMode selects the framing mode used by WriteJSON.
+func (w *AutoFrameWriter) SetMode(mode FramingMode) {
+	w.mode = mode
+}
+
+// WriteJSON marshals and writes a JSON message using the configured framing.
+func (w *AutoFrameWriter) WriteJSON(obj interface{}) error {
+	switch w.mode {
+	case FramingLSP:
+		return NewLSPFrameWriter(w.writer).WriteJSON(obj)
+	case FramingNewline:
+		return NewNewlineFrameWriter(w.writer).WriteJSON(obj)
+	default:
+		return fmt.Errorf("frame writer mode not set")
+	}
 }
