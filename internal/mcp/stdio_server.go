@@ -1531,6 +1531,10 @@ func (s *Server) HandleMessage(msg *Message) *Message {
 }
 
 func (s *Server) handleMessage(msg *Message) *Message {
+	if msg.ID == nil {
+		return s.handleNotification(msg)
+	}
+
 	switch msg.Method {
 	case "initialize":
 		return s.handleInitialize(msg)
@@ -1545,6 +1549,19 @@ func (s *Server) handleMessage(msg *Message) *Message {
 	default:
 		return NewError(msg.ID, -32601, "Method not found", nil)
 	}
+}
+
+func (s *Server) handleNotification(msg *Message) *Message {
+	switch msg.Method {
+	case "notifications/initialized", "initialized":
+		s.log.Debugw("client initialized notification received")
+	default:
+		// Notifications never receive responses. Ignore unsupported ones so
+		// spec-compliant clients can continue after initialize.
+		s.log.Debugw("ignoring unsupported notification", "method", msg.Method)
+	}
+
+	return nil
 }
 
 func (s *Server) handleInitialize(msg *Message) *Message {
