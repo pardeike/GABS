@@ -2,6 +2,7 @@ package gabp
 
 import (
 	"context"
+	"reflect"
 	"math"
 	"net"
 	"testing"
@@ -131,4 +132,88 @@ func TestBackoffJitter(t *testing.T) {
 	}
 
 	t.Logf("Jitter test durations: %v", durations)
+}
+
+func TestConvertToToolDescriptorPrefersCanonicalInputSchema(t *testing.T) {
+	raw := ToolDescriptorRaw{
+		Name:        "inventory/get",
+		Title:       "Get Inventory",
+		Description: "Returns the inventory",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"playerId": map[string]interface{}{
+					"type": "string",
+				},
+			},
+			"required": []interface{}{"playerId"},
+		},
+		Parameters: []ToolParameter{
+			{
+				Name:        "legacy",
+				Type:        "Int32",
+				Description: "Should not be used when canonical schema is present",
+				Required:    true,
+			},
+		},
+		OutputSchema: map[string]interface{}{
+			"type": "object",
+		},
+	}
+
+	descriptor := convertToToolDescriptor(raw)
+
+	if descriptor.Title != "Get Inventory" {
+		t.Fatalf("unexpected title: %s", descriptor.Title)
+	}
+
+	if !reflect.DeepEqual(descriptor.InputSchema, raw.InputSchema) {
+		t.Fatalf("expected canonical inputSchema to be preserved, got %#v", descriptor.InputSchema)
+	}
+}
+
+func TestConvertToToolDescriptorFallsBackToParameters(t *testing.T) {
+	raw := ToolDescriptorRaw{
+		Name:        "math/add",
+		Description: "Add two numbers",
+		Parameters: []ToolParameter{
+			{
+				Name:        "a",
+				Type:        "Int32",
+				Description: "First number",
+				Required:    true,
+			},
+			{
+				Name:        "b",
+				Type:        "Int32",
+				Description: "Second number",
+				Required:    true,
+			},
+		},
+	}
+
+	descriptor := convertToToolDescriptor(raw)
+
+	if descriptor.InputSchema["type"] != "object" {
+		t.Fatalf("unexpected inputSchema type: %#v", descriptor.InputSchema["type"])
+	}
+
+	properties, ok := descriptor.InputSchema["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("missing properties map: %#v", descriptor.InputSchema)
+	}
+
+	aProperty, ok := properties["a"].(map[string]interface{})
+	if !ok || aProperty["type"] != "integer" {
+		t.Fatalf("unexpected schema for parameter a: %#v", properties["a"])
+	}
+
+	required, ok := descriptor.InputSchema["required"].([]string)
+	if !ok {
+		t.Fatalf("missing required list: %#v", descriptor.InputSchema["required"])
+	}
+
+	if len(required) != 2 || required[0] != "a" || required[1] != "b" {
+		t.Fatalf("unexpected required list: %#v", required)
+	}
 }

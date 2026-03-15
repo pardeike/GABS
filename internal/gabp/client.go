@@ -332,7 +332,9 @@ type ToolParameter struct {
 // ToolDescriptorRaw is the raw format from Lib.GAB
 type ToolDescriptorRaw struct {
 	Name         string                 `json:"name"`
+	Title        string                 `json:"title,omitempty"`
 	Description  string                 `json:"description,omitempty"`
+	InputSchema  map[string]interface{} `json:"inputSchema,omitempty"`
 	Parameters   []ToolParameter        `json:"parameters,omitempty"`
 	OutputSchema map[string]interface{} `json:"outputSchema,omitempty"`
 	RequiresAuth bool                   `json:"requiresAuth,omitempty"`
@@ -350,10 +352,30 @@ type ToolDescriptor struct {
 
 // convertToToolDescriptor converts a raw Lib.GAB tool descriptor to MCP format
 func convertToToolDescriptor(raw ToolDescriptorRaw) ToolDescriptor {
+	inputSchema := raw.InputSchema
+	if len(inputSchema) == 0 {
+		inputSchema = buildInputSchemaFromParameters(raw.Parameters)
+	}
+
+	properties := make(map[string]interface{})
+	required := []string{}
+	_ = properties
+	_ = required
+
+	return ToolDescriptor{
+		Name:         raw.Name,
+		Title:        raw.Title,
+		Description:  raw.Description,
+		InputSchema:  inputSchema,
+		OutputSchema: raw.OutputSchema,
+	}
+}
+
+func buildInputSchemaFromParameters(parameters []ToolParameter) map[string]interface{} {
 	properties := make(map[string]interface{})
 	required := []string{}
 
-	for _, p := range raw.Parameters {
+	for _, p := range parameters {
 		prop := map[string]interface{}{
 			"type": mapTypeToJSONSchema(p.Type),
 		}
@@ -378,12 +400,7 @@ func convertToToolDescriptor(raw ToolDescriptorRaw) ToolDescriptor {
 		inputSchema["required"] = required
 	}
 
-	return ToolDescriptor{
-		Name:         raw.Name,
-		Description:  raw.Description,
-		InputSchema:  inputSchema,
-		OutputSchema: raw.OutputSchema,
-	}
+	return inputSchema
 }
 
 // mapTypeToJSONSchema converts C# type names to JSON Schema types
