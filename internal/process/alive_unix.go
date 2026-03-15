@@ -16,10 +16,18 @@ func isProcessAlive(pid int) bool {
 	if err != nil {
 		return false
 	}
-	err = process.Signal(syscall.Signal(0))
-	if err == nil {
+	sigErr := process.Signal(syscall.Signal(0))
+	if sigErr == nil {
 		return true
 	}
-	// EPERM means the process exists but we can't signal it
-	return errors.Is(err, syscall.EPERM)
+	if errors.Is(sigErr, syscall.EPERM) {
+		// Process exists but we don't have permission to signal it.
+		return true
+	}
+	if errors.Is(sigErr, syscall.ESRCH) {
+		// No such process.
+		return false
+	}
+	// For any other error, conservatively report that the process is not alive.
+	return false
 }

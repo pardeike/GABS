@@ -161,13 +161,32 @@ func (c *Client) Connect(ctx context.Context, addr string, token string, backoff
 	c.conn = conn
 	c.writer = util.NewLSPFrameWriter(conn)
 	c.reader = util.NewLSPFrameReader(conn)
+
+	// Perform handshake in a way that observes ctx cancellation.
+	handshakeErrCh := make(chan error, 1)
+	go func() {
+		handshakeErrCh <- c.handshake()
+	}()
+
+	select {
+	case <-ctx.Done():
+		// Context was cancelled while waiting for handshake; close the
+		// connection to abort any in-flight operations and return the error.
+		_ = conn.Close()
+		return ctx.Err()
+	case err := <-handshakeErrCh:
+		if err != nil {
+			// Handshake failed; ensure we do not leave the client in a
+			// connected state and that the connection is cleaned up.
+			_ = conn.Close()
+			return err
+		}
+	}
+
+	// Handshake succeeded; mark as connected and start message handling.
 	c.connected = true
-
-	// Start message handling goroutine
 	go c.messageHandler()
-
-	// Perform handshake
-	return c.handshake()
+	return nil
 }
 
 func (c *Client) handshake() error {

@@ -678,8 +678,19 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		// Forward the tool call to the game's GABP server
-		result, isError, err := client.CallToolWithTimeout(toolName, toolArgs, timeout)
+		// Forward the tool call to the game's GABP server.
+		// Tool names listed via games.tools are mirrored as:
+		//   <gameId>.<toolNameWithSlashesReplacedByDots>.
+		// The GABP server, however, expects the original tool name (with slashes).
+		gabpToolName := toolName
+		prefix := game.ID + "."
+		if strings.HasPrefix(toolName, prefix) {
+			// Strip the game ID prefix and convert dots back to slashes.
+			mirrored := strings.TrimPrefix(toolName, prefix)
+			gabpToolName = strings.ReplaceAll(mirrored, ".", "/")
+		}
+
+		result, isError, err := client.CallToolWithTimeout(gabpToolName, toolArgs, timeout)
 		if err != nil {
 			return &ToolResult{
 				Content: []Content{{Type: "text", Text: fmt.Sprintf("GABP tool call failed: %v", err)}},
