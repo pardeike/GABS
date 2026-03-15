@@ -19,19 +19,19 @@ import (
 
 // Server runs MCP over stdio.
 type Server struct {
-	log         util.Logger
-	tools       map[string]*ToolHandler
-	resources   map[string]*ResourceHandler
-	games       map[string]process.ControllerInterface // Track running games
-	configDir   string                        // Config directory for bridge files
-	apiKey      string                        // API key for HTTP authentication
-	mu          sync.RWMutex
-	writers     []util.FrameWriter           // Track client connections for notifications
-	writersMu   sync.RWMutex                // Protect writers slice
-	gameTools   map[string][]string         // Track which tools belong to which games
-	gameResources map[string][]string       // Track which resources belong to which games
-	gabpClients map[string]*gabp.Client     // Track GABP connections per game
-	starter     *process.SerializedStarter  // Serialized process starter
+	log           util.Logger
+	tools         map[string]*ToolHandler
+	resources     map[string]*ResourceHandler
+	games         map[string]process.ControllerInterface // Track running games
+	configDir     string                                 // Config directory for bridge files
+	apiKey        string                                 // API key for HTTP authentication
+	mu            sync.RWMutex
+	writers       []util.FrameWriter         // Track client connections for notifications
+	writersMu     sync.RWMutex               // Protect writers slice
+	gameTools     map[string][]string        // Track which tools belong to which games
+	gameResources map[string][]string        // Track which resources belong to which games
+	gabpClients   map[string]*gabp.Client    // Track GABP connections per game
+	starter       *process.SerializedStarter // Serialized process starter
 }
 
 // ToolHandler represents a tool handler function
@@ -91,24 +91,24 @@ func (s *Server) RegisterToolWithConfig(tool Tool, handler func(args map[string]
 	registeredTool := tool
 	if normalizationConfig != nil && normalizationConfig.EnableOpenAINormalization {
 		normalizedResult := util.NormalizeToolNameForOpenAI(tool.Name, normalizationConfig.MaxToolNameLength)
-		
+
 		if normalizedResult.WasNormalized {
 			// Store original name in metadata
 			if registeredTool.Meta == nil {
 				registeredTool.Meta = make(map[string]interface{})
 			}
 			registeredTool.Meta["originalName"] = normalizedResult.OriginalName
-			
+
 			// Update the tool name to the normalized version
 			registeredTool.Name = normalizedResult.NormalizedName
-			
+
 			// Optionally preserve original name in description
 			if normalizationConfig.PreserveOriginalName && registeredTool.Description != "" {
 				registeredTool.Description = fmt.Sprintf("%s (Original: %s)", registeredTool.Description, normalizedResult.OriginalName)
 			}
-			
-			s.log.Debugw("normalized tool name for OpenAI compatibility", 
-				"original", normalizedResult.OriginalName, 
+
+			s.log.Debugw("normalized tool name for OpenAI compatibility",
+				"original", normalizedResult.OriginalName,
 				"normalized", normalizedResult.NormalizedName)
 		}
 	}
@@ -207,14 +207,14 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		content.WriteString(fmt.Sprintf("  ID: %s (%s)\n", game.ID, game.Name))
 		content.WriteString(fmt.Sprintf("  Use gameId: '%s' (or target: '%s')\n", game.ID, game.Target))
 		content.WriteString(fmt.Sprintf("  Launch: %s\n", game.LaunchMode))
-		
+
 		if game.WorkingDir != "" {
 			content.WriteString(fmt.Sprintf("  Working Directory: %s\n", game.WorkingDir))
 		}
 		if len(game.Args) > 0 {
 			content.WriteString(fmt.Sprintf("  Arguments: %s\n", strings.Join(game.Args, " ")))
 		}
-		
+
 		// Validation status for launcher-based games
 		if game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId" {
 			content.WriteString("\nGame Termination Configuration:\n")
@@ -227,11 +227,11 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		} else if game.StopProcessName != "" {
 			content.WriteString(fmt.Sprintf("  Stop Process Name: %s\n", game.StopProcessName))
 		}
-		
+
 		if game.Description != "" {
 			content.WriteString(fmt.Sprintf("\nDescription: %s\n", game.Description))
 		}
-		
+
 		return &ToolResult{
 			Content: []Content{{Type: "text", Text: content.String()}},
 		}, nil
@@ -550,22 +550,6 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		status := s.checkGameStatus(game.ID)
-		if status != "running" {
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' is not running (status: %s). Start it first with games.start.", game.ID, status)}},
-				IsError: true,
-			}, nil
-		}
-
-		_, port, token, err := config.ReadBridgeJSON(game.ID, s.configDir)
-		if err != nil {
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to read bridge config for '%s': %v", game.ID, err)}},
-				IsError: true,
-			}, nil
-		}
-
 		// Check if already connected - re-sync tools
 		s.mu.RLock()
 		existingClient, alreadyConnected := s.gabpClients[game.ID]
@@ -584,11 +568,31 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
+		status := s.checkGameStatus(game.ID)
+
+		_, port, token, err := config.ReadBridgeJSON(game.ID, s.configDir)
+		if err != nil {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to read bridge config for '%s': %v", game.ID, err)}},
+				IsError: true,
+			}, nil
+		}
+
+		// Allow reattaching after a GABS restart. If bridge.json is present,
+		// attempt a direct GABP reconnect even when this GABS instance does not
+		// currently track the process as running.
 		connector := NewServerGABPConnector(s)
 		connectCtx, connectCancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer connectCancel()
 		success := connector.AttemptConnection(connectCtx, game.ID, port, token)
 		if !success {
+			if status != "running" && status != "connected" {
+				return &ToolResult{
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to connect to GABP server for '%s' on port %d. GABS currently sees status '%s'. Make sure the game is still running and the mod is fully loaded.", game.ID, port, status)}},
+					IsError: true,
+				}, nil
+			}
+
 			return &ToolResult{
 				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to connect to GABP server for '%s' on port %d. Make sure the game mod is loaded.", game.ID, port)}},
 				IsError: true,
@@ -734,13 +738,13 @@ func (s *Server) RegisterBridgeTools(ctrl interface{}, client interface{}) {
 
 // getGameFromController extracts game config from controller - helper for status checking
 func (s *Server) getGameFromController(controller process.ControllerInterface) *config.GameConfig {
-	// This is a temporary helper. In a proper refactor, we'd store the game config 
+	// This is a temporary helper. In a proper refactor, we'd store the game config
 	// alongside the controller, but for minimal changes, we'll work with what we have.
 	// We can check the controller's spec to get the StopProcessName
 	if controller == nil {
 		return nil
 	}
-	
+
 	// Create a minimal game config with the info we need
 	return &config.GameConfig{
 		StopProcessName: controller.GetStopProcessName(),
@@ -864,6 +868,8 @@ func (s *Server) getStatusDescriptionFromStatus(status string, gameConfig *confi
 			}
 		}
 		return "running (GABS controls the process)"
+	case "connected":
+		return "running (connected via GABP; process not managed by this GABS instance)"
 	case "stopped":
 		return "stopped"
 	case "launcher-running":
@@ -881,6 +887,9 @@ func (s *Server) checkGameStatus(gameID string) string {
 
 	controller, exists := s.games[gameID]
 	if !exists {
+		if _, connected := s.gabpClients[gameID]; connected {
+			return "connected"
+		}
 		return "stopped"
 	}
 
@@ -896,7 +905,7 @@ func (s *Server) checkGameStatus(gameID string) string {
 			if controller.IsLauncherProcessRunning() {
 				return "launcher-running" // Launcher process is still active
 			}
-			
+
 			// Launcher has exited - determine if we have tracking capability
 			game := s.getGameFromController(controller)
 			if game != nil && game.StopProcessName != "" {
@@ -924,7 +933,7 @@ func (s *Server) checkGameStatus(gameID string) string {
 func (s *Server) cleanupStoppedGame(gameID string) {
 	// Remove from games map - no need for complex cleanup in stateless approach
 	delete(s.games, gameID)
-	
+
 	// Note: The mutex is already held when this is called from checkGameStatus
 	// So we call internal cleanup methods that don't acquire locks
 	s.cleanupGABPConnectionInternal(gameID)
@@ -942,7 +951,7 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 		s.mu.Unlock()
 		return fmt.Errorf("game %s is already running", game.ID)
 	}
-	
+
 	// Clean up any stale controller reference
 	delete(s.games, game.ID)
 	s.mu.Unlock()
@@ -968,7 +977,7 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	// Create and configure controller
 	controller := process.NewController()
 	if err := controller.Configure(launchSpec); err != nil {
-		return fmt.Errorf("failed to configure game launcher for '%s' (mode: %s, target: %s): %w", 
+		return fmt.Errorf("failed to configure game launcher for '%s' (mode: %s, target: %s): %w",
 			game.ID, game.LaunchMode, game.Target, err)
 	}
 
@@ -979,9 +988,9 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	// This implements the asynchronous handling requested by @pardeike
 	gabpConnector := NewServerGABPConnector(s)
 	result := s.starter.StartWithVerification(controller, gabpConnector, game.ID, port, token)
-	
+
 	if result.Error != nil {
-		return fmt.Errorf("failed to start game '%s' (mode: %s, target: %s): %w", 
+		return fmt.Errorf("failed to start game '%s' (mode: %s, target: %s): %w",
 			game.ID, game.LaunchMode, game.Target, result.Error)
 	}
 
@@ -1000,7 +1009,7 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	} else {
 		logMsg += ", GABP connection failed/timeout"
 	}
-	
+
 	s.log.Infow(logMsg, "gameId", game.ID, "mode", game.LaunchMode, "processStarted", result.ProcessStarted, "gabpConnected", result.GABPConnected)
 
 	return nil
@@ -1029,9 +1038,9 @@ func (s *Server) establishGABPConnection(gameID string, port int, token string, 
 	defer cancel()
 	err := client.Connect(ctx, addr, token, backoffMin, backoffMax)
 	if err != nil {
-		s.log.Warnw("failed to establish GABP connection - game may not support GABP", 
+		s.log.Warnw("failed to establish GABP connection - game may not support GABP",
 			"gameId", gameID, "addr", addr, "error", err)
-		
+
 		// Clean up client reference on failure
 		s.mu.Lock()
 		delete(s.gabpClients, gameID)
@@ -1222,7 +1231,7 @@ func (s *Server) stopGame(game config.GameConfig, force bool) error {
 				return nil
 			}
 		}
-		
+
 		// Fall back to stopping the launcher process
 		var err error
 		if force {
@@ -1236,12 +1245,12 @@ func (s *Server) stopGame(game config.GameConfig, force bool) error {
 		} else {
 			s.log.Infow("launcher process stopped", "gameId", game.ID, "mode", launchMode, "pid", controller.GetPID())
 		}
-		
+
 		// If we have stopProcessName configured, we should have been able to stop the game properly
 		if game.StopProcessName != "" {
 			return nil // Process was handled by stopProcessName logic above
 		}
-		
+
 		// Only show the confusing message if stopProcessName is not configured
 		return fmt.Errorf("launcher process stopped, but the actual %s game may still be running independently. Configure 'stopProcessName' in the game configuration to enable proper game termination", launchMode)
 	}
@@ -1276,10 +1285,10 @@ func (s *Server) ServeStdio(ctx context.Context) error {
 // SendNotification sends a notification to all connected clients
 func (s *Server) SendNotification(method string, params interface{}) {
 	notification := NewNotification(method, params)
-	
+
 	s.writersMu.RLock()
 	defer s.writersMu.RUnlock()
-	
+
 	for _, writer := range s.writers {
 		if err := writer.WriteJSON(notification); err != nil {
 			s.log.Warnw("failed to send notification", "method", method, "error", err)
@@ -1302,7 +1311,7 @@ func (s *Server) SendResourcesListChangedNotification() {
 // RegisterGameTool registers a tool for a specific game and tracks it for cleanup
 func (s *Server) RegisterGameTool(gameId string, tool Tool, handler func(args map[string]interface{}) (*ToolResult, error), normalizationConfig *config.ToolNormalizationConfig) {
 	s.RegisterToolWithConfig(tool, handler, normalizationConfig)
-	
+
 	// Track which game this tool belongs to
 	s.mu.Lock()
 	s.gameTools[gameId] = append(s.gameTools[gameId], tool.Name)
@@ -1312,7 +1321,7 @@ func (s *Server) RegisterGameTool(gameId string, tool Tool, handler func(args ma
 // RegisterGameResource registers a resource for a specific game and tracks it for cleanup
 func (s *Server) RegisterGameResource(gameId string, resource Resource, handler func() ([]Content, error)) {
 	s.RegisterResource(resource, handler)
-	
+
 	// Track which game this resource belongs to
 	s.mu.Lock()
 	s.gameResources[gameId] = append(s.gameResources[gameId], resource.URI)
@@ -1323,10 +1332,10 @@ func (s *Server) RegisterGameResource(gameId string, resource Resource, handler 
 func (s *Server) CleanupGameResources(gameId string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	toolsRemoved := 0
 	resourcesRemoved := 0
-	
+
 	// Remove game-specific tools
 	if toolNames, exists := s.gameTools[gameId]; exists {
 		for _, toolName := range toolNames {
@@ -1337,7 +1346,7 @@ func (s *Server) CleanupGameResources(gameId string) {
 		}
 		delete(s.gameTools, gameId)
 	}
-	
+
 	// Remove game-specific resources
 	if resourceURIs, exists := s.gameResources[gameId]; exists {
 		for _, resourceURI := range resourceURIs {
@@ -1348,10 +1357,10 @@ func (s *Server) CleanupGameResources(gameId string) {
 		}
 		delete(s.gameResources, gameId)
 	}
-	
+
 	if toolsRemoved > 0 || resourcesRemoved > 0 {
 		s.log.Infow("cleaned up game resources", "gameId", gameId, "toolsRemoved", toolsRemoved, "resourcesRemoved", resourcesRemoved)
-		
+
 		// Notify clients about changes
 		if toolsRemoved > 0 {
 			s.SendToolsListChangedNotification()
@@ -1384,9 +1393,9 @@ func (s *Server) CleanupBridgeConfig(gameId string) {
 		s.log.Warnw("failed to create config paths for cleanup", "gameId", gameId, "error", err)
 		return
 	}
-	
+
 	bridgePath := cp.GetBridgeConfigPath(gameId)
-	
+
 	if err := os.Remove(bridgePath); err != nil {
 		// Don't log as error since file might not exist
 		s.log.Debugw("bridge config cleanup", "gameId", gameId, "path", bridgePath, "result", err.Error())
@@ -1401,7 +1410,7 @@ func (s *Server) CleanupBridgeConfig(gameId string) {
 func (s *Server) cleanupGameResourcesInternal(gameId string) {
 	toolsRemoved := 0
 	resourcesRemoved := 0
-	
+
 	// Remove game-specific tools
 	if toolNames, exists := s.gameTools[gameId]; exists {
 		for _, toolName := range toolNames {
@@ -1412,7 +1421,7 @@ func (s *Server) cleanupGameResourcesInternal(gameId string) {
 		}
 		delete(s.gameTools, gameId)
 	}
-	
+
 	// Remove game-specific resources
 	if resourceURIs, exists := s.gameResources[gameId]; exists {
 		for _, resourceURI := range resourceURIs {
@@ -1423,10 +1432,10 @@ func (s *Server) cleanupGameResourcesInternal(gameId string) {
 		}
 		delete(s.gameResources, gameId)
 	}
-	
+
 	if toolsRemoved > 0 || resourcesRemoved > 0 {
 		s.log.Infow("cleaned up game resources", "gameId", gameId, "toolsRemoved", toolsRemoved, "resourcesRemoved", resourcesRemoved)
-		
+
 		// Note: We cannot send notifications here because that might require acquiring locks
 		// The caller should handle notifications separately if needed
 	}
@@ -1451,9 +1460,9 @@ func (s *Server) cleanupBridgeConfigInternal(gameId string) {
 		s.log.Warnw("failed to create config paths for cleanup", "gameId", gameId, "error", err)
 		return
 	}
-	
+
 	bridgePath := cp.GetBridgeConfigPath(gameId)
-	
+
 	if err := os.Remove(bridgePath); err != nil {
 		// Don't log as error since file might not exist
 		s.log.Debugw("bridge config cleanup", "gameId", gameId, "path", bridgePath, "result", err.Error())

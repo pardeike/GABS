@@ -2,9 +2,11 @@ package gabp
 
 import (
 	"context"
-	"reflect"
+	"encoding/json"
+	"fmt"
 	"math"
 	"net"
+	"reflect"
 	"testing"
 	"time"
 
@@ -20,10 +22,10 @@ func TestExponentialBackoff(t *testing.T) {
 	// Test parameters
 	backoffMin := 10 * time.Millisecond
 	backoffMax := 100 * time.Millisecond
-	
+
 	// Try to connect to a non-existent address to trigger retries
 	nonExistentAddr := "127.0.0.1:99999" // Use a port that's very unlikely to be in use
-	
+
 	// Ensure the port is not actually in use
 	if conn, err := net.Dial("tcp", nonExistentAddr); err == nil {
 		conn.Close()
@@ -60,9 +62,9 @@ func TestBackoffMaximum(t *testing.T) {
 
 	backoffMin := 1 * time.Millisecond
 	backoffMax := 5 * time.Millisecond // Very small max to test capping
-	
+
 	nonExistentAddr := "127.0.0.1:99998"
-	
+
 	// Ensure the port is not actually in use
 	if conn, err := net.Dial("tcp", nonExistentAddr); err == nil {
 		conn.Close()
@@ -92,11 +94,11 @@ func TestBackoffMaximum(t *testing.T) {
 // Test that jitter provides variation in delays
 func TestBackoffJitter(t *testing.T) {
 	log := util.NewLogger("error")
-	
+
 	backoffMin := 10 * time.Millisecond
 	backoffMax := 100 * time.Millisecond
 	nonExistentAddr := "127.0.0.1:99997"
-	
+
 	// Ensure the port is not actually in use
 	if conn, err := net.Dial("tcp", nonExistentAddr); err == nil {
 		conn.Close()
@@ -104,7 +106,7 @@ func TestBackoffJitter(t *testing.T) {
 	}
 
 	var durations []time.Duration
-	
+
 	// Run multiple connection attempts to observe jitter variation
 	for i := 0; i < 3; i++ {
 		client := NewClient(log)
@@ -215,5 +217,75 @@ func TestConvertToToolDescriptorFallsBackToParameters(t *testing.T) {
 
 	if len(required) != 2 || required[0] != "a" || required[1] != "b" {
 		t.Fatalf("unexpected required list: %#v", required)
+	}
+}
+
+func TestConnectCompletesHandshakeWhenServerResponds(t *testing.T) {
+	log := util.NewLogger("error")
+	client := NewClient(log)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer listener.Close()
+
+	serverDone := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer conn.Close()
+
+		reader := util.NewLSPFrameReader(conn)
+		writer := util.NewLSPFrameWriter(conn)
+
+		data, err := reader.ReadMessage()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+
+		var request util.GABPMessage
+		if err := json.Unmarshal(data, &request); err != nil {
+			serverDone <- err
+			return
+		}
+
+		if request.Method != "session/hello" {
+			serverDone <- fmt.Errorf("unexpected method: %s", request.Method)
+			return
+		}
+
+		response := util.NewGABPResponse(request.ID, SessionWelcomeResult{
+			AgentId: "rimworld",
+			Capabilities: Capabilities{
+				Methods:   []string{"tools/list", "tools/call"},
+				Events:    []string{"system/log"},
+				Resources: []string{},
+			},
+			SchemaVersion: "1.0",
+		})
+
+		serverDone <- writer.WriteJSON(response)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := client.Connect(ctx, listener.Addr().String(), "test-token", 10*time.Millisecond, 50*time.Millisecond); err != nil {
+		t.Fatalf("expected handshake to succeed, got: %v", err)
+	}
+	defer client.Close()
+
+	capabilities := client.GetCapabilities()
+	if len(capabilities.Methods) != 2 || capabilities.Methods[0] != "tools/list" || capabilities.Methods[1] != "tools/call" {
+		t.Fatalf("unexpected capabilities after handshake: %#v", capabilities)
+	}
+
+	if err := <-serverDone; err != nil {
+		t.Fatalf("server goroutine failed: %v", err)
 	}
 }

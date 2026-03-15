@@ -92,7 +92,7 @@ func NewClient(log util.Logger) *Client {
 	// Seed the global random number generator for backoff jitter
 	// Use current time with nanosecond precision to avoid identical seeds
 	rand.Seed(time.Now().UnixNano())
-	
+
 	return &Client{
 		pendingReqs:   make(map[string]chan *util.GABPMessage),
 		eventHandlers: make(map[string][]EventHandler),
@@ -161,6 +161,11 @@ func (c *Client) Connect(ctx context.Context, addr string, token string, backoff
 	c.conn = conn
 	c.writer = util.NewLSPFrameWriter(conn)
 	c.reader = util.NewLSPFrameReader(conn)
+	c.connected = true
+
+	// Start the reader loop before the handshake so the welcome response can
+	// be delivered to the pending request channel.
+	go c.messageHandler()
 
 	// Perform handshake in a way that observes ctx cancellation.
 	handshakeErrCh := make(chan error, 1)
@@ -172,20 +177,19 @@ func (c *Client) Connect(ctx context.Context, addr string, token string, backoff
 	case <-ctx.Done():
 		// Context was cancelled while waiting for handshake; close the
 		// connection to abort any in-flight operations and return the error.
+		c.connected = false
 		_ = conn.Close()
 		return ctx.Err()
 	case err := <-handshakeErrCh:
 		if err != nil {
 			// Handshake failed; ensure we do not leave the client in a
 			// connected state and that the connection is cleaned up.
+			c.connected = false
 			_ = conn.Close()
 			return err
 		}
 	}
 
-	// Handshake succeeded; mark as connected and start message handling.
-	c.connected = true
-	go c.messageHandler()
 	return nil
 }
 
@@ -195,7 +199,7 @@ func (c *Client) handshake() error {
 	params := SessionHelloParams{
 		Token:         c.token,
 		BridgeVersion: version.Get(), // Use actual runtime version
-		Platform:      runtime.GOOS, // Detect actual platform
+		Platform:      runtime.GOOS,  // Detect actual platform
 		LaunchId:      launchId,
 		ClientInfo: &ClientInfo{
 			Name:    "gabs",
@@ -504,11 +508,11 @@ func (c *Client) GetCapabilities() Capabilities {
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	
+
 	if !c.connected {
 		return nil
 	}
-	
+
 	c.connected = false
 	if c.conn != nil {
 		return c.conn.Close()
