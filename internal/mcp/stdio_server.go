@@ -811,9 +811,11 @@ func writeToolParams(content *strings.Builder, tool Tool) {
 	if tool.OutputSchema != nil {
 		if props, ok := tool.OutputSchema["properties"].(map[string]interface{}); ok && len(props) > 0 {
 			content.WriteString("\n  Returns:")
+
 			for fieldName, fieldDef := range props {
 				fieldType := "any"
 				fieldDesc := ""
+				isNullable := false
 				if fd, ok := fieldDef.(map[string]interface{}); ok {
 					if t, ok := fd["type"].(string); ok {
 						fieldType = t
@@ -821,11 +823,18 @@ func writeToolParams(content *strings.Builder, tool Tool) {
 					if d, ok := fd["description"].(string); ok {
 						fieldDesc = d
 					}
+					if n, ok := fd["nullable"].(bool); ok && n {
+						isNullable = true
+					}
+				}
+				nullTag := ""
+				if isNullable {
+					nullTag = ", optional"
 				}
 				if fieldDesc != "" {
-					content.WriteString(fmt.Sprintf("\n    - `%s` (%s): %s", fieldName, fieldType, fieldDesc))
+					content.WriteString(fmt.Sprintf("\n    - `%s` (%s%s): %s", fieldName, fieldType, nullTag, fieldDesc))
 				} else {
-					content.WriteString(fmt.Sprintf("\n    - `%s` (%s)", fieldName, fieldType))
+					content.WriteString(fmt.Sprintf("\n    - `%s` (%s%s)", fieldName, fieldType, nullTag))
 				}
 			}
 		}
@@ -1083,9 +1092,10 @@ func (s *Server) syncGABPTools(client *gabp.Client, gameID string) error {
 		gameSpecificName := fmt.Sprintf("%s.%s", gameID, sanitizedToolName)
 
 		mcpTool := Tool{
-			Name:        gameSpecificName,
-			Description: fmt.Sprintf("%s (Game: %s)", tool.Description, gameID),
-			InputSchema: tool.InputSchema,
+			Name:         gameSpecificName,
+			Description:  fmt.Sprintf("%s (Game: %s)", tool.Description, gameID),
+			InputSchema:  tool.InputSchema,
+			OutputSchema: tool.OutputSchema,
 		}
 
 		// Create handler that forwards to GABP with original tool name
