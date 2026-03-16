@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -441,10 +443,654 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}, nil
 	}, normalizationConfig)
 
-	// games.tools tool - List tools available for specific games
+	type listedGameTool struct {
+		GameID        string
+		Tool          Tool
+		CanonicalName string
+		LocalName     string
+	}
+
+	getOptionalStringArg := func(args map[string]interface{}, key string) (string, bool, *ToolResult) {
+		raw, exists := args[key]
+		if !exists || raw == nil {
+			return "", false, nil
+		}
+
+		value, ok := raw.(string)
+		if !ok {
+			return "", false, &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Argument '%s' must be a string", key)}},
+				IsError: true,
+			}
+		}
+
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return "", false, nil
+		}
+
+		return value, true, nil
+	}
+
+	getOptionalBoolArg := func(args map[string]interface{}, key string) (bool, bool, *ToolResult) {
+		raw, exists := args[key]
+		if !exists || raw == nil {
+			return false, false, nil
+		}
+
+		switch typed := raw.(type) {
+		case bool:
+			return typed, true, nil
+		case string:
+			value := strings.TrimSpace(strings.ToLower(typed))
+			switch value {
+			case "true":
+				return true, true, nil
+			case "false":
+				return false, true, nil
+			}
+		}
+
+		return false, false, &ToolResult{
+			Content: []Content{{Type: "text", Text: fmt.Sprintf("Argument '%s' must be a boolean", key)}},
+			IsError: true,
+		}
+	}
+
+	getOptionalPositiveIntArg := func(args map[string]interface{}, key string) (int, bool, *ToolResult) {
+		raw, exists := args[key]
+		if !exists || raw == nil {
+			return 0, false, nil
+		}
+
+		var value int
+		switch typed := raw.(type) {
+		case float64:
+			if typed != float64(int(typed)) {
+				return 0, false, &ToolResult{
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("Argument '%s' must be an integer", key)}},
+					IsError: true,
+				}
+			}
+			value = int(typed)
+		case int:
+			value = typed
+		case int32:
+			value = int(typed)
+		case int64:
+			value = int(typed)
+		case string:
+			parsed, err := strconv.Atoi(strings.TrimSpace(typed))
+			if err != nil {
+				return 0, false, &ToolResult{
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("Argument '%s' must be an integer", key)}},
+					IsError: true,
+				}
+			}
+			value = parsed
+		default:
+			return 0, false, &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Argument '%s' must be an integer", key)}},
+				IsError: true,
+			}
+		}
+
+		if value <= 0 {
+			return 0, false, &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Argument '%s' must be greater than zero", key)}},
+				IsError: true,
+			}
+		}
+
+		return value, true, nil
+	}
+
+	getCursorOffset := func(args map[string]interface{}, total int) (int, *ToolResult) {
+		rawCursor, exists := args["cursor"]
+		if !exists || rawCursor == nil {
+			return 0, nil
+		}
+
+		var cursor int
+		switch typed := rawCursor.(type) {
+		case float64:
+			if typed != float64(int(typed)) {
+				return 0, &ToolResult{
+					Content: []Content{{Type: "text", Text: "Argument 'cursor' must be an integer offset or string cursor"}},
+					IsError: true,
+				}
+			}
+			cursor = int(typed)
+		case int:
+			cursor = typed
+		case int32:
+			cursor = int(typed)
+		case int64:
+			cursor = int(typed)
+		case string:
+			if strings.TrimSpace(typed) == "" {
+				return 0, nil
+			}
+			parsed, err := strconv.Atoi(strings.TrimSpace(typed))
+			if err != nil {
+				return 0, &ToolResult{
+					Content: []Content{{Type: "text", Text: "Argument 'cursor' must be an integer offset or string cursor"}},
+					IsError: true,
+				}
+			}
+			cursor = parsed
+		default:
+			return 0, &ToolResult{
+				Content: []Content{{Type: "text", Text: "Argument 'cursor' must be an integer offset or string cursor"}},
+				IsError: true,
+			}
+		}
+
+		if cursor < 0 {
+			return 0, &ToolResult{
+				Content: []Content{{Type: "text", Text: "Argument 'cursor' must be zero or greater"}},
+				IsError: true,
+			}
+		}
+		if cursor > total {
+			return 0, &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Cursor %d is out of range for %d matching tools", cursor, total)}},
+				IsError: true,
+			}
+		}
+
+		return cursor, nil
+	}
+
+	getSortedGames := func() []config.GameConfig {
+		games := gamesConfig.ListGames()
+		sort.Slice(games, func(i, j int) bool {
+			return games[i].ID < games[j].ID
+		})
+		return games
+	}
+
+	listToolsForDiscovery := func(gameID string, hasGameID bool) ([]listedGameTool, *config.GameConfig, *ToolResult) {
+		entries := make([]listedGameTool, 0)
+
+		if hasGameID {
+			game, exists := s.resolveGameId(gamesConfig, gameID)
+			if !exists {
+				return nil, nil, &ToolResult{
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games.list to see available games.", gameID)}},
+					IsError: true,
+				}
+			}
+
+			for _, tool := range s.getGameSpecificTools(game.ID) {
+				entries = append(entries, listedGameTool{
+					GameID:        game.ID,
+					Tool:          tool,
+					CanonicalName: toolCanonicalName(tool),
+					LocalName:     toolLocalName(game.ID, tool),
+				})
+			}
+
+			return entries, game, nil
+		}
+
+		for _, game := range getSortedGames() {
+			for _, tool := range s.getGameSpecificTools(game.ID) {
+				entries = append(entries, listedGameTool{
+					GameID:        game.ID,
+					Tool:          tool,
+					CanonicalName: toolCanonicalName(tool),
+					LocalName:     toolLocalName(game.ID, tool),
+				})
+			}
+		}
+
+		return entries, nil, nil
+	}
+
+	filterListedTools := func(entries []listedGameTool, query, prefix string) []listedGameTool {
+		if query == "" && prefix == "" {
+			return entries
+		}
+
+		query = strings.ToLower(query)
+		prefix = strings.ToLower(prefix)
+		matchesQuery := func(value string) bool {
+			value = strings.ToLower(value)
+			if strings.ContainsAny(query, "./_- ") {
+				return strings.Contains(value, query)
+			}
+
+			tokens := strings.FieldsFunc(value, func(r rune) bool {
+				return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+			})
+			for _, token := range tokens {
+				if strings.HasPrefix(token, query) {
+					return true
+				}
+			}
+			return false
+		}
+
+		filtered := make([]listedGameTool, 0, len(entries))
+		for _, entry := range entries {
+			if query != "" {
+				if !matchesQuery(entry.Tool.Name) &&
+					!matchesQuery(entry.CanonicalName) &&
+					!matchesQuery(entry.LocalName) {
+					continue
+				}
+			}
+
+			if prefix != "" {
+				registered := strings.ToLower(entry.Tool.Name)
+				canonical := strings.ToLower(entry.CanonicalName)
+				local := strings.ToLower(entry.LocalName)
+				if !strings.HasPrefix(registered, prefix) &&
+					!strings.HasPrefix(canonical, prefix) &&
+					!strings.HasPrefix(local, prefix) {
+					continue
+				}
+			}
+
+			filtered = append(filtered, entry)
+		}
+
+		return filtered
+	}
+
+	paginateListedTools := func(entries []listedGameTool, cursor, limit int) ([]listedGameTool, string) {
+		if cursor >= len(entries) {
+			return []listedGameTool{}, ""
+		}
+		if limit <= 0 {
+			return entries[cursor:], ""
+		}
+
+		end := cursor + limit
+		if end > len(entries) {
+			end = len(entries)
+		}
+
+		nextCursor := ""
+		if end < len(entries) {
+			nextCursor = strconv.Itoa(end)
+		}
+
+		return entries[cursor:end], nextCursor
+	}
+
+	buildToolNameItemsWithOptions := func(entries []listedGameTool, brief bool) []map[string]interface{} {
+		items := make([]map[string]interface{}, 0, len(entries))
+		for _, entry := range entries {
+			item := map[string]interface{}{
+				"name":      entry.Tool.Name,
+				"gameId":    entry.GameID,
+				"localName": entry.LocalName,
+			}
+			if entry.CanonicalName != entry.Tool.Name {
+				item["originalName"] = entry.CanonicalName
+			}
+			if brief {
+				if summary := toolBriefDescription(entry.Tool.Description); summary != "" {
+					item["summary"] = summary
+				}
+			}
+			items = append(items, item)
+		}
+		return items
+	}
+
+	buildDetailedToolItems := func(entries []listedGameTool) []map[string]interface{} {
+		items := make([]map[string]interface{}, 0, len(entries))
+		for _, entry := range entries {
+			item := map[string]interface{}{
+				"name":         entry.Tool.Name,
+				"gameId":       entry.GameID,
+				"localName":    entry.LocalName,
+				"description":  entry.Tool.Description,
+				"inputSchema":  entry.Tool.InputSchema,
+				"outputSchema": entry.Tool.OutputSchema,
+			}
+			if entry.CanonicalName != entry.Tool.Name {
+				item["originalName"] = entry.CanonicalName
+			}
+			items = append(items, item)
+		}
+		return items
+	}
+
+	describeDiscoveryFilters := func(query, prefix string) string {
+		parts := make([]string, 0, 2)
+		if strings.TrimSpace(query) != "" {
+			parts = append(parts, fmt.Sprintf("query %q", query))
+		}
+		if strings.TrimSpace(prefix) != "" {
+			parts = append(parts, fmt.Sprintf("prefix %q", prefix))
+		}
+
+		return strings.Join(parts, " and ")
+	}
+
+	buildNoToolsMessage := func(game *config.GameConfig, noun string) string {
+		var content strings.Builder
+		if game != nil {
+			content.WriteString(fmt.Sprintf("No game-specific %s available for '%s'.\n", noun, game.ID))
+			status := s.checkGameStatus(game.ID)
+			if status != "running" && status != "connected" {
+				content.WriteString(fmt.Sprintf("Game is currently '%s'. Start it with games.start and connect with games.connect to enable GABP tools.\n", status))
+			} else {
+				content.WriteString("The game is running, but no GABP tools are currently connected.\n")
+			}
+			return content.String()
+		}
+
+		content.WriteString(fmt.Sprintf("No game-specific %s available.\n", noun))
+		content.WriteString("Start games with GABP-compliant mods to see their tools.\n")
+		return content.String()
+	}
+
+	buildNoMatchingToolsMessage := func(game *config.GameConfig, noun string, availableTotal int, query, prefix string) string {
+		var content strings.Builder
+		content.WriteString(fmt.Sprintf("No matching game-specific %s", noun))
+		if game != nil {
+			content.WriteString(fmt.Sprintf(" for '%s'", game.ID))
+		}
+		content.WriteString(".\n")
+
+		filterSummary := describeDiscoveryFilters(query, prefix)
+		if game != nil {
+			content.WriteString(fmt.Sprintf("%d game-specific tools are currently connected for this game", availableTotal))
+		} else {
+			content.WriteString(fmt.Sprintf("%d game-specific tools are currently connected across configured games", availableTotal))
+		}
+		if filterSummary != "" {
+			content.WriteString(fmt.Sprintf(", but none matched %s.\n", filterSummary))
+		} else {
+			content.WriteString(", but none matched the requested filters.\n")
+		}
+		content.WriteString("Use games.tool_names without filters to browse compact names, then inspect one tool with games.tool_detail.\n")
+		return content.String()
+	}
+
+	findListedTool := func(entries []listedGameTool, gameID, requested string) (listedGameTool, bool) {
+		for _, entry := range entries {
+			if toolMatchesRequestedName(gameID, entry.Tool, requested) {
+				return entry, true
+			}
+		}
+		return listedGameTool{}, false
+	}
+
+	resolveListedTool := func(gameID string, hasGameID bool, requested string) (listedGameTool, *ToolResult) {
+		requested = strings.TrimSpace(requested)
+		if requested == "" {
+			return listedGameTool{}, &ToolResult{
+				Content: []Content{{Type: "text", Text: "Missing required argument: tool"}},
+				IsError: true,
+			}
+		}
+
+		if hasGameID {
+			entries, game, listErr := listToolsForDiscovery(gameID, true)
+			if listErr != nil {
+				return listedGameTool{}, listErr
+			}
+
+			entry, found := findListedTool(entries, game.ID, requested)
+			if !found {
+				return listedGameTool{}, &ToolResult{
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("Tool '%s' not found for game '%s'. Use games.tool_names to discover available names first.", requested, game.ID)}},
+					IsError: true,
+				}
+			}
+
+			return entry, nil
+		}
+
+		entries, _, listErr := listToolsForDiscovery("", false)
+		if listErr != nil {
+			return listedGameTool{}, listErr
+		}
+
+		matches := make([]listedGameTool, 0, 1)
+		for _, entry := range entries {
+			if toolMatchesRequestedName(entry.GameID, entry.Tool, requested) {
+				matches = append(matches, entry)
+			}
+		}
+
+		switch len(matches) {
+		case 0:
+			return listedGameTool{}, &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Tool '%s' was not found. Use games.tool_names to discover available names first, or include gameId if you are using a local tool name.", requested)}},
+				IsError: true,
+			}
+		case 1:
+			return matches[0], nil
+		default:
+			gameIDs := make([]string, 0, len(matches))
+			seen := make(map[string]struct{}, len(matches))
+			for _, entry := range matches {
+				if _, exists := seen[entry.GameID]; exists {
+					continue
+				}
+				seen[entry.GameID] = struct{}{}
+				gameIDs = append(gameIDs, entry.GameID)
+			}
+			sort.Strings(gameIDs)
+			return listedGameTool{}, &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Tool '%s' matched multiple games (%s). Include gameId or use the fully qualified mirrored tool name.", requested, strings.Join(gameIDs, ", "))}},
+				IsError: true,
+			}
+		}
+	}
+
+	// games.tool_names tool - Compact game tool discovery for AI clients
+	s.RegisterToolWithConfig(Tool{
+		Name:        "games.tool_names",
+		Description: "List compact game-specific tool names. Use this first for low-token discovery, then call games.tool_detail for one tool.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"gameId": map[string]interface{}{
+					"type":        "string",
+					"description": "Game ID to list tools for (optional, lists all configured games if not provided)",
+				},
+				"query": map[string]interface{}{
+					"type":        "string",
+					"description": "Case-insensitive text filter applied to tool names (optional)",
+				},
+				"prefix": map[string]interface{}{
+					"type":        "string",
+					"description": "Prefix filter applied to the full tool name and local name (optional)",
+				},
+				"limit": map[string]interface{}{
+					"type":        "integer",
+					"description": "Maximum number of names to return (optional, defaults to 50)",
+				},
+				"cursor": map[string]interface{}{
+					"type":        "string",
+					"description": "Offset cursor returned by a previous page (optional)",
+				},
+				"brief": map[string]interface{}{
+					"type":        "boolean",
+					"description": "Include a one-line summary per tool in structured output only (optional, default false)",
+				},
+			},
+		},
+	}, func(args map[string]interface{}) (*ToolResult, error) {
+		gameID, hasGameID, invalidArg := getOptionalStringArg(args, "gameId")
+		if invalidArg != nil {
+			return invalidArg, nil
+		}
+		query, _, invalidArg := getOptionalStringArg(args, "query")
+		if invalidArg != nil {
+			return invalidArg, nil
+		}
+		prefix, _, invalidArg := getOptionalStringArg(args, "prefix")
+		if invalidArg != nil {
+			return invalidArg, nil
+		}
+		brief, _, invalidArg := getOptionalBoolArg(args, "brief")
+		if invalidArg != nil {
+			return invalidArg, nil
+		}
+
+		entries, game, listErr := listToolsForDiscovery(gameID, hasGameID)
+		if listErr != nil {
+			return listErr, nil
+		}
+
+		availableTotal := len(entries)
+		entries = filterListedTools(entries, query, prefix)
+		total := len(entries)
+
+		limit, hasLimit, invalidArg := getOptionalPositiveIntArg(args, "limit")
+		if invalidArg != nil {
+			return invalidArg, nil
+		}
+		if !hasLimit {
+			limit = 50
+		}
+
+		cursor, invalidCursor := getCursorOffset(args, total)
+		if invalidCursor != nil {
+			return invalidCursor, nil
+		}
+
+		page, nextCursor := paginateListedTools(entries, cursor, limit)
+		if len(page) == 0 {
+			message := buildNoToolsMessage(game, "tool names")
+			if total > 0 && cursor >= total {
+				message = fmt.Sprintf("No more matching tool names for cursor %d.\nStart again without a cursor or use a smaller cursor.\n", cursor)
+			} else if availableTotal > 0 && (query != "" || prefix != "") {
+				message = buildNoMatchingToolsMessage(game, "tool names", availableTotal, query, prefix)
+			}
+
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: message}},
+				StructuredContent: map[string]interface{}{
+					"availableTotal": availableTotal,
+					"gameId":         gameID,
+					"total":          total,
+					"returned":       0,
+					"nextCursor":     nextCursor,
+					"tools":          buildToolNameItemsWithOptions(nil, brief),
+				},
+			}, nil
+		}
+
+		var content strings.Builder
+		scope := "all games"
+		if game != nil {
+			scope = fmt.Sprintf("game '%s'", game.ID)
+		}
+		content.WriteString(fmt.Sprintf("Tool names for %s (%d shown of %d matching):\n", scope, len(page), total))
+		for _, entry := range page {
+			content.WriteString(entry.Tool.Name)
+			content.WriteString("\n")
+		}
+		content.WriteString("\nUse games.tool_detail with one of these names to inspect parameters and output.")
+		if nextCursor != "" {
+			content.WriteString(fmt.Sprintf("\nNext cursor: %s", nextCursor))
+		}
+
+		structured := map[string]interface{}{
+			"availableTotal": availableTotal,
+			"total":          total,
+			"returned":       len(page),
+			"tools":          buildToolNameItemsWithOptions(page, brief),
+			"nextCursor":     nextCursor,
+		}
+		if game != nil {
+			structured["gameId"] = game.ID
+		}
+		if query != "" {
+			structured["query"] = query
+		}
+		if prefix != "" {
+			structured["prefix"] = prefix
+		}
+		if brief {
+			structured["brief"] = true
+		}
+
+		return &ToolResult{
+			Content:           []Content{{Type: "text", Text: strings.TrimRight(content.String(), "\n")}},
+			StructuredContent: structured,
+		}, nil
+	}, normalizationConfig)
+
+	// games.tool_detail tool - Detailed schema for one discovered tool
+	s.RegisterToolWithConfig(Tool{
+		Name:        "games.tool_detail",
+		Description: "Show detailed metadata for one game-specific tool, including parameters and output schema.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"gameId": map[string]interface{}{
+					"type":        "string",
+					"description": "Game ID to inspect the tool in (optional if the tool name is fully qualified or uniquely discoverable)",
+				},
+				"tool": map[string]interface{}{
+					"type":        "string",
+					"description": "Tool name as returned by games.tool_names or games.tools (required). Prefer the fully qualified mirrored name, e.g. 'bannerlord.core.ping'.",
+				},
+			},
+			"required": []string{"tool"},
+		},
+	}, func(args map[string]interface{}) (*ToolResult, error) {
+		gameID, hasGameID, invalidArg := getOptionalStringArg(args, "gameId")
+		if invalidArg != nil {
+			return invalidArg, nil
+		}
+		requestedTool, ok := args["tool"].(string)
+		if !ok || strings.TrimSpace(requestedTool) == "" {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: "Missing required argument: tool"}},
+				IsError: true,
+			}, nil
+		}
+
+		entry, resolveErr := resolveListedTool(gameID, hasGameID, requestedTool)
+		if resolveErr != nil {
+			return resolveErr, nil
+		}
+
+		var content strings.Builder
+		content.WriteString(fmt.Sprintf("Tool detail for '%s' in game '%s'\n", entry.Tool.Name, entry.GameID))
+		if entry.Tool.Description != "" {
+			content.WriteString("\n")
+			content.WriteString(entry.Tool.Description)
+		}
+		if entry.CanonicalName != entry.Tool.Name {
+			content.WriteString(fmt.Sprintf("\n\nOriginal name: %s", entry.CanonicalName))
+		}
+		writeToolParams(&content, entry.Tool)
+
+		structured := map[string]interface{}{
+			"gameId":       entry.GameID,
+			"name":         entry.Tool.Name,
+			"localName":    entry.LocalName,
+			"description":  entry.Tool.Description,
+			"inputSchema":  entry.Tool.InputSchema,
+			"outputSchema": entry.Tool.OutputSchema,
+		}
+		if entry.CanonicalName != entry.Tool.Name {
+			structured["originalName"] = entry.CanonicalName
+		}
+
+		return &ToolResult{
+			Content:           []Content{{Type: "text", Text: strings.TrimSpace(content.String())}},
+			StructuredContent: structured,
+		}, nil
+	}, normalizationConfig)
+
+	// games.tools tool - Detailed tool listing, kept for compatibility
 	s.RegisterToolWithConfig(Tool{
 		Name:        "games.tools",
-		Description: "List game-specific tools available from running games with GABP connections",
+		Description: "List game-specific tools in detailed form for compatibility and human-readable inspection. Prefer games.tool_names for compact discovery and games.tool_detail for one tool.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -452,70 +1098,130 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 					"type":        "string",
 					"description": "Game ID to list tools for (optional, lists all if not provided)",
 				},
+				"query": map[string]interface{}{
+					"type":        "string",
+					"description": "Case-insensitive text filter applied to tool names (optional)",
+				},
+				"prefix": map[string]interface{}{
+					"type":        "string",
+					"description": "Prefix filter applied to the full tool name and local name (optional)",
+				},
+				"limit": map[string]interface{}{
+					"type":        "integer",
+					"description": "Maximum number of tools to return (optional)",
+				},
+				"cursor": map[string]interface{}{
+					"type":        "string",
+					"description": "Offset cursor returned by a previous page (optional)",
+				},
 			},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
-		gameId, hasGameID := args["gameId"].(string)
+		gameID, hasGameID, invalidArg := getOptionalStringArg(args, "gameId")
+		if invalidArg != nil {
+			return invalidArg, nil
+		}
+		query, _, invalidArg := getOptionalStringArg(args, "query")
+		if invalidArg != nil {
+			return invalidArg, nil
+		}
+		prefix, _, invalidArg := getOptionalStringArg(args, "prefix")
+		if invalidArg != nil {
+			return invalidArg, nil
+		}
+
+		entries, game, listErr := listToolsForDiscovery(gameID, hasGameID)
+		if listErr != nil {
+			return listErr, nil
+		}
+
+		availableTotal := len(entries)
+		entries = filterListedTools(entries, query, prefix)
+		total := len(entries)
+
+		limit, _, invalidArg := getOptionalPositiveIntArg(args, "limit")
+		if invalidArg != nil {
+			return invalidArg, nil
+		}
+		cursor, invalidCursor := getCursorOffset(args, total)
+		if invalidCursor != nil {
+			return invalidCursor, nil
+		}
+
+		page, nextCursor := paginateListedTools(entries, cursor, limit)
+		if len(page) == 0 {
+			message := buildNoToolsMessage(game, "tools")
+			if total > 0 && cursor >= total {
+				message = fmt.Sprintf("No more matching tools for cursor %d.\nStart again without a cursor or use a smaller cursor.\n", cursor)
+			} else if availableTotal > 0 && (query != "" || prefix != "") {
+				message = buildNoMatchingToolsMessage(game, "tools", availableTotal, query, prefix)
+			}
+
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: message}},
+				StructuredContent: map[string]interface{}{
+					"availableTotal": availableTotal,
+					"gameId":         gameID,
+					"total":          total,
+					"returned":       0,
+					"nextCursor":     nextCursor,
+					"tools":          buildDetailedToolItems(nil),
+				},
+			}, nil
+		}
 
 		var content strings.Builder
-
-		if hasGameID {
-			// List tools for specific game
-			game, exists := s.resolveGameId(gamesConfig, gameId)
-			if !exists {
-				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games.list to see available games.", gameId)}},
-					IsError: true,
-				}, nil
-			}
-
-			content.WriteString(fmt.Sprintf("Tools for game '%s':\n\n", game.ID))
-			// Get tools that start with this game's prefix
-			gameTools := s.getGameSpecificTools(game.ID)
-			if len(gameTools) == 0 {
-				content.WriteString(fmt.Sprintf("No GABP tools available for this game.\n"))
-				status := s.checkGameStatus(game.ID)
-				if status != "running" {
-					content.WriteString(fmt.Sprintf("Game is currently '%s'. Start it with games.start to enable GABP tools.\n", status))
-				}
-			} else {
-				for _, tool := range gameTools {
-					content.WriteString(fmt.Sprintf("• **%s** - %s", tool.Name, tool.Description))
-					writeToolParams(&content, tool)
-					content.WriteString("\n")
-				}
+		if game != nil {
+			content.WriteString(fmt.Sprintf("Tools for game '%s' (%d shown of %d matching):\n\n", game.ID, len(page), total))
+			for _, entry := range page {
+				content.WriteString(fmt.Sprintf("• **%s** - %s", entry.Tool.Name, entry.Tool.Description))
+				writeToolParams(&content, entry.Tool)
+				content.WriteString("\n")
 			}
 		} else {
-			// List tools for all games
-			content.WriteString("Game-Specific Tools Available:\n\n")
-			games := gamesConfig.ListGames()
-
-			hasAnyTools := false
-			for _, game := range games {
-				gameTools := s.getGameSpecificTools(game.ID)
-				if len(gameTools) > 0 {
-					hasAnyTools = true
-					status := s.checkGameStatus(game.ID)
-					content.WriteString(fmt.Sprintf("**%s** (%s, %d tools):\n", game.ID, status, len(gameTools)))
-					for _, tool := range gameTools {
-						content.WriteString(fmt.Sprintf("  • %s - %s", tool.Name, tool.Description))
-						writeToolParams(&content, tool)
+			content.WriteString(fmt.Sprintf("Game-Specific Tools Available (%d shown of %d matching):\n\n", len(page), total))
+			currentGameID := ""
+			for _, entry := range page {
+				if entry.GameID != currentGameID {
+					if currentGameID != "" {
 						content.WriteString("\n")
 					}
-					content.WriteString("\n")
+					currentGameID = entry.GameID
+					status := s.checkGameStatus(entry.GameID)
+					content.WriteString(fmt.Sprintf("**%s** (%s):\n", entry.GameID, status))
 				}
+				content.WriteString(fmt.Sprintf("  • %s - %s", entry.Tool.Name, entry.Tool.Description))
+				writeToolParams(&content, entry.Tool)
+				content.WriteString("\n")
 			}
-
-			if !hasAnyTools {
-				content.WriteString("No game-specific tools available.\n")
-				content.WriteString("Start games with GABP-compliant mods to see their tools.\n")
-			}
-
 			content.WriteString("\nNote: Tools are prefixed with game ID (e.g., 'minecraft.inventory.get') to avoid conflicts between games.\n")
 		}
 
+		content.WriteString("\nUse games.tool_names for a smaller list and games.tool_detail for one tool.")
+		if nextCursor != "" {
+			content.WriteString(fmt.Sprintf("\nNext cursor: %s", nextCursor))
+		}
+
+		structured := map[string]interface{}{
+			"availableTotal": availableTotal,
+			"total":          total,
+			"returned":       len(page),
+			"tools":          buildDetailedToolItems(page),
+			"nextCursor":     nextCursor,
+		}
+		if game != nil {
+			structured["gameId"] = game.ID
+		}
+		if query != "" {
+			structured["query"] = query
+		}
+		if prefix != "" {
+			structured["prefix"] = prefix
+		}
+
 		return &ToolResult{
-			Content: []Content{{Type: "text", Text: content.String()}},
+			Content:           []Content{{Type: "text", Text: strings.TrimRight(content.String(), "\n")}},
+			StructuredContent: structured,
 		}, nil
 	}, normalizationConfig)
 
@@ -608,17 +1314,17 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 	// games.call_tool - Proxy tool calls to a game's GABP server
 	s.RegisterToolWithConfig(Tool{
 		Name:        "games.call_tool",
-		Description: "Call a game-specific tool on a running game via its GABP connection. Use games.tools to discover available tools first.",
+		Description: "Call a game-specific tool on a running game via its GABP connection. Prefer games.tool_names for discovery and games.tool_detail for schema inspection before calling.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
-					"description": "Game ID to call the tool on (required)",
+					"description": "Game ID to call the tool on (optional if the tool name is fully qualified or uniquely discoverable)",
 				},
 				"tool": map[string]interface{}{
 					"type":        "string",
-					"description": "Tool name as returned by games.tools (required). Use the full name including any namespace prefix, e.g. 'bannerlord.core/ping'.",
+					"description": "Tool name as returned by games.tool_names or games.tools (required). Prefer the full mirrored name, e.g. 'bannerlord.core.ping'.",
 				},
 				"arguments": map[string]interface{}{
 					"type":        "object",
@@ -629,17 +1335,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 					"description": "Request timeout in seconds (optional, default 30). Increase for long-running tools like wait_for_screen.",
 				},
 			},
-			"required": []string{"gameId", "tool"},
+			"required": []string{"tool"},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
-		gameIdArg, ok := args["gameId"].(string)
-		if !ok || gameIdArg == "" {
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: "Missing required argument: gameId"}},
-				IsError: true,
-			}, nil
+		gameIdArg, hasGameID, invalidArg := getOptionalStringArg(args, "gameId")
+		if invalidArg != nil {
+			return invalidArg, nil
 		}
-
 		toolName, ok := args["tool"].(string)
 		if !ok || toolName == "" {
 			return &ToolResult{
@@ -662,37 +1364,28 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}
 		}
 
-		game, exists := s.resolveGameId(gamesConfig, gameIdArg)
-		if !exists {
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games.list to see available games.", gameIdArg)}},
-				IsError: true,
-			}, nil
+		entry, resolveErr := resolveListedTool(gameIdArg, hasGameID, toolName)
+		if resolveErr != nil {
+			return resolveErr, nil
 		}
 
 		// Get the GABP client for this game
 		s.mu.RLock()
-		client, connected := s.gabpClients[game.ID]
+		client, connected := s.gabpClients[entry.GameID]
 		s.mu.RUnlock()
 
 		if !connected {
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' is not connected via GABP. Use games.connect to establish a connection first.", game.ID)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' is not connected via GABP. Use games.connect to establish a connection first.", entry.GameID)}},
 				IsError: true,
 			}, nil
 		}
 
-		// Forward the tool call to the game's GABP server.
-		// Tool names listed via games.tools are mirrored as:
-		//   <gameId>.<toolNameWithSlashesReplacedByDots>.
-		// The GABP server, however, expects the original tool name (with slashes).
-		gabpToolName := toolName
-		prefix := game.ID + "."
-		if strings.HasPrefix(toolName, prefix) {
-			// Strip the game ID prefix and convert dots back to slashes.
-			mirrored := strings.TrimPrefix(toolName, prefix)
-			gabpToolName = strings.ReplaceAll(mirrored, ".", "/")
-		}
+		// Resolve the requested name against the mirrored tools for this game.
+		// This accepts the registered MCP name, the original dotted name, or the
+		// local tool name, so games.call_tool keeps working under OpenAI tool name
+		// normalization as well.
+		gabpToolName := gabpToolNameFromTool(entry.GameID, entry.Tool)
 
 		result, isError, err := client.CallToolWithTimeout(gabpToolName, toolArgs, timeout)
 		if err != nil {
@@ -769,91 +1462,296 @@ func (s *Server) resolveGameId(gamesConfig *config.GamesConfig, gameIdOrTarget s
 	return nil, false
 }
 
-// writeToolParams writes parameter and output schema info for a tool to the content builder
-func writeToolParams(content *strings.Builder, tool Tool) {
-	if tool.InputSchema != nil {
-		if props, ok := tool.InputSchema["properties"].(map[string]interface{}); ok && len(props) > 0 {
-			reqList := []string{}
-			if req, ok := tool.InputSchema["required"].([]string); ok {
-				reqList = req
-			}
-			content.WriteString("\n  Parameters:")
-			for paramName, paramDef := range props {
-				isRequired := false
-				for _, r := range reqList {
-					if r == paramName {
-						isRequired = true
-						break
-					}
-				}
-				paramType := "any"
-				paramDesc := ""
-				if pd, ok := paramDef.(map[string]interface{}); ok {
-					if t, ok := pd["type"].(string); ok {
-						paramType = t
-					}
-					if d, ok := pd["description"].(string); ok {
-						paramDesc = d
-					}
-				}
-				reqTag := ""
-				if !isRequired {
-					reqTag = ", optional"
-				}
-				if paramDesc != "" {
-					content.WriteString(fmt.Sprintf("\n    - `%s` (%s%s): %s", paramName, paramType, reqTag, paramDesc))
-				} else {
-					content.WriteString(fmt.Sprintf("\n    - `%s` (%s%s)", paramName, paramType, reqTag))
-				}
+type toolSchemaProperty struct {
+	Name         string
+	Type         string
+	Description  string
+	Required     bool
+	Nullable     bool
+	HasDefault   bool
+	DefaultValue interface{}
+}
+
+func toolCanonicalName(tool Tool) string {
+	if tool.Meta != nil {
+		if originalName, ok := tool.Meta["originalName"].(string); ok && originalName != "" {
+			return originalName
+		}
+	}
+	return tool.Name
+}
+
+func toolLocalName(gameID string, tool Tool) string {
+	prefix := gameID + "."
+
+	if canonical := toolCanonicalName(tool); strings.HasPrefix(canonical, prefix) {
+		return strings.TrimPrefix(canonical, prefix)
+	}
+	if strings.HasPrefix(tool.Name, prefix) {
+		return strings.TrimPrefix(tool.Name, prefix)
+	}
+
+	return toolCanonicalName(tool)
+}
+
+func toolBelongsToGame(tool Tool, gameID string) bool {
+	prefix := gameID + "."
+	return strings.HasPrefix(tool.Name, prefix) || strings.HasPrefix(toolCanonicalName(tool), prefix)
+}
+
+func toolMatchesRequestedName(gameID string, tool Tool, requested string) bool {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return false
+	}
+
+	gamePrefix := gameID + "."
+	canonical := toolCanonicalName(tool)
+	registeredLocal := strings.TrimPrefix(tool.Name, gamePrefix)
+	canonicalLocal := strings.TrimPrefix(canonical, gamePrefix)
+	local := toolLocalName(gameID, tool)
+
+	return requested == tool.Name ||
+		requested == canonical ||
+		requested == local ||
+		requested == registeredLocal ||
+		requested == canonicalLocal
+}
+
+func gabpToolNameFromTool(gameID string, tool Tool) string {
+	mirroredName := toolCanonicalName(tool)
+	gamePrefix := gameID + "."
+
+	if strings.HasPrefix(mirroredName, gamePrefix) {
+		mirroredName = strings.TrimPrefix(mirroredName, gamePrefix)
+	} else if strings.HasPrefix(tool.Name, gamePrefix) {
+		mirroredName = strings.TrimPrefix(tool.Name, gamePrefix)
+	}
+
+	return strings.ReplaceAll(mirroredName, ".", "/")
+}
+
+func toolBriefDescription(description string) string {
+	description = strings.TrimSpace(description)
+	if description == "" {
+		return ""
+	}
+
+	if newline := strings.IndexByte(description, '\n'); newline >= 0 {
+		description = strings.TrimSpace(description[:newline])
+	}
+
+	if sentenceEnd := strings.Index(description, ". "); sentenceEnd >= 0 {
+		description = strings.TrimSpace(description[:sentenceEnd+1])
+	}
+
+	const maxLen = 140
+	if len(description) <= maxLen {
+		return description
+	}
+
+	return strings.TrimSpace(description[:maxLen-3]) + "..."
+}
+
+func getRequiredSchemaFields(schema map[string]interface{}) map[string]struct{} {
+	requiredFields := make(map[string]struct{})
+	if schema == nil {
+		return requiredFields
+	}
+
+	switch required := schema["required"].(type) {
+	case []string:
+		for _, field := range required {
+			requiredFields[field] = struct{}{}
+		}
+	case []interface{}:
+		for _, field := range required {
+			if name, ok := field.(string); ok {
+				requiredFields[name] = struct{}{}
 			}
 		}
 	}
-	if tool.OutputSchema != nil {
-		if props, ok := tool.OutputSchema["properties"].(map[string]interface{}); ok && len(props) > 0 {
-			content.WriteString("\n  Returns:")
 
-			for fieldName, fieldDef := range props {
-				fieldType := "any"
-				fieldDesc := ""
-				isNullable := false
-				if fd, ok := fieldDef.(map[string]interface{}); ok {
-					if t, ok := fd["type"].(string); ok {
-						fieldType = t
-					}
-					if d, ok := fd["description"].(string); ok {
-						fieldDesc = d
-					}
-					if n, ok := fd["nullable"].(bool); ok && n {
-						isNullable = true
-					}
-				}
-				nullTag := ""
-				if isNullable {
-					nullTag = ", optional"
-				}
-				if fieldDesc != "" {
-					content.WriteString(fmt.Sprintf("\n    - `%s` (%s%s): %s", fieldName, fieldType, nullTag, fieldDesc))
-				} else {
-					content.WriteString(fmt.Sprintf("\n    - `%s` (%s%s)", fieldName, fieldType, nullTag))
-				}
+	return requiredFields
+}
+
+func getSchemaTypeString(definition map[string]interface{}) (string, bool) {
+	nullable := false
+
+	switch rawType := definition["type"].(type) {
+	case string:
+		return rawType, nullable
+	case []string:
+		types := make([]string, 0, len(rawType))
+		for _, item := range rawType {
+			if item == "null" {
+				nullable = true
+				continue
+			}
+			types = append(types, item)
+		}
+		if len(types) > 0 {
+			return strings.Join(types, " | "), nullable
+		}
+	case []interface{}:
+		types := make([]string, 0, len(rawType))
+		for _, item := range rawType {
+			typeName, ok := item.(string)
+			if !ok {
+				continue
+			}
+			if typeName == "null" {
+				nullable = true
+				continue
+			}
+			types = append(types, typeName)
+		}
+		if len(types) > 0 {
+			return strings.Join(types, " | "), nullable
+		}
+	}
+
+	return "any", nullable
+}
+
+func getSchemaProperties(schema map[string]interface{}) []toolSchemaProperty {
+	if schema == nil {
+		return nil
+	}
+
+	rawProperties, ok := schema["properties"].(map[string]interface{})
+	if !ok || len(rawProperties) == 0 {
+		return nil
+	}
+
+	requiredFields := getRequiredSchemaFields(schema)
+	names := make([]string, 0, len(rawProperties))
+	for name := range rawProperties {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	properties := make([]toolSchemaProperty, 0, len(names))
+	for _, name := range names {
+		property := toolSchemaProperty{
+			Name:     name,
+			Type:     "any",
+			Required: false,
+		}
+
+		if _, ok := requiredFields[name]; ok {
+			property.Required = true
+		}
+
+		if rawDefinition, ok := rawProperties[name].(map[string]interface{}); ok {
+			property.Type, property.Nullable = getSchemaTypeString(rawDefinition)
+			if description, ok := rawDefinition["description"].(string); ok {
+				property.Description = description
+			}
+			if nullable, ok := rawDefinition["nullable"].(bool); ok && nullable {
+				property.Nullable = true
+			}
+			if defaultValue, ok := rawDefinition["default"]; ok {
+				property.HasDefault = true
+				property.DefaultValue = defaultValue
+			}
+		}
+
+		properties = append(properties, property)
+	}
+
+	return properties
+}
+
+func formatSchemaDefaultValue(value interface{}) string {
+	if encoded, err := json.Marshal(value); err == nil {
+		return string(encoded)
+	}
+	return fmt.Sprintf("%v", value)
+}
+
+// writeToolParams writes parameter and output schema info for a tool to the content builder
+func writeToolParams(content *strings.Builder, tool Tool) {
+	inputProperties := getSchemaProperties(tool.InputSchema)
+	if len(inputProperties) > 0 {
+		content.WriteString("\n  Parameters:")
+		for _, property := range inputProperties {
+			tags := []string{property.Type}
+			if !property.Required {
+				tags = append(tags, "optional")
+			}
+			if property.HasDefault {
+				tags = append(tags, "default: "+formatSchemaDefaultValue(property.DefaultValue))
+			}
+
+			if property.Description != "" {
+				content.WriteString(fmt.Sprintf("\n    - `%s` (%s): %s", property.Name, strings.Join(tags, ", "), property.Description))
+			} else {
+				content.WriteString(fmt.Sprintf("\n    - `%s` (%s)", property.Name, strings.Join(tags, ", ")))
+			}
+		}
+	}
+
+	outputProperties := getSchemaProperties(tool.OutputSchema)
+	if len(outputProperties) > 0 {
+		content.WriteString("\n  Returns:")
+		for _, property := range outputProperties {
+			tags := []string{property.Type}
+			if property.Nullable {
+				tags = append(tags, "optional")
+			}
+
+			if property.Description != "" {
+				content.WriteString(fmt.Sprintf("\n    - `%s` (%s): %s", property.Name, strings.Join(tags, ", "), property.Description))
+			} else {
+				content.WriteString(fmt.Sprintf("\n    - `%s` (%s)", property.Name, strings.Join(tags, ", ")))
 			}
 		}
 	}
 }
 
-// getGameSpecificTools returns tools that belong to a specific game
+// getGameSpecificTools returns tools that belong to a specific game.
+// It prefers explicit game tracking and falls back to prefix matching for
+// compatibility with older tests and direct registrations.
 func (s *Server) getGameSpecificTools(gameID string) []Tool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var gameTools []Tool
-	prefix := gameID + "."
+	seen := make(map[string]struct{})
+	gameTools := make([]Tool, 0)
 
-	for toolName, handler := range s.tools {
-		if strings.HasPrefix(toolName, prefix) {
-			gameTools = append(gameTools, handler.Tool)
+	addTool := func(tool Tool) {
+		if _, exists := seen[tool.Name]; exists {
+			return
+		}
+		if !toolBelongsToGame(tool, gameID) {
+			return
+		}
+
+		seen[tool.Name] = struct{}{}
+		gameTools = append(gameTools, tool)
+	}
+
+	if trackedToolNames, exists := s.gameTools[gameID]; exists {
+		for _, toolName := range trackedToolNames {
+			if handler, exists := s.tools[toolName]; exists {
+				addTool(handler.Tool)
+			}
 		}
 	}
+
+	for _, handler := range s.tools {
+		addTool(handler.Tool)
+	}
+
+	sort.Slice(gameTools, func(i, j int) bool {
+		left := toolCanonicalName(gameTools[i])
+		right := toolCanonicalName(gameTools[j])
+		if left == right {
+			return gameTools[i].Name < gameTools[j].Name
+		}
+		return left < right
+	})
 
 	return gameTools
 }
@@ -1026,10 +1924,11 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 
 // establishGABPConnection attempts to connect to the game's GABP server with retry logic
 // This runs in the background and implements the Future Enhancement workflow:
-// 1. Game starts with bridge config (already done in startGame)
-// 2. GABP client connects to game mod's server (implemented here)
-// 3. Mirror system syncs tools and sends tools/list_changed notification (implemented here)
-// 4. AI agents automatically discover new capabilities via games.tools (enabled by notification)
+//  1. Game starts with bridge config (already done in startGame)
+//  2. GABP client connects to game mod's server (implemented here)
+//  3. Mirror system syncs tools and sends tools/list_changed notification (implemented here)
+//  4. AI agents automatically discover new capabilities via games.tool_names,
+//     then inspect a few candidates with games.tool_detail (enabled by notification)
 func (s *Server) establishGABPConnection(gameID string, port int, token string, backoffMin, backoffMax time.Duration) {
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	s.log.Debugw("attempting GABP connection for game", "gameId", gameID, "addr", addr)
@@ -1150,10 +2049,10 @@ func (s *Server) syncGABPTools(client *gabp.Client, gameID string) error {
 
 	s.log.Infow("synced GABP tools to MCP with game namespacing", "gameId", gameID, "count", len(gabpTools))
 
-	// Send tools/list_changed notification to AI agents
-	// This automatically alerts AI agents that new tools are available without
-	// them needing to poll. AI agents can then use games.tools to discover the
-	// new capabilities.
+	// Send tools/list_changed notification to AI agents. This alerts clients
+	// that new mirrored tools are available without polling, so they can refresh
+	// direct tool access or use games.tool_names -> games.tool_detail for the
+	// stable discovery flow.
 	s.SendToolsListChangedNotification()
 
 	return nil
@@ -1323,8 +2222,16 @@ func (s *Server) RegisterGameTool(gameId string, tool Tool, handler func(args ma
 	s.RegisterToolWithConfig(tool, handler, normalizationConfig)
 
 	// Track which game this tool belongs to
+	trackedToolName := tool.Name
+	if normalizationConfig != nil && normalizationConfig.EnableOpenAINormalization {
+		normalizedResult := util.NormalizeToolNameForOpenAI(tool.Name, normalizationConfig.MaxToolNameLength)
+		if normalizedResult.WasNormalized {
+			trackedToolName = normalizedResult.NormalizedName
+		}
+	}
+
 	s.mu.Lock()
-	s.gameTools[gameId] = append(s.gameTools[gameId], tool.Name)
+	s.gameTools[gameId] = append(s.gameTools[gameId], trackedToolName)
 	s.mu.Unlock()
 }
 

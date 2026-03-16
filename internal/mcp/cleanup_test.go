@@ -22,7 +22,7 @@ func TestGameResourceCleanup(t *testing.T) {
 		InputSchema: map[string]interface{}{"type": "object"},
 	}
 	tool2 := Tool{
-		Name:        gameId + ".test_tool2", 
+		Name:        gameId + ".test_tool2",
 		Description: "Test tool 2",
 		InputSchema: map[string]interface{}{"type": "object"},
 	}
@@ -42,7 +42,7 @@ func TestGameResourceCleanup(t *testing.T) {
 	}
 	resource2 := Resource{
 		URI:      "gab://" + gameId + "/test2",
-		Name:     "Test Resource 2", 
+		Name:     "Test Resource 2",
 		MimeType: "application/json",
 	}
 
@@ -108,7 +108,7 @@ func TestBridgeConfigCleanup(t *testing.T) {
 
 	t.Logf("Created bridge config: port=%d, token=%s..., path=%s", port, token[:8], configPath)
 
-	// Cleanup the bridge config  
+	// Cleanup the bridge config
 	server.CleanupBridgeConfig(gameId)
 
 	// Verify the file is gone
@@ -182,4 +182,47 @@ func TestMixedGameCleanup(t *testing.T) {
 		t.Errorf("Expected 0 games tracked after complete cleanup, got %d", len(server.gameTools))
 	}
 	server.mu.RUnlock()
+}
+
+func TestRegisterGameToolCleanupWithNormalization(t *testing.T) {
+	log := util.NewLogger("error")
+	server := NewServerForTesting(log)
+
+	gameID := "minecraft"
+	tool := Tool{
+		Name:        "minecraft.inventory.get",
+		Description: "Normalized test tool",
+		InputSchema: map[string]interface{}{"type": "object"},
+	}
+
+	handler := func(args map[string]interface{}) (*ToolResult, error) {
+		return &ToolResult{Content: []Content{{Type: "text", Text: "test"}}}, nil
+	}
+
+	normalizationConfig := &config.ToolNormalizationConfig{
+		EnableOpenAINormalization: true,
+		MaxToolNameLength:         64,
+		PreserveOriginalName:      true,
+	}
+
+	server.RegisterGameTool(gameID, tool, handler, normalizationConfig)
+
+	server.mu.RLock()
+	if _, exists := server.tools["minecraft_inventory_get"]; !exists {
+		server.mu.RUnlock()
+		t.Fatal("Expected normalized tool to be registered for cleanup test")
+	}
+	server.mu.RUnlock()
+
+	server.CleanupGameResources(gameID)
+
+	server.mu.RLock()
+	defer server.mu.RUnlock()
+
+	if len(server.tools) != 0 {
+		t.Errorf("Expected normalized game tool to be removed during cleanup, got %d tools remaining", len(server.tools))
+	}
+	if len(server.gameTools) != 0 {
+		t.Errorf("Expected normalized game tool tracking to be removed during cleanup, got %d tracked games remaining", len(server.gameTools))
+	}
 }

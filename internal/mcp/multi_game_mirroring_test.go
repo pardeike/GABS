@@ -168,13 +168,53 @@ func TestGamesToolsCommand(t *testing.T) {
 
 	// Simulate having some game-specific tools registered (as Mirror would do)
 	minecraftTools := []Tool{
-		{Name: "minecraft.inventory.get", Description: "Get player inventory in Minecraft (Game: minecraft)"},
-		{Name: "minecraft.world.place_block", Description: "Place a block in Minecraft world (Game: minecraft)"},
+		{
+			Name:        "minecraft.inventory.get",
+			Description: "Get player inventory in Minecraft (Game: minecraft)",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"playerId": map[string]interface{}{
+						"type":        "string",
+						"description": "Player ID to inspect",
+					},
+					"includeArmor": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Include equipped armor",
+						"default":     false,
+					},
+				},
+				"required": []interface{}{"playerId"},
+			},
+			OutputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"items": map[string]interface{}{
+						"type":        "array",
+						"description": "Inventory items",
+					},
+					"armor": map[string]interface{}{
+						"type":        []interface{}{"array", "null"},
+						"description": "Equipped armor, when requested",
+					},
+				},
+			},
+		},
+		{
+			Name:        "minecraft.world.place_block",
+			Description: "Place a block in Minecraft world (Game: minecraft)",
+		},
 	}
 
 	rimworldTools := []Tool{
-		{Name: "rimworld.inventory.get", Description: "Get colonist inventory in RimWorld (Game: rimworld)"},
-		{Name: "rimworld.crafting.build", Description: "Build items in RimWorld (Game: rimworld)"},
+		{
+			Name:        "rimworld.inventory.get",
+			Description: "Get colonist inventory in RimWorld (Game: rimworld)",
+		},
+		{
+			Name:        "rimworld.crafting.build",
+			Description: "Build items in RimWorld (Game: rimworld)",
+		},
 	}
 
 	// Register tools
@@ -250,7 +290,378 @@ func TestGamesToolsCommand(t *testing.T) {
 		if strings.Contains(responseStr, "rimworld.inventory.get") {
 			t.Error("Should not see rimworld tools when filtering for minecraft")
 		}
+		if !strings.Contains(responseStr, "\"structuredContent\"") {
+			t.Error("Expected games.tools to include structured content")
+		}
+		if !strings.Contains(responseStr, "\"availableTotal\":2") {
+			t.Error("Expected games.tools structured content to include availableTotal")
+		}
+		if !strings.Contains(responseStr, "\"inputSchema\"") {
+			t.Error("Expected games.tools structured content to include schemas")
+		}
 	})
+
+	t.Run("ListToolNamesOnly", func(t *testing.T) {
+		namesMsg := &Message{
+			JSONRPC: "2.0",
+			Method:  "tools/call",
+			ID:      json.RawMessage(`"list-tool-names"`),
+			Params: map[string]interface{}{
+				"name": "games.tool_names",
+				"arguments": map[string]interface{}{
+					"gameId": "minecraft",
+				},
+			},
+		}
+
+		response := server.HandleMessage(namesMsg)
+		if response == nil {
+			t.Fatal("Expected response from games.tool_names")
+		}
+
+		respBytes, _ := json.Marshal(response)
+		responseStr := string(respBytes)
+		t.Logf("games.tool_names (minecraft): %s", responseStr)
+
+		if !strings.Contains(responseStr, "minecraft.inventory.get") {
+			t.Error("Expected compact tool list to include minecraft.inventory.get")
+		}
+		if !strings.Contains(responseStr, "games.tool_detail") {
+			t.Error("Expected guidance to use games.tool_detail")
+		}
+		if strings.Contains(responseStr, "Parameters") {
+			t.Error("games.tool_names should not include full parameter details")
+		}
+	})
+
+	t.Run("ListToolNamesWithBriefStructuredSummaries", func(t *testing.T) {
+		namesMsg := &Message{
+			JSONRPC: "2.0",
+			Method:  "tools/call",
+			ID:      json.RawMessage(`"list-tool-names-brief"`),
+			Params: map[string]interface{}{
+				"name": "games.tool_names",
+				"arguments": map[string]interface{}{
+					"gameId": "minecraft",
+					"brief":  true,
+				},
+			},
+		}
+
+		response := server.HandleMessage(namesMsg)
+		if response == nil {
+			t.Fatal("Expected response from brief games.tool_names")
+		}
+
+		respBytes, _ := json.Marshal(response)
+		responseStr := string(respBytes)
+		t.Logf("games.tool_names (brief): %s", responseStr)
+
+		if !strings.Contains(responseStr, "\"brief\":true") {
+			t.Error("Expected structured content to note brief mode")
+		}
+		if !strings.Contains(responseStr, "\"summary\":\"Get player inventory in Minecraft (Game: minecraft)\"") {
+			t.Error("Expected structured content to include one-line summaries")
+		}
+		if strings.Contains(responseStr, "Include equipped armor") {
+			t.Error("Brief names response should not inline full parameter detail in text output")
+		}
+	})
+
+	t.Run("ToolDetailIncludesSchemas", func(t *testing.T) {
+		detailMsg := &Message{
+			JSONRPC: "2.0",
+			Method:  "tools/call",
+			ID:      json.RawMessage(`"tool-detail"`),
+			Params: map[string]interface{}{
+				"name": "games.tool_detail",
+				"arguments": map[string]interface{}{
+					"gameId": "minecraft",
+					"tool":   "minecraft.inventory.get",
+				},
+			},
+		}
+
+		response := server.HandleMessage(detailMsg)
+		if response == nil {
+			t.Fatal("Expected response from games.tool_detail")
+		}
+
+		respBytes, _ := json.Marshal(response)
+		responseStr := string(respBytes)
+		t.Logf("games.tool_detail: %s", responseStr)
+
+		if !strings.Contains(responseStr, "playerId") {
+			t.Error("Expected detailed schema output to include playerId")
+		}
+		if !strings.Contains(responseStr, "includeArmor") {
+			t.Error("Expected detailed schema output to include includeArmor")
+		}
+		if !strings.Contains(responseStr, "\"outputSchema\"") {
+			t.Error("Expected structured content to include outputSchema")
+		}
+		if !strings.Contains(responseStr, "default: false") {
+			t.Error("Expected default values to be surfaced in detail output")
+		}
+	})
+
+	t.Run("ToolDetailCanInferGameFromQualifiedName", func(t *testing.T) {
+		detailMsg := &Message{
+			JSONRPC: "2.0",
+			Method:  "tools/call",
+			ID:      json.RawMessage(`"tool-detail-no-game"`),
+			Params: map[string]interface{}{
+				"name": "games.tool_detail",
+				"arguments": map[string]interface{}{
+					"tool": "minecraft.inventory.get",
+				},
+			},
+		}
+
+		response := server.HandleMessage(detailMsg)
+		if response == nil {
+			t.Fatal("Expected response from games.tool_detail without gameId")
+		}
+
+		respBytes, _ := json.Marshal(response)
+		responseStr := string(respBytes)
+		t.Logf("games.tool_detail (qualified without gameId): %s", responseStr)
+
+		if strings.Contains(responseStr, "\"isError\":true") {
+			t.Error("Expected fully qualified tool_detail lookup without gameId to succeed")
+		}
+		if !strings.Contains(responseStr, "\"gameId\":\"minecraft\"") {
+			t.Error("Expected games.tool_detail to resolve the game from the qualified tool name")
+		}
+	})
+
+	t.Run("ToolDetailRejectsAmbiguousLocalNameWithoutGameId", func(t *testing.T) {
+		detailMsg := &Message{
+			JSONRPC: "2.0",
+			Method:  "tools/call",
+			ID:      json.RawMessage(`"tool-detail-ambiguous"`),
+			Params: map[string]interface{}{
+				"name": "games.tool_detail",
+				"arguments": map[string]interface{}{
+					"tool": "inventory.get",
+				},
+			},
+		}
+
+		response := server.HandleMessage(detailMsg)
+		if response == nil {
+			t.Fatal("Expected response from ambiguous games.tool_detail lookup")
+		}
+
+		respBytes, _ := json.Marshal(response)
+		responseStr := string(respBytes)
+		t.Logf("games.tool_detail (ambiguous without gameId): %s", responseStr)
+
+		if !strings.Contains(responseStr, "matched multiple games") {
+			t.Error("Expected ambiguous local names without gameId to be rejected clearly")
+		}
+	})
+
+	t.Run("ListToolNamesWithPagination", func(t *testing.T) {
+		namesMsg := &Message{
+			JSONRPC: "2.0",
+			Method:  "tools/call",
+			ID:      json.RawMessage(`"list-tool-names-paged"`),
+			Params: map[string]interface{}{
+				"name": "games.tool_names",
+				"arguments": map[string]interface{}{
+					"limit":  2,
+					"cursor": "0",
+				},
+			},
+		}
+
+		response := server.HandleMessage(namesMsg)
+		if response == nil {
+			t.Fatal("Expected response from paged games.tool_names")
+		}
+
+		respBytes, _ := json.Marshal(response)
+		responseStr := string(respBytes)
+		t.Logf("games.tool_names (paged): %s", responseStr)
+
+		if !strings.Contains(responseStr, "\"nextCursor\":\"2\"") {
+			t.Error("Expected paged tool names to return a next cursor")
+		}
+	})
+
+	t.Run("ListDetailedToolsWithQuery", func(t *testing.T) {
+		toolsMsg := &Message{
+			JSONRPC: "2.0",
+			Method:  "tools/call",
+			ID:      json.RawMessage(`"list-detailed-tools-filtered"`),
+			Params: map[string]interface{}{
+				"name": "games.tools",
+				"arguments": map[string]interface{}{
+					"query": "craft",
+				},
+			},
+		}
+
+		response := server.HandleMessage(toolsMsg)
+		if response == nil {
+			t.Fatal("Expected response from filtered games.tools")
+		}
+
+		respBytes, _ := json.Marshal(response)
+		responseStr := string(respBytes)
+		t.Logf("games.tools (filtered): %s", responseStr)
+
+		if !strings.Contains(responseStr, "rimworld.crafting.build") {
+			t.Error("Expected filtered games.tools to include crafting tool")
+		}
+		if strings.Contains(responseStr, "• minecraft.inventory.get") {
+			t.Error("Filtered games.tools should not include unrelated tools")
+		}
+	})
+
+	t.Run("FilteredDetailedToolsWithNoMatchesExplainsWhy", func(t *testing.T) {
+		toolsMsg := &Message{
+			JSONRPC: "2.0",
+			Method:  "tools/call",
+			ID:      json.RawMessage(`"list-detailed-tools-no-match"`),
+			Params: map[string]interface{}{
+				"name": "games.tools",
+				"arguments": map[string]interface{}{
+					"gameId": "rimworld",
+					"prefix": "rimworld.core",
+				},
+			},
+		}
+
+		response := server.HandleMessage(toolsMsg)
+		if response == nil {
+			t.Fatal("Expected response from filtered games.tools with no matches")
+		}
+
+		respBytes, _ := json.Marshal(response)
+		responseStr := string(respBytes)
+		t.Logf("games.tools (no filtered matches): %s", responseStr)
+
+		if !strings.Contains(responseStr, "No matching game-specific tools for 'rimworld'.") {
+			t.Error("Expected games.tools to clearly say the filter matched nothing")
+		}
+		if !strings.Contains(responseStr, "2 game-specific tools are currently connected for this game") {
+			t.Error("Expected games.tools to mention connected tools still exist")
+		}
+		if !strings.Contains(responseStr, "none matched prefix \\\"rimworld.core\\\"") {
+			t.Error("Expected games.tools to echo the unmatched prefix")
+		}
+		if strings.Contains(responseStr, "no GABP tools are currently connected") {
+			t.Error("games.tools should not claim tools are disconnected when the filter matched nothing")
+		}
+	})
+
+	t.Run("FilteredToolNamesWithNoMatchesExplainsWhy", func(t *testing.T) {
+		namesMsg := &Message{
+			JSONRPC: "2.0",
+			Method:  "tools/call",
+			ID:      json.RawMessage(`"list-tool-names-no-match"`),
+			Params: map[string]interface{}{
+				"name": "games.tool_names",
+				"arguments": map[string]interface{}{
+					"gameId": "rimworld",
+					"query":  "teleport",
+				},
+			},
+		}
+
+		response := server.HandleMessage(namesMsg)
+		if response == nil {
+			t.Fatal("Expected response from filtered games.tool_names with no matches")
+		}
+
+		respBytes, _ := json.Marshal(response)
+		responseStr := string(respBytes)
+		t.Logf("games.tool_names (no filtered matches): %s", responseStr)
+
+		if !strings.Contains(responseStr, "No matching game-specific tool names for 'rimworld'.") {
+			t.Error("Expected games.tool_names to clearly say the filter matched nothing")
+		}
+		if !strings.Contains(responseStr, "none matched query \\\"teleport\\\"") {
+			t.Error("Expected games.tool_names to echo the unmatched query")
+		}
+		if !strings.Contains(responseStr, "\"availableTotal\":2") {
+			t.Error("Expected structured content to include the pre-filter available count")
+		}
+	})
+}
+
+func TestGameToolNamesDefaultLimit(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "gabs_tool_names_limit_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	configPath := filepath.Join(tempDir, "config.json")
+	gamesConfig := &config.GamesConfig{
+		Version: "1.0",
+		Games: map[string]config.GameConfig{
+			"minecraft": {
+				ID:         "minecraft",
+				Name:       "Minecraft",
+				LaunchMode: "DirectPath",
+				Target:     "/opt/minecraft/start.sh",
+			},
+		},
+	}
+
+	if err := config.SaveGamesConfigToPath(gamesConfig, configPath); err != nil {
+		t.Fatal(err)
+	}
+
+	loadedConfig, err := config.LoadGamesConfigFromPath(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	logger := util.NewLogger("info")
+	server := NewServerForTesting(logger)
+	server.RegisterGameManagementTools(loadedConfig, 0, 0)
+
+	for i := 0; i < 55; i++ {
+		tool := Tool{
+			Name:        fmt.Sprintf("minecraft.bulk.tool_%02d", i),
+			Description: fmt.Sprintf("Bulk tool %02d", i),
+		}
+		server.RegisterTool(tool, func(args map[string]interface{}) (*ToolResult, error) {
+			return &ToolResult{Content: []Content{{Type: "text", Text: "Tool executed"}}}, nil
+		})
+	}
+
+	namesMsg := &Message{
+		JSONRPC: "2.0",
+		Method:  "tools/call",
+		ID:      json.RawMessage(`"tool-names-default-limit"`),
+		Params: map[string]interface{}{
+			"name": "games.tool_names",
+			"arguments": map[string]interface{}{
+				"gameId": "minecraft",
+			},
+		},
+	}
+
+	response := server.HandleMessage(namesMsg)
+	if response == nil {
+		t.Fatal("Expected response from games.tool_names default limit test")
+	}
+
+	respBytes, _ := json.Marshal(response)
+	responseStr := string(respBytes)
+	t.Logf("games.tool_names (default limit): %s", responseStr)
+
+	if !strings.Contains(responseStr, "\"returned\":50") {
+		t.Error("Expected games.tool_names to default to returning 50 names")
+	}
+	if !strings.Contains(responseStr, "\"nextCursor\":\"50\"") {
+		t.Error("Expected games.tool_names default page to expose nextCursor 50")
+	}
 }
 
 // TestProposedSolution demonstrates how the fix should work

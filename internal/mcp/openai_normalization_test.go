@@ -21,8 +21,8 @@ func TestOpenAINormalizationIntegration(t *testing.T) {
 	}
 
 	testCases := []struct {
-		name                 string
-		originalToolName     string
+		name                   string
+		originalToolName       string
 		expectedNormalizedName string
 		shouldPreserveOriginal bool
 	}{
@@ -59,7 +59,7 @@ func TestOpenAINormalizationIntegration(t *testing.T) {
 				Name:        tc.originalToolName,
 				Description: "Test tool for normalization",
 				InputSchema: map[string]interface{}{
-					"type": "object",
+					"type":       "object",
 					"properties": map[string]interface{}{},
 				},
 			}
@@ -126,7 +126,7 @@ func TestOpenAINormalizationDisabled(t *testing.T) {
 		Name:        "minecraft.inventory.get",
 		Description: "Test tool",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
 	}
@@ -167,7 +167,7 @@ func TestRegisterToolBackwardCompatibility(t *testing.T) {
 		Name:        "minecraft.inventory.get",
 		Description: "Test tool",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
 	}
@@ -189,6 +189,37 @@ func TestRegisterToolBackwardCompatibility(t *testing.T) {
 	}
 
 	t.Logf("✓ Backward compatibility maintained")
+}
+
+func TestNormalizedGameToolResolutionHelpers(t *testing.T) {
+	tool := Tool{
+		Name:        "minecraft_inventory_get",
+		Description: "Normalized mirrored tool",
+		InputSchema: map[string]interface{}{"type": "object"},
+		Meta: map[string]interface{}{
+			"originalName": "minecraft.inventory.get",
+		},
+	}
+
+	matches := []string{
+		"minecraft_inventory_get",
+		"minecraft.inventory.get",
+		"inventory.get",
+	}
+
+	for _, requested := range matches {
+		if !toolMatchesRequestedName("minecraft", tool, requested) {
+			t.Errorf("Expected normalized tool to match requested name %q", requested)
+		}
+	}
+
+	if toolMatchesRequestedName("minecraft", tool, "rimworld.inventory.get") {
+		t.Error("Did not expect normalized helper to match a different game's tool")
+	}
+
+	if gabpName := gabpToolNameFromTool("minecraft", tool); gabpName != "inventory/get" {
+		t.Errorf("Expected normalized helper to convert to GABP name inventory/get, got %q", gabpName)
+	}
 }
 
 // Helper functions

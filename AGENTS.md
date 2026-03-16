@@ -89,11 +89,18 @@ const status = await mcpClient.callTool("games.status", {
   gameId: "minecraft"
 });
 
-// Once game mod connects, discover available game actions
-const tools = await mcpClient.callTool("games.tools", {
-  gameId: "minecraft"  
+// Once game mod connects, discover available game actions cheaply
+const toolNames = await mcpClient.callTool("games.tool_names", {
+  gameId: "minecraft",
+  brief: true
 });
-console.log("Game-specific tools:", tools);
+console.log("Game-specific tool names:", toolNames);
+
+// Inspect only the tool you want to use
+const inventoryTool = await mcpClient.callTool("games.tool_detail", {
+  tool: "minecraft.inventory.get"
+});
+console.log("Inventory tool detail:", inventoryTool);
 ```
 
 ### Enhanced Game Control
@@ -157,7 +164,9 @@ GABS exposes game functionality as MCP tools. Common patterns:
 - `games.stop` - Gracefully stop a running game
 - `games.kill` - Force terminate a game
 - `games.status` - Check detailed status of games
-- `games.tools` - List available game-specific tools (from GABP compliant mods)
+- `games.tool_names` - List compact game-specific tool names, with optional filtering, pagination, and one-line summaries in structured output
+- `games.tool_detail` - Show one game-specific tool's description, parameters, defaults, and output schema; `gameId` is optional when the tool name is fully qualified or uniquely discoverable
+- `games.tools` - List available game-specific tools in detailed form for compatibility or human-readable inspection, with optional filtering, pagination, and structured output
 
 #### Game-Specific Tools (via GABP)
 When a game's GABP compliant mod connects, additional tools become available:
@@ -226,10 +235,11 @@ class GameStateMonitor {
       for (const game of games) {
         if (game.status === "running") {
           try {
-            const tools = await this.client.callTool("games.tools", {
-              gameId: game.id
+            const tools = await this.client.callTool("games.tool_names", {
+              gameId: game.id,
+              brief: true
             });
-            console.log(`${game.id} has ${tools.length} GABP tools available`);
+            console.log(`${game.id} exposes ${tools.length} compact tool entries`);
           } catch (error) {
             // Game mod hasn't connected yet
           }
@@ -264,10 +274,10 @@ class GameTester {
       // Check if game is running
       const status = await this.client.callTool("games.status", { gameId });
       
-      // Try to get GABP tools (indicates mod is connected)
+      // Try to get GABP tool names (indicates mod is connected)
       let tools = [];
       try {
-        tools = await this.client.callTool("games.tools", { gameId });
+        tools = await this.client.callTool("games.tool_names", { gameId, brief: true });
       } catch (error) {
         // GABP mod hasn't connected yet
       }
@@ -434,10 +444,10 @@ inventory/get       // Which game?
 player/teleport     // Minecraft or RimWorld?
 
 // After (crystal clear):
-minecraft.inventory/get     // Obviously Minecraft's inventory
-rimworld.inventory/get      // Obviously RimWorld's inventory  
-minecraft.player/teleport   // Minecraft teleportation
-rimworld.player/teleport    // RimWorld colonist movement
+minecraft.inventory.get     // Obviously Minecraft's inventory
+rimworld.inventory.get      // Obviously RimWorld's inventory
+minecraft.player.teleport   // Minecraft teleportation
+rimworld.player.teleport    // RimWorld colonist movement
 ```
 
 ### AI Usage Patterns
@@ -457,10 +467,11 @@ const minecraftStatus = await mcpClient.callTool("games.status", {
 // See what GABP tools a running game provides
 if (minecraftStatus.status === "running") {
   try {
-    const minecraftTools = await mcpClient.callTool("games.tools", {
-      gameId: "minecraft"
+    const minecraftTools = await mcpClient.callTool("games.tool_names", {
+      gameId: "minecraft",
+      brief: true
     });
-    console.log("Minecraft GABP tools:", minecraftTools);
+    console.log("Minecraft GABP tool names:", minecraftTools);
   } catch (error) {
     console.log("Minecraft mod not yet connected");
   }
@@ -477,7 +488,7 @@ await mcpClient.callTool("games.start", { gameId: "rimworld" });
 // Once GABP mods connect, you can use their exposed tools
 // (Tool names depend on what each mod implements)
 try {
-  const inventory = await mcpClient.callTool("inventory/get", {
+  const inventory = await mcpClient.callTool("minecraft.inventory.get", {
     playerId: "steve"
   });
   console.log("Minecraft inventory:", inventory);
@@ -538,7 +549,7 @@ class MultiGameTester {
     for (const gameId of games) {
       try {
         // Test inventory functionality in each game
-        const inventory = await this.mcpClient.callTool(`${gameId}.inventory/get`, {
+        const inventory = await this.mcpClient.callTool(`${gameId}.inventory.get`, {
           playerId: "test-player"
         });
         
@@ -563,9 +574,10 @@ class MultiGameTester {
 
 #### Tool Discovery Strategy
 1. **Use `games.list`** to see configured games and their status
-2. **Use `games.tools`** to discover what tools each game provides  
-3. **Look for game prefixes** (e.g., `minecraft.`, `rimworld.`) to identify game-specific tools
-4. **Filter tools by game** when you need to work with specific games
+2. **Use `games.tool_names`** to discover compact tool names for each game; add `brief: true` when one-line structured summaries help ranking
+3. **Use `games.tool_detail`** for 1-3 candidate tools when you need parameters and output schemas; omit `gameId` when the tool name is already fully qualified
+4. **Look for game prefixes** (e.g., `minecraft.`, `rimworld.`) to identify game-specific tools
+5. **Use `games.tools`** only when you intentionally want the richer one-shot listing
 
 #### Error Handling Best Practices
 ```typescript
@@ -603,16 +615,16 @@ const inventory = await mcpClient.callTool("inventory/get", { playerId: "steve" 
 **After (multi-game aware):**
 ```typescript
 // Option 1: Explicit game targeting
-const inventory = await mcpClient.callTool("minecraft.inventory/get", { playerId: "steve" });
+const inventory = await mcpClient.callTool("minecraft.inventory.get", { playerId: "steve" });
 
 // Option 2: Dynamic game selection
 const primaryGame = "minecraft"; // from config or user preference
-const inventory = await mcpClient.callTool(`${primaryGame}.inventory/get`, { playerId: "steve" });
+const inventory = await mcpClient.callTool(`${primaryGame}.inventory.get`, { playerId: "steve" });
 
 // Option 3: Try all games until one succeeds
 for (const gameId of ["minecraft", "rimworld"]) {
   try {
-    const inventory = await mcpClient.callTool(`${gameId}.inventory/get`, { playerId: "steve" });
+    const inventory = await mcpClient.callTool(`${gameId}.inventory.get`, { playerId: "steve" });
     if (inventory) break;
   } catch (error) {
     continue; // Try next game
@@ -622,7 +634,7 @@ for (const gameId of ["minecraft", "rimworld"]) {
 
 ### Benefits for AI Agents
 
-1. **Crystal Clear Intent**: `minecraft.inventory/get` vs `rimworld.inventory/get` - no ambiguity
+1. **Crystal Clear Intent**: `minecraft.inventory.get` vs `rimworld.inventory.get` - no ambiguity
 2. **Parallel Game Control**: AI can manage multiple games simultaneously without conflicts  
 3. **Robust Error Handling**: AI knows exactly which game failed and why
 4. **Scalable Architecture**: Add more games without tool name conflicts

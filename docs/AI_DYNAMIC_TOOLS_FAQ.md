@@ -12,17 +12,22 @@
 ## Why AI Agents Will Handle This Well
 
 ### 1. **Built-in Discovery Mechanism**
-GABS provides `games.tools` specifically for this purpose:
+GABS provides a compact two-step discovery flow specifically for this purpose:
 
 ```javascript
-// AI discovers what's available for a specific game
-const minecraftTools = await mcp.callTool("games.tools", {"gameId": "minecraft"});
+// AI discovers compact names for a specific game
+const minecraftToolNames = await mcp.callTool("games.tool_names", {"gameId": "minecraft", "brief": true});
 
-// AI discovers all available game tools
+// AI inspects one candidate in detail
+const inventoryDetail = await mcp.callTool("games.tool_detail", {
+  "tool": "minecraft.inventory.get"
+});
+
+// The richer compatibility listing still exists when needed
 const allGameTools = await mcp.callTool("games.tools", {});
 ```
 
-This is like having a "What can I do now?" button that AI agents can press whenever they need to understand current capabilities.
+This gives AI agents a predictable "discover names first, inspect details second" workflow, which is much more context-efficient than always dumping every schema up front. `games.tool_names` defaults to 50 names per page and can add one-line summaries in structured output with `brief: true`.
 
 ### 2. **Clear Namespacing Prevents Chaos**
 Even with 50+ tools from multiple games, AI agents won't get confused because:
@@ -61,7 +66,7 @@ This is actually **easier** for AI agents than having all 29 tools available fro
 User: "Help me with my Minecraft server"
 
 AI: Let me see what I can do with Minecraft...
-    → games.tools {"gameId": "minecraft"}
+    → games.tool_names {"gameId": "minecraft", "brief": true}
 
 AI: I can help you with:
     - Managing player inventories
@@ -82,7 +87,7 @@ AI: I'll add that to your inventory...
 User: "I'm running both Minecraft and RimWorld, help me manage both"
 
 AI: Let me check what I can do with both games...
-    → games.tools {}
+    → games.tool_names {"brief": true}
 
 AI: Perfect! I can help you with:
     
@@ -105,8 +110,8 @@ class GABSClient {
     const currentGames = await this.mcp.callTool("games.status", {});
     
     if (this.gameStateChanged(currentGames)) {
-      // Refresh available tools
-      this.availableTools = await this.mcp.callTool("games.tools", {});
+      // Refresh compact tool names
+      this.availableTools = await this.mcp.callTool("games.tool_names", {"brief": true});
       this.lastRefresh = Date.now();
     }
   }
@@ -119,17 +124,17 @@ I've created comprehensive tests that prove this works well:
 
 ### Test Results Summary:
 ```
-✅ Phase 1: AI starts with 6 core tools
-✅ Phase 2: AI discovers 7 new Minecraft tools (total: 13)  
-✅ Phase 3: AI uses games.tools to understand capabilities
-✅ Phase 4: AI handles 4 more RimWorld tools (total: 17)
+✅ Phase 1: AI starts with 8 core tools
+✅ Phase 2: AI discovers 7 new Minecraft tools (total: 15)
+✅ Phase 3: AI uses games.tool_names and games.tool_detail to understand capabilities
+✅ Phase 4: AI handles 4 more RimWorld tools (total: 19)
 ✅ Phase 5: AI manages both games without confusion
 
-Tool expansion: 6 → 13 → 17 (nearly 3x growth handled perfectly)
+Tool expansion: 8 → 15 → 19 (more than 2x growth handled cleanly)
 ```
 
 ### AI Discovery Patterns That Work:
-1. **Discovery-First**: Always check `games.tools` before attempting game actions
+1. **Discovery-First**: Always check `games.tool_names` before attempting game actions
 2. **Caching with Refresh**: Cache tools but refresh after game state changes
 3. **Intent-Based Filtering**: Filter large tool sets by user intent
 4. **Lazy Loading**: Only load tools for games the user is actually using
@@ -140,7 +145,7 @@ Tool expansion: 6 → 13 → 17 (nearly 3x growth handled perfectly)
 ```javascript
 // Pattern 1: Always discover before acting
 async handleGameRequest(gameId, action) {
-  const gameTools = await mcp.callTool("games.tools", {gameId});
+  const gameTools = await mcp.callTool("games.tool_names", {gameId, brief: true});
   const availableActions = parseToolsForCapabilities(gameTools);
   
   if (availableActions.includes(action)) {
@@ -168,7 +173,7 @@ function organizeToolsForUser(allTools) {
 const toolsCache = await mcp.callTool("tools/list", {}); // DON'T cache forever
 
 // Don't assume tools exist without checking
-await mcp.callTool("minecraft.inventory.get", {...}); // Check games.tools first!
+await mcp.callTool("minecraft.inventory.get", {...}); // Check games.tool_names first!
 
 // Don't overwhelm users with massive tool lists
 console.log("Here are 47 available tools..."); // Group by game instead!
@@ -179,7 +184,7 @@ console.log("Here are 47 available tools..."); // Group by game instead!
 ### GABS Architecture Supports This:
 1. **MCP Compliance**: Standard JSON-RPC with proper tool metadata
 2. **Game Prefixing**: Automatic namespacing prevents conflicts
-3. **Discovery API**: `games.tools` provides structured exploration
+3. **Discovery APIs**: `games.tool_names` and `games.tool_detail` provide structured exploration
 4. **Status Awareness**: AI can check game state before tool usage
 5. **Mirror System**: Automatic GABP→MCP tool conversion
 
@@ -194,7 +199,7 @@ console.log("Here are 47 available tools..."); // Group by game instead!
 You're absolutely right to think about this challenge - dynamic tool expansion **could** be confusing for AI agents. But GABS's architecture specifically solves this:
 
 ### Why It Works:
-1. **Predictable Discovery**: `games.tools` makes tool exploration systematic
+1. **Predictable Discovery**: `games.tool_names` makes tool exploration systematic
 2. **Clear Namespacing**: Game prefixes eliminate all ambiguity
 3. **Progressive Disclosure**: Tools appear as capabilities are needed, not all at once
 4. **Standard MCP**: AI agents already know how to handle MCP tool expansion
@@ -204,13 +209,13 @@ You're absolutely right to think about this challenge - dynamic tool expansion *
 AI agents working with GABS will naturally develop patterns like:
 
 1. **Start with basics**: Use core `games.*` tools to manage games
-2. **Discover capabilities**: Use `games.tools` when users want game-specific actions  
+2. **Discover capabilities**: Use `games.tool_names`, then `games.tool_detail` for the few tools you want to inspect; fully qualified tool names let you omit `gameId` in the detail and call steps
 3. **Use clear names**: Always use game-prefixed tool names for clarity
 4. **Cache intelligently**: Refresh tool knowledge after game state changes
 
 This is actually a **better** experience than static tool sets because AI agents can grow capabilities as users' gaming setups expand!
 
 ### Evidence:
-The test suite demonstrates AI agents handling tool counts expanding from 6 → 13 → 17 without any confusion, using clear discovery patterns and game-specific namespacing.
+The test suite demonstrates AI agents handling tool counts expanding from 8 → 15 → 19 without any confusion, using clear discovery patterns and game-specific namespacing.
 
 **Bottom line**: Your dynamic tool system will work excellently in the real world because it's designed exactly for this use case. AI agents will love the clarity and discoverability! 🎮🤖✨

@@ -165,9 +165,11 @@ Once connected, your AI starts with a stable MCP surface and can then discover d
 - **`games.stop`** - Stop a game gracefully: `{"gameId": "minecraft"}`
 - **`games.kill`** - Force stop a game: `{"gameId": "minecraft"}`
 - **`games.status`** - Check one game or all configured games
-- **`games.tools`** - List currently available game-specific tools, including parameter and return schemas
+- **`games.tool_names`** - List compact game-specific tool names, with optional filtering, pagination, and optional brief summaries in structured output
+- **`games.tool_detail`** - Show one game-specific tool's description, parameters, defaults, and output schema; `gameId` is optional when the tool name is fully qualified or uniquely discoverable
+- **`games.tools`** - List currently available game-specific tools in detailed form for compatibility and human-readable inspection, with optional filtering, pagination, and structured output
 - **`games.connect`** - Manually connect or reconnect to a running game's GABP server after the mod finishes loading or after a GABS restart
-- **`games.call_tool`** - Call a discovered game tool through the stable core surface: `{"gameId": "minecraft", "tool": "minecraft.inventory.get", "arguments": {"playerId": "steve"}}`
+- **`games.call_tool`** - Call a discovered game tool through the stable core surface: `{"tool": "minecraft.inventory.get", "arguments": {"playerId": "steve"}}` (`gameId` is optional when the tool name is fully qualified or uniquely discoverable)
 
 ### Game-Specific Tools from Mods
 
@@ -181,18 +183,20 @@ GABP mods typically expose canonical tool names such as `inventory/get`, `world/
 
 **Game ID Prefixing**: To avoid conflicts when multiple games are running, mirrored mod tools are automatically prefixed with the game ID (for example, `minecraft.` or `rimworld.`). This lets AI clearly specify which game to control, and GABS removes those mirrored tools again when the game disconnects.
 
-**Discovery and Reconnect Flow**: Use the stable core tools to discover or resync a running game:
+**Recommended Discovery Flow**: Use the compact discovery tools first, then fetch detail only for the few candidates you care about:
 ```
 AI: "Reconnect to RimWorld and show me its mod tools"
 GABS: games.connect {"gameId": "rimworld"}
-GABS: games.tools {"gameId": "rimworld"}
+GABS: games.tool_names {"gameId": "rimworld", "brief": true}
+GABS: games.tool_detail {"tool": "rimworld.crafting.build"}
 ```
 
-If your MCP client supports dynamic tool refresh, it can call mirrored tools directly after the `tools/list_changed` notification. If it keeps a fixed tool surface, use `games.call_tool` with the mirrored name returned by `games.tools`:
+`games.tools` remains available for compatibility when you want the richer one-shot listing, but `games.tool_names -> games.tool_detail -> games.call_tool` is the most token-efficient path for AI clients such as Codex and Claude. `games.tool_names` now defaults to 50 names per page and can include one-line summaries in structured output with `brief: true`.
+
+If your MCP client supports dynamic tool refresh, it can call mirrored tools directly after the `tools/list_changed` notification. If it keeps a fixed tool surface, use `games.call_tool` with the mirrored name returned by `games.tool_names` or `games.tools`:
 
 ```json
 {
-  "gameId": "minecraft",
   "tool": "minecraft.inventory.get",
   "arguments": {
     "playerId": "steve"
