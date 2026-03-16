@@ -40,17 +40,41 @@ AI Agent ← MCP → GABS ← GABP → Game Mod ← Game API → Game
 - **Configure once**: Add games with `gabs games add`
 - **Control with AI**: Natural commands through MCP tools
 - **Any game**: Works with modded games that support GABP
-- **Any AI**: Works with Claude, ChatGPT, and custom AI tools
+- **Any AI**: Works with Claude Desktop, Codex CLI, and other MCP-capable clients
 - **Live discovery**: AI gets MCP `tools/list_changed` and `resources/list_changed` notifications as games connect
 
 ## Quick Start
 
 ### 1. Download GABS
 
-Get the latest version for your system:
-- **Windows**: [`gabs-windows-amd64.exe`](releases/latest)
-- **macOS**: [`gabs-darwin-arm64`](releases/latest)
-- **Linux**: [`gabs-linux-amd64`](releases/latest)
+Download the latest release bundle for your system from [GitHub Releases](releases/latest).
+
+Available archives are named like:
+- **Windows x64**: `gabs-<version>-windows-amd64.zip`
+- **macOS Apple Silicon**: `gabs-<version>-darwin-arm64.zip`
+- **macOS Intel**: `gabs-<version>-darwin-amd64.zip`
+- **Linux x64**: `gabs-<version>-linux-amd64.zip`
+- **Linux ARM64**: `gabs-<version>-linux-arm64.zip`
+
+Each archive contains:
+- the `gabs` binary (`gabs.exe` on Windows)
+- `README.md`
+- the full `docs/` folder
+- `example-config.json`
+- `LICENSE`
+
+After unzipping:
+
+**Windows**
+```powershell
+.\gabs.exe version
+```
+
+**macOS / Linux**
+```bash
+chmod +x gabs
+./gabs version
+```
 
 ### 2. Add Your Games
 
@@ -105,9 +129,24 @@ Add GABS to your AI's MCP settings:
 **Codex CLI:**
 ```toml
 [mcp_servers.gabs]
-command = "gabs"
+command = "/absolute/path/to/gabs"
 args = ["server"]
 ```
+
+**Generic MCP client:**
+
+Point your client at the `gabs` binary with the `server` subcommand:
+
+```json
+{
+  "command": "/absolute/path/to/gabs",
+  "args": ["server"]
+}
+```
+
+If your client uses OpenAI-style tool calling constraints, enable the `toolNormalization` section in `~/.gabs/config.json`. See [OpenAI Tool Normalization](docs/OPENAI_TOOL_NORMALIZATION.md) for details.
+
+For a full download-to-config walkthrough, including Claude Desktop, Codex CLI, and generic MCP/OpenAI-style clients, see the [AI Client Setup Guide](docs/AI_CLIENT_SETUP.md).
 
 **Then ask your AI:**
 - "List my games"
@@ -167,6 +206,7 @@ Connected games also expose a state resource at `gab://<gameId>/state`.
 
 ## Documentation
 
+- **[AI Client Setup Guide](docs/AI_CLIENT_SETUP.md)** - Install a release bundle and connect Claude Desktop, Codex CLI, or generic MCP clients
 - **[Configuration Guide](docs/CONFIGURATION.md)** - Detailed setup for different game types and tool normalization
 - **[AI Integration Guide](docs/INTEGRATION.md)** - Connect GABS to different AI tools and deployment scenarios
 - **[Mod Development Guide](docs/MOD_DEVELOPMENT.md)** - Add GABP support to your game mods

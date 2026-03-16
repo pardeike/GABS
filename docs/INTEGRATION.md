@@ -3,6 +3,8 @@
 This guide shows you how to connect GABS to different AI assistants and tools.
 
 > **See also:** [Configuration Guide](CONFIGURATION.md) for setting up games, [OpenAI Tool Normalization](OPENAI_TOOL_NORMALIZATION.md) for OpenAI API compatibility, and [Deployment Guide](DEPLOYMENT.md) for production setups.
+>
+> If you are starting from a downloaded release archive, read [AI Client Setup Guide](AI_CLIENT_SETUP.md) first. It covers unzip/install steps, config locations, and ready-to-paste client snippets.
 
 ## MCP Integration
 
@@ -58,7 +60,7 @@ Then you can ask Claude:
 - "Start minecraft and check its status"
 - "Stop all running games"
 
-### Codeium/Codex CLI
+### Codex CLI
 
 Add this to your configuration:
 

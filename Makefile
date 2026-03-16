@@ -52,6 +52,8 @@ version-info:
 .PHONY: build-all
 build-all:
 	GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o gabs-linux-amd64 ./cmd/gabs
+	GOOS=linux GOARCH=arm64 go build $(LDFLAGS) -o gabs-linux-arm64 ./cmd/gabs
+	GOOS=darwin GOARCH=amd64 go build $(LDFLAGS) -o gabs-darwin-amd64 ./cmd/gabs
 	GOOS=darwin GOARCH=arm64 go build $(LDFLAGS) -o gabs-darwin-arm64 ./cmd/gabs
 	GOOS=windows GOARCH=amd64 go build $(LDFLAGS) -o gabs-windows-amd64.exe ./cmd/gabs
 
@@ -64,5 +66,5 @@ help:
 	@echo "  clean        - Remove build artifacts"
 	@echo "  install      - Install the binary"
 	@echo "  version-info - Show version information that would be embedded"
-	@echo "  build-all    - Build for multiple platforms"
+	@echo "  build-all    - Build Windows, macOS, and Linux binaries"
 	@echo "  help         - Show this help message"
