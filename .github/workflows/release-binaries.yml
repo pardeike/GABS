@@ -4,36 +4,193 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing tag or release to package, for example v0.1.0
-        required: false
+        description: Release tag to create or package, for example v0.2.2
+        required: true
         type: string
+      target_ref:
+        description: Branch, tag, or commit to release when the tag does not already exist
+        required: false
+        default: main
+        type: string
+      prerelease:
+        description: Mark the release as a prerelease
+        required: false
+        default: false
+        type: boolean
+      latest:
+        description: Mark the release as Latest
+        required: false
+        default: true
+        type: boolean
+      generate_notes:
+        description: Generate release notes automatically
+        required: false
+        default: true
+        type: boolean
   release:
     types: [published]
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.event.release.tag_name || inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
+  resolve-release:
+    runs-on: ubuntu-latest
+
+    outputs:
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      source_ref: ${{ steps.resolve.outputs.source_ref }}
+      tag_exists: ${{ steps.resolve.outputs.tag_exists }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.2
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.target_ref || github.ref_name }}
+          fetch-depth: 0
+
+      - name: Resolve release tag and source ref
+        id: resolve
+        env:
+          RELEASE_EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          INPUT_TARGET_REF: ${{ inputs.target_ref }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$RELEASE_EVENT_TAG" ]; then
+            RELEASE_TAG="$RELEASE_EVENT_TAG"
+            SOURCE_REF="$RELEASE_TAG"
+            TAG_EXISTS=true
+          else
+            RELEASE_TAG="$INPUT_RELEASE_TAG"
+            TARGET_REF="${INPUT_TARGET_REF:-main}"
+
+            if [ -z "$RELEASE_TAG" ]; then
+              echo "workflow_dispatch requires release_tag" >&2
+              exit 1
+            fi
+
+            if ! printf '%s' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$'; then
+              echo "release_tag must look like v0.2.2 or v0.2.2-rc.1" >&2
+              exit 1
+            fi
+
+            if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+              SOURCE_REF="$RELEASE_TAG"
+              TAG_EXISTS=true
+            else
+              SOURCE_REF="$TARGET_REF"
+              TAG_EXISTS=false
+            fi
+          fi
+
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "source_ref=$SOURCE_REF" >> "$GITHUB_OUTPUT"
+          echo "tag_exists=$TAG_EXISTS" >> "$GITHUB_OUTPUT"
+
   verify:
+    needs: resolve-release
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6.0.2
         with:
-          ref: ${{ github.event.release.tag_name || inputs.release_tag || github.ref_name }}
+          ref: ${{ needs.resolve-release.outputs.source_ref }}
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v6.3.0
         with:
           go-version: "1.22"
 
+      - name: Verify release tag matches source version
+        env:
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          SOURCE_VERSION="$(grep -oE 'Version = "[^"]+"' internal/version/version.go | sed -E 's/.*"([^"]+)"/\1/')"
+
+          if [ -z "$SOURCE_VERSION" ]; then
+            echo "Could not read Version from internal/version/version.go" >&2
+            exit 1
+          fi
+
+          if [ "$RELEASE_TAG" != "v$SOURCE_VERSION" ]; then
+            echo "Release tag $RELEASE_TAG does not match source version v$SOURCE_VERSION" >&2
+            exit 1
+          fi
+
       - name: Run tests
         run: go test ./...
 
+  ensure-release:
+    needs:
+      - resolve-release
+      - verify
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.2
+        with:
+          ref: ${{ needs.resolve-release.outputs.source_ref }}
+          fetch-depth: 0
+
+      - name: Ensure GitHub release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GENERATE_NOTES: ${{ inputs.generate_notes }}
+          LATEST: ${{ inputs.latest }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
+          TAG_EXISTS: ${{ needs.resolve-release.outputs.tag_exists }}
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "$TAG_EXISTS" != "true" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag "$RELEASE_TAG"
+            git push origin "$RELEASE_TAG"
+          fi
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists."
+            exit 0
+          fi
+
+          args=(
+            release create "$RELEASE_TAG"
+            --verify-tag
+            --title "$RELEASE_TAG"
+            "--latest=$LATEST"
+          )
+
+          if [ "$PRERELEASE" = "true" ]; then
+            args+=(--prerelease)
+          fi
+
+          if [ "$GENERATE_NOTES" = "true" ]; then
+            args+=(--generate-notes)
+          else
+            args+=(--notes "")
+          fi
+
+          gh "${args[@]}"
+
   build-and-upload:
-    needs: verify
-    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+    needs:
+      - resolve-release
+      - verify
+      - ensure-release
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
 
     strategy:
@@ -60,7 +217,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6.0.2
         with:
-          ref: ${{ github.event.release.tag_name || inputs.release_tag }}
+          ref: ${{ needs.resolve-release.outputs.release_tag }}
 
       - name: Set up Go
         uses: actions/setup-go@v6.3.0
@@ -72,7 +229,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           BINARY_EXTENSION: ${{ matrix.extension }}
-          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
         run: |
           set -euo pipefail
 
@@ -107,7 +264,7 @@ jobs:
       - name: Upload archive to GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
