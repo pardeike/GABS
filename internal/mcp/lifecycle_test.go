@@ -161,7 +161,7 @@ func TestApplicationLifecycleManagement(t *testing.T) {
 
 		// Both should resolve to the same game - either both succeed or both recognize the game configuration
 		if strings.Contains(responseStr, "game not found") || strings.Contains(responseStr2, "game not found") ||
-		   strings.Contains(responseStr, "configuration not found") || strings.Contains(responseStr2, "configuration not found") {
+			strings.Contains(responseStr, "configuration not found") || strings.Contains(responseStr2, "configuration not found") {
 			t.Error("Steam App ID should resolve to configured game")
 		}
 
@@ -208,11 +208,9 @@ func TestApplicationLifecycleManagement(t *testing.T) {
 		respBytes, _ := json.Marshal(response)
 		t.Logf("Game start for bridge test: %s", string(respBytes))
 
-		// Check if bridge config was created
-		// Note: This is platform-dependent, but we can check the basic structure
-		// The actual bridge.json would be in ~/.local/state/gab/test-direct/ or similar
+		// Check if bridge config was created in the default per-game config directory.
 		homeDir, _ := os.UserHomeDir()
-		bridgePath := filepath.Join(homeDir, ".local", "state", "gab", "test-direct", "bridge.json")
+		bridgePath := filepath.Join(homeDir, ".gabs", "test-direct", "bridge.json")
 
 		if _, err := os.Stat(bridgePath); err == nil {
 			t.Logf("Bridge config created at: %s", bridgePath)
@@ -227,7 +225,7 @@ func TestApplicationLifecycleManagement(t *testing.T) {
 					t.Error("Failed to parse bridge config JSON")
 				} else {
 					// Verify required fields
-					requiredFields := []string{"port", "token", "gameId", "agentName"}
+					requiredFields := []string{"port", "token", "gameId"}
 					for _, field := range requiredFields {
 						if _, exists := bridgeConfig[field]; !exists {
 							t.Errorf("Bridge config missing required field: %s", field)

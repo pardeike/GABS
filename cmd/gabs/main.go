@@ -25,8 +25,6 @@ import (
 	"github.com/pardeike/gabs/internal/version"
 )
 
-
-
 const defaultBackoff = "100ms..5s"
 
 type options struct {
@@ -39,7 +37,6 @@ type options struct {
 	// Config + runtime
 	configDir  string
 	logLevel   string
-	backoffStr string
 	backoffMin time.Duration
 	backoffMax time.Duration
 
@@ -74,7 +71,7 @@ func main() {
 				remainingArgs = os.Args[3:] // Skip "server" and transport mode
 			} else {
 				// Treat as flag-based syntax
-				transport = "" // Will be determined by flags
+				transport = ""              // Will be determined by flags
 				remainingArgs = os.Args[2:] // Skip only "server"
 			}
 		} else {
@@ -129,7 +126,6 @@ func main() {
 		httpAddr:   httpAddr,
 		configDir:  *configDir,
 		logLevel:   *logLevel,
-		backoffStr: *backoff,
 		backoffMin: min,
 		backoffMax: max,
 		graceStop:  *grace,
@@ -358,7 +354,7 @@ func addGame(log util.Logger, gameID string, configDir string) int {
 			log.Errorw("invalid game configuration", "error", err)
 			return 1
 		}
-		
+
 		if err := config.SaveGamesConfigToDir(gamesConfig, configDir); err != nil {
 			log.Errorw("failed to save games config", "error", err)
 			return 1
@@ -432,7 +428,7 @@ func addGame(log util.Logger, gameID string, configDir string) int {
 		log.Errorw("invalid game configuration", "error", err)
 		return 1
 	}
-	
+
 	if err := config.SaveGamesConfigToDir(gamesConfig, configDir); err != nil {
 		log.Errorw("failed to save games config", "error", err)
 		return 1

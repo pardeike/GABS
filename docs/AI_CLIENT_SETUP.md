@@ -70,9 +70,10 @@ By default, GABS stores its configuration in:
 
 - `~/.gabs/config.json`
 
-Bridge files for running games are written under:
+Per-game runtime files for running games are written under:
 
 - `~/.gabs/<gameId>/bridge.json`
+- `~/.gabs/<gameId>/runtime.json` (internal ownership tracking used by GABS)
 
 If you need a complete config example, see `example-config.json` in the release
 archive.
@@ -178,6 +179,19 @@ Once your AI client is connected, try prompts like:
 - "Show the status of all games"
 - "Reconnect to RimWorld and list its tools"
 
+If you have more than one live GABS session, the second session will not try to
+launch or connect to the same game again by default. To intentionally move a
+running game's ownership to the current session, use:
+
+```json
+{
+  "gameId": "rimworld",
+  "forceTakeover": true
+}
+```
+
+with `games.connect`.
+
 ## Troubleshooting
 
 ### The AI Cannot See Any GABS Tools
@@ -199,7 +213,13 @@ name, not just the launcher.
 
 ### A Mod Cannot Find `bridge.json`
 
-Make sure the mod reads:
+Make sure the mod first checks the environment variables:
+
+- `GABP_SERVER_PORT`
+- `GABP_TOKEN`
+- `GABS_GAME_ID`
+
+and only falls back to:
 
 - `~/.gabs/<gameId>/bridge.json`
 

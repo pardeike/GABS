@@ -12,27 +12,28 @@ GABS uses a **progressive tool disclosure** system that helps AI agents handle t
 When GABS starts, AI agents see only core game management tools:
 
 ```
-Available Tools (8):
-- games.list    - List configured games
-- games.start   - Start a game  
-- games.stop    - Stop a game gracefully
-- games.kill    - Force terminate a game
-- games.status  - Check game status
-- games.tool_names  - Compact tool discovery, defaulting to 50 names per page
-- games.tool_detail - Detailed schema for one tool
-- games.tools       - Detailed compatibility listing with structured output
+Stable core tools:
+- games.list         - List configured game IDs
+- games.show         - Inspect one configured game
+- games.start        - Start a game
+- games.stop         - Stop a game gracefully
+- games.kill         - Force terminate a game
+- games.status       - Check game status
+- games.tool_names   - Compact mirrored-tool discovery
+- games.tool_detail  - Detailed schema for one tool
+- games.tools        - Rich compatibility listing
+- games.connect      - Reattach to a running game's GABP server
+- games.call_tool    - Call a mirrored tool through the stable core surface
 ```
 
 ### Phase 2: Game Connection (Dynamic Expansion)
 After starting a game with GABP mods, tools expand dramatically:
 
 ```
-Available Tools (15+):
-Core Tools:
-- games.list, games.start, games.stop, games.kill, games.status
-- games.tool_names, games.tool_detail, games.tools
+Available tools expand with mirrored game tools. The exact set depends on the
+connected game and mod:
 
-Minecraft-Specific Tools (after minecraft starts):
+Minecraft-Specific Examples:
 - minecraft.inventory.get     - Get player inventory
 - minecraft.inventory.set     - Modify player inventory  
 - minecraft.world.get_block   - Check block at position
@@ -48,6 +49,11 @@ RimWorld-Specific Tools (if rimworld also starts):
 - rimworld.colonist.command   - Give colonist orders
 - rimworld.research.progress  - Check research status
 ```
+
+GABS can also have multiple live sessions. If another session already owns a
+running game, `games.start` and `games.connect` return quickly instead of
+hanging, and `games.connect {"forceTakeover": true}` can intentionally move
+ownership to the current session.
 
 ## AI Discovery Strategies
 
@@ -146,12 +152,12 @@ AI: I'll start both games and show you the expanded capabilities...
     
 AI: Perfect! Now I can help you with:
     
-    Minecraft (8 tools available):
+    Minecraft:
     - Inventory management
     - World building  
     - Player control
     
-    RimWorld (6 tools available):
+    RimWorld:
     - Colony management
     - Crafting systems
     - Research progress
@@ -249,6 +255,9 @@ async function intelligentGameManagement(request) {
 2. **Don't cache tools indefinitely** - they change as games start/stop
 3. **Don't try to use generic tool names** like `inventory.get` 
 4. **Don't overwhelm users** with massive detailed tool dumps - group and filter intelligently
+5. **Don't treat duplicate starts as success signals** - if another live GABS
+   session already owns the game, expect `games.start` or `games.connect` to
+   return a quick "already running/owned" style message
 
 ## GABS Design Advantages for AI
 

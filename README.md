@@ -154,6 +154,30 @@ For a full download-to-config walkthrough, including Claude Desktop, Codex CLI, 
 - "Stop all running games"
 - "Check the status of RimWorld"
 
+## Session Ownership
+
+GABS coordinates launches across live sessions on the same machine. When one
+GABS session already owns a running or starting game:
+
+- `games.start` returns quickly with an "already starting" or "already running"
+  message instead of trying to launch a second copy
+- `games.connect` also returns quickly instead of waiting on a competing bridge
+  connection
+- `games.status` can report that another GABS session owns the process
+
+If you intentionally want a different GABS session to take over a running game,
+use:
+
+```json
+{
+  "gameId": "rimworld",
+  "forceTakeover": true
+}
+```
+
+with `games.connect`. This defaults to `false` and should only be used when you
+really do want the new session to become the owner.
+
 ## AI Tools Available
 
 Once connected, your AI starts with a stable MCP surface and can then discover dynamic game tools as mods connect.
@@ -168,7 +192,7 @@ Once connected, your AI starts with a stable MCP surface and can then discover d
 - **`games.tool_names`** - List compact game-specific tool names, with optional filtering, pagination, and optional brief summaries in structured output
 - **`games.tool_detail`** - Show one game-specific tool's description, parameters, defaults, and output schema; `gameId` is optional when the tool name is fully qualified or uniquely discoverable
 - **`games.tools`** - List currently available game-specific tools in detailed form for compatibility and human-readable inspection, with optional filtering, pagination, and structured output
-- **`games.connect`** - Manually connect or reconnect to a running game's GABP server after the mod finishes loading or after a GABS restart
+- **`games.connect`** - Manually connect or reconnect to a running game's GABP server after the mod finishes loading or after a GABS restart. Set `forceTakeover: true` only when you intentionally want this session to replace another live GABS owner.
 - **`games.call_tool`** - Call a discovered game tool through the stable core surface: `{"tool": "minecraft.inventory.get", "arguments": {"playerId": "steve"}}` (`gameId` is optional when the tool name is fully qualified or uniquely discoverable)
 
 ### Game-Specific Tools from Mods
@@ -190,6 +214,11 @@ GABS: games.connect {"gameId": "rimworld"}
 GABS: games.tool_names {"gameId": "rimworld", "brief": true}
 GABS: games.tool_detail {"tool": "rimworld.crafting.build"}
 ```
+
+If another live GABS session already owns RimWorld, `games.connect` returns
+quickly instead of hanging. Use `games.connect {"gameId": "rimworld",
+"forceTakeover": true}` only when you want to move ownership to the current
+session.
 
 `games.tools` remains available for compatibility when you want the richer one-shot listing, but `games.tool_names -> games.tool_detail -> games.call_tool` is the most token-efficient path for AI clients such as Codex and Claude. `games.tool_names` now defaults to 50 names per page and can include one-line summaries in structured output with `brief: true`.
 

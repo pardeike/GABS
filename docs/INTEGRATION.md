@@ -14,13 +14,41 @@ GABS works as an MCP (Model Context Protocol) server. This means AI assistants c
 
 Once GABS is running, AI can use these tools:
 
-- **`games.list`** - Show all configured games and their status
+- **`games.list`** - Show configured game IDs
+- **`games.show`** - Show configuration and validation details for one game
 - **`games.start`** - Start a game: `{"gameId": "minecraft"}`
-- **`games.stop`** - Stop a game gracefully: `{"gameId": "minecraft"}`  
+- **`games.stop`** - Stop a game gracefully: `{"gameId": "minecraft"}`
 - **`games.kill`** - Force quit a game: `{"gameId": "minecraft"}`
 - **`games.status`** - Check if games are running: `{"gameId": "minecraft"}` or all games
+- **`games.tool_names`** - Discover compact mirrored tool names
+- **`games.tool_detail`** - Inspect one mirrored tool's schema
+- **`games.tools`** - Fetch the richer compatibility listing of mirrored tools
+- **`games.connect`** - Attach to a running game's GABP server after the mod loads or after a GABS restart
+- **`games.call_tool`** - Call a mirrored game tool through the stable core surface
 
 **Pro tip**: You can use either the game ID (`"rimworld"`) or the launch target (`"294100"` for Steam) in any tool.
+
+## Ownership and Reconnect Behavior
+
+GABS coordinates live sessions per game. If one GABS session already owns a
+running or starting game:
+
+- `games.start` returns quickly instead of launching a duplicate copy
+- `games.connect` returns quickly instead of waiting on a competing bridge
+  connection
+- `games.status` may report that another GABS session owns the process
+
+If you intentionally want the current GABS session to take ownership of a
+running game, call:
+
+```json
+{
+  "gameId": "rimworld",
+  "forceTakeover": true
+}
+```
+
+with `games.connect`. This defaults to `false`.
 
 ## Setting Up AI Assistants
 
@@ -110,20 +138,23 @@ gabs server
 # 4. Ask AI to control your games!
 ```
 
-### Remote Game Server Setup
-For AI running in the cloud connecting to games on your computer:
+### Remote AI Access to Local GABS
+For AI tooling that reaches GABS over HTTP while the games still run on your
+local machine:
 
-**On your game computer:**
+**On the machine running GABS and the games:**
 ```bash
-# 1. Add games with remote GABP mode
+# 1. Add games normally
 gabs games add minecraft
-# When asked, choose "remote" GABP mode and enter your computer's IP
 
 # 2. Start GABS in HTTP mode
 gabs server --http :8080
 ```
 
-**Configure your cloud AI:**
+GABP itself remains local-only. Your game mod still listens on
+`127.0.0.1:GABP_SERVER_PORT`; only the MCP HTTP surface is exposed remotely.
+
+**Configure your remote AI client:**
 ```json
 {
   "mcpServers": {
@@ -136,6 +167,9 @@ gabs server --http :8080
   }
 }
 ```
+
+Use firewall rules, reverse proxy authentication, or a VPN before exposing the
+HTTP endpoint outside your machine or LAN.
 
 ### Game Server Farm Management
 Let AI manage multiple game servers:

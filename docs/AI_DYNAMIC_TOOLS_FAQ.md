@@ -5,9 +5,11 @@
 
 > **See also:** [Dynamic Tools Guide](DYNAMIC_TOOLS_GUIDE.md) for technical implementation details, [AI Integration Guide](INTEGRATION.md) for connecting AI agents.
 
-## The Answer: It Will Work Excellently! 
+## The Answer: Yes, This Pattern Fits MCP Well
 
-**TL;DR**: AI agents will handle GABS's dynamic tool expansion beautifully because GABS is specifically designed for this workflow with clear namespacing, discovery tools, and predictable patterns.
+**TL;DR**: AI agents can handle GABS's dynamic tool expansion well because the
+system uses clear namespacing, compact discovery tools, and a predictable
+refresh pattern.
 
 ## Why AI Agents Will Handle This Well
 
@@ -30,7 +32,7 @@ const allGameTools = await mcp.callTool("games.tools", {});
 This gives AI agents a predictable "discover names first, inspect details second" workflow, which is much more context-efficient than always dumping every schema up front. `games.tool_names` defaults to 50 names per page and can add one-line summaries in structured output with `brief: true`.
 
 ### 2. **Clear Namespacing Prevents Chaos**
-Even with 50+ tools from multiple games, AI agents won't get confused because:
+Even with many tools from multiple games, AI agents can stay oriented because:
 
 ```
 ✅ Clear and Unambiguous:
@@ -51,13 +53,13 @@ Even with 50+ tools from multiple games, AI agents won't get confused because:
 AI agents don't see everything at once. Tools appear as they become relevant:
 
 ```
-Phase 1: 6 core tools (game management)
-Phase 2: +7 Minecraft tools (after Minecraft connects)  
-Phase 3: +4 RimWorld tools (after RimWorld connects)
-Phase 4: +12 Valheim tools (after Valheim connects)
+Phase 1: Stable core game-management tools
+Phase 2: Mirrored tools appear after a game connects
+Phase 3: More mirrored tools appear as more games connect
 ```
 
-This is actually **easier** for AI agents than having all 29 tools available from the start!
+This is usually easier for AI agents than having every possible tool available
+up front.
 
 ## Real-World AI Interaction Examples
 
@@ -91,10 +93,10 @@ AI: Let me check what I can do with both games...
 
 AI: Perfect! I can help you with:
     
-    **Minecraft** (7 tools):
+    **Minecraft**:
     - Inventory management, world building, player control
     
-    **RimWorld** (4 tools):  
+    **RimWorld**:  
     - Colony management, crafting, research
     
     Both games are clearly separated, so I can help you with either.
@@ -120,17 +122,15 @@ class GABSClient {
 
 ## Tested Proof: Dynamic Tool Discovery Works
 
-I've created comprehensive tests that prove this works well:
+The test suite covers the important discovery behaviors:
 
 ### Test Results Summary:
 ```
-✅ Phase 1: AI starts with 8 core tools
-✅ Phase 2: AI discovers 7 new Minecraft tools (total: 15)
-✅ Phase 3: AI uses games.tool_names and games.tool_detail to understand capabilities
-✅ Phase 4: AI handles 4 more RimWorld tools (total: 19)
-✅ Phase 5: AI manages both games without confusion
-
-Tool expansion: 8 → 15 → 19 (more than 2x growth handled cleanly)
+✅ AI starts with the stable core management surface
+✅ AI discovers mirrored tools after a game connects
+✅ AI uses games.tool_names and games.tool_detail to understand capabilities
+✅ AI manages multiple connected games without tool-name collisions
+✅ AI can recover after reconnects and session ownership changes
 ```
 
 ### AI Discovery Patterns That Work:
@@ -170,13 +170,13 @@ function organizeToolsForUser(allTools) {
 ### ❌ Anti-Patterns to Avoid:
 ```javascript
 // Don't cache tools indefinitely
-const toolsCache = await mcp.callTool("tools/list", {}); // DON'T cache forever
+const toolsCache = await mcp.callTool("games.tool_names", {}); // DON'T cache forever
 
 // Don't assume tools exist without checking
 await mcp.callTool("minecraft.inventory.get", {...}); // Check games.tool_names first!
 
 // Don't overwhelm users with massive tool lists
-console.log("Here are 47 available tools..."); // Group by game instead!
+console.log("Here are all available tools..."); // Group by game instead!
 ```
 
 ## The Technical Foundation
@@ -187,6 +187,21 @@ console.log("Here are 47 available tools..."); // Group by game instead!
 3. **Discovery APIs**: `games.tool_names` and `games.tool_detail` provide structured exploration
 4. **Status Awareness**: AI can check game state before tool usage
 5. **Mirror System**: Automatic GABP→MCP tool conversion
+6. **Session Ownership Guardrails**: Duplicate `games.start` and `games.connect`
+   requests return quickly instead of racing a second live GABS session
+
+## What About Multiple GABS Sessions?
+
+This matters in the real world because developers often have more than one AI
+session open.
+
+- If one live GABS session already owns a running or starting game,
+  `games.start` returns quickly instead of launching a duplicate process
+- `games.connect` also returns quickly instead of hanging on a competing bridge
+  connection
+- `games.status` can report that another GABS session owns the process
+- If takeover is intentional, `games.connect {"gameId": "rimworld",
+  "forceTakeover": true}` moves ownership to the current session
 
 ### Future Enhancements Already Planned:
 - **Tool Change Notifications**: AI gets notified when new tools are available
@@ -196,7 +211,8 @@ console.log("Here are 47 available tools..."); // Group by game instead!
 
 ## Conclusion: Your Concern is Valid but Solved
 
-You're absolutely right to think about this challenge - dynamic tool expansion **could** be confusing for AI agents. But GABS's architecture specifically solves this:
+The concern is valid: dynamic tool expansion can be confusing if the system does
+not provide structure. GABS provides that structure.
 
 ### Why It Works:
 1. **Predictable Discovery**: `games.tool_names` makes tool exploration systematic
@@ -213,9 +229,13 @@ AI agents working with GABS will naturally develop patterns like:
 3. **Use clear names**: Always use game-prefixed tool names for clarity
 4. **Cache intelligently**: Refresh tool knowledge after game state changes
 
-This is actually a **better** experience than static tool sets because AI agents can grow capabilities as users' gaming setups expand!
+This is often a better experience than a huge static tool set because the AI
+can grow capabilities as games actually connect.
 
 ### Evidence:
-The test suite demonstrates AI agents handling tool counts expanding from 8 → 15 → 19 without any confusion, using clear discovery patterns and game-specific namespacing.
+The test suite exercises staged discovery, multi-game namespacing, reconnects,
+and ownership changes without depending on a fixed tool count.
 
-**Bottom line**: Your dynamic tool system will work excellently in the real world because it's designed exactly for this use case. AI agents will love the clarity and discoverability! 🎮🤖✨
+**Bottom line**: the dynamic tool system is workable in practice because GABS
+gives AI clients a stable core surface, explicit discovery tools, and clear
+namespacing.

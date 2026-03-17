@@ -252,32 +252,29 @@ This feature:
 
 See [OpenAI Tool Normalization Guide](OPENAI_TOOL_NORMALIZATION.md) for complete configuration details.
 
-### Multiple Config Files
-You can use different config files for different setups:
+### Multiple Config Directories
+GABS uses a configuration directory, not a single standalone config file. This
+is useful when you want separate local, test, or CI environments.
 
 ```bash
-# Use custom config location
-export GABS_CONFIG="/path/to/custom/config.json"
-gabs server
+# Use a custom config directory
+GABS_CONFIG_DIR=/path/to/custom-gabs gabs server
 
-# Or specify directly
-gabs --config "/path/to/custom/config.json" server
+# Or specify it directly
+gabs server --configDir /path/to/custom-gabs
+gabs games --configDir /path/to/custom-gabs list
 ```
 
-### Config Validation
-Validate your configuration:
+Typical contents include `config.json`, per-game directories, `bridge.json`, and
+the internal `runtime.json` ownership file.
+
+### Configuration Inspection
+Use the built-in game inspection commands instead of a separate config
+subcommand:
 
 ```bash
-gabs config validate
-```
-
-### Config Export/Import
-```bash
-# Export configuration
-gabs config export > my-games.json
-
-# Import configuration
-gabs config import < my-games.json
+gabs games list
+gabs games show minecraft
 ```
 
 ## Security Considerations
@@ -288,7 +285,8 @@ gabs config import < my-games.json
 
 ### Authentication
 - GABP connections use token authentication automatically
-- HTTP mode currently has no authentication (use reverse proxy if needed)
+- HTTP mode can enforce Bearer authentication when `apiKey` is set in
+  `config.json`; otherwise use a reverse proxy or keep it bound to localhost
 
 ### Network Security
 For remote deployments:
@@ -330,8 +328,9 @@ ps aux | grep gabs
 # Check network connections
 netstat -tulpn | grep gabs
 
-# Check log files (if configured)
-tail -f ~/.gabs/logs/gabs.log
+# If you want a persistent log file, redirect stderr yourself
+gabs server --log-level debug 2> gabs-debug.log
+tail -f gabs-debug.log
 ```
 
 ## Scripting and Automation
@@ -420,11 +419,11 @@ sudo pfctl -s rules | grep 8080
 
 ### Debug Mode
 ```bash
-# Run with verbose logging
-GABS_DEBUG=1 gabs server
-
-# Or with custom log level
+# Run with debug logging
 GABS_LOG_LEVEL=debug gabs server
+
+# Or specify it directly
+gabs server --log-level debug
 ```
 
 ## Integration with CI/CD

@@ -47,7 +47,8 @@ The name of the actual game process to stop when using games.stop or games.kill.
 
 ### 6. Game Configuration Complete
 
-All games configured through GABS use **local GABP mode** for maximum security and simplicity. 
+All games configured through GABS use **local-only GABP communication** for
+maximum security and simplicity.
 
 #### What is "Bridge Configuration"?
 When you start a game via AI commands, GABS automatically creates **bridge configuration** - connection details that tell your game mod how to communicate with GABS:
@@ -59,9 +60,13 @@ When you start a game via AI commands, GABS automatically creates **bridge confi
 
 This configuration is provided to your game via:
 1. **Environment variables** (recommended): `GABP_SERVER_PORT`, `GABP_TOKEN`, `GABS_GAME_ID`
-2. **Bridge file** (fallback): `~/.gabs/{gameId}/bridge-{timestamp}.json`
+2. **Bridge file** (fallback): `~/.gabs/{gameId}/bridge.json`
 
 **Key Point**: Your game mod acts as the GABP server (listening), while GABS acts as the GABP client (connecting).
+
+GABS also keeps an internal ownership record at `~/.gabs/{gameId}/runtime.json`
+so separate GABS sessions do not accidentally launch or attach to the same game
+at the same time. Mods should ignore `runtime.json`; it is for GABS itself.
 
 ## Managing Your Games
 
@@ -181,7 +186,24 @@ When you start a game, GABS creates a bridge configuration file that looks like 
 }
 ```
 
-Your game mod reads this file to establish a secure connection with GABS.
+Your game mod can read this file to establish a secure connection with GABS, but
+environment variables remain the preferred source.
+
+## Shared Runtime Ownership
+
+When a game is already starting or running, GABS writes a per-game
+`runtime.json` file so other live GABS sessions can see that the game already
+has an owner.
+
+- A second `games.start` returns immediately with "already starting" or
+  "already running" instead of launching a second copy
+- A second `games.connect` also returns immediately instead of waiting for a
+  competing bridge connection
+- `games.status` can report that another GABS session owns the process
+
+If you intentionally want a different GABS session to take over a running game,
+use `games.connect` with `forceTakeover: true`. That parameter defaults to
+`false` and should only be used when you want to move ownership explicitly.
 
 ## Tool Normalization Configuration
 
@@ -242,8 +264,8 @@ When you configure a `stopProcessName`, GABS will:
 
 The process finding works across platforms:
 - **Windows**: Uses `tasklist` and `taskkill` commands
-- **macOS**: Uses `ps` command with process matching
-- **Linux**: Uses `ps` command with process matching
+- **macOS**: Uses `pgrep` with standard process signals
+- **Linux**: Uses `pgrep` with standard process signals
 
 ### Common Process Names
 
@@ -291,7 +313,8 @@ The process finding works across platforms:
 ### "Can't connect to game mod"
 1. Make sure your game mod supports GABP
 2. Check that the mod is listening on the right port
-3. Verify GABP mode settings match between GABS and your mod
+3. Verify the mod is using `GABP_SERVER_PORT`, `GABP_TOKEN`, and `GABS_GAME_ID`
+   from the environment or `bridge.json`
 
 ### "Configuration not found"
 The config file is created automatically when you add your first game. If it's missing, run `gabs games add` to create a new one.

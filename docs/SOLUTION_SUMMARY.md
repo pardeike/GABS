@@ -1,5 +1,11 @@
 # Solution Summary: GABS Process Management Refactor
 
+> Historical note: this document summarizes the original process-management
+> refactor. Current GABS also maintains a lightweight shared `runtime.json`
+> ownership record per game so multiple live GABS sessions can avoid duplicate
+> launches and support explicit takeover with `games.connect {"forceTakeover":
+> true}`.
+
 ## Problem Analysis
 
 The issue requested fixes for critical process management problems in GABS that were causing deadlocks, unreliable status reporting, and complex state management that could become out of sync with reality.

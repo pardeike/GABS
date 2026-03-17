@@ -12,6 +12,7 @@ import (
 
 	"github.com/pardeike/gabs/internal/config"
 	"github.com/pardeike/gabs/internal/gabp"
+	"github.com/pardeike/gabs/internal/process"
 	"github.com/pardeike/gabs/internal/util"
 )
 
@@ -222,6 +223,135 @@ func TestGamesCallToolCanInferGameFromQualifiedName(t *testing.T) {
 	}
 	if !strings.Contains(callText, "pong") {
 		t.Fatalf("expected call_tool without gameId to return pong, got: %s", callText)
+	}
+
+	if err := <-serverDone; err != nil {
+		t.Fatalf("test GABP server failed: %v", err)
+	}
+}
+
+func TestGamesConnectForceTakeoverCanOverrideSharedOwner(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "gabs-reconnect-force-takeover")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer listener.Close()
+
+	bridgeToken := "force-takeover-token"
+	serverDone := make(chan error, 1)
+	go serveTestGabpSession(listener, bridgeToken, serverDone)
+
+	bridgeDir := filepath.Join(tmpDir, "rimworld")
+	if err := os.MkdirAll(bridgeDir, 0755); err != nil {
+		t.Fatalf("failed to create bridge dir: %v", err)
+	}
+
+	bridgeData, err := json.MarshalIndent(config.BridgeJSON{
+		Port:   listener.Addr().(*net.TCPAddr).Port,
+		Token:  bridgeToken,
+		GameId: "rimworld",
+	}, "", "  ")
+	if err != nil {
+		t.Fatalf("failed to marshal bridge.json: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(bridgeDir, "bridge.json"), bridgeData, 0644); err != nil {
+		t.Fatalf("failed to write bridge.json: %v", err)
+	}
+
+	gamesConfig := &config.GamesConfig{
+		Games: map[string]config.GameConfig{
+			"rimworld": {
+				ID:         "rimworld",
+				Name:       "RimWorld",
+				LaunchMode: "DirectPath",
+				Target:     "/Applications/RimWorldMac.app/Contents/MacOS/RimWorld by Ludeon Studios",
+			},
+		},
+	}
+
+	log := util.NewLogger("error")
+	ownerServer := NewServerForTesting(log)
+	ownerServer.SetConfigDir(tmpDir)
+	ownerServer.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, 1*time.Second)
+
+	joinerServer := NewServerForTesting(log)
+	joinerServer.SetConfigDir(tmpDir)
+	joinerServer.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, 1*time.Second)
+
+	staleOwner := process.RuntimeState{
+		GameID:          "rimworld",
+		Status:          process.RuntimeStateStatusRunning,
+		OwnerPID:        os.Getpid(),
+		OwnerInstanceID: ownerServer.instanceID,
+		GamePID:         os.Getpid(),
+		StopProcessName: "",
+		UpdatedAt:       time.Now().UTC(),
+	}
+	if err := process.ClaimRuntimeState("rimworld", tmpDir, staleOwner); err != nil {
+		t.Fatalf("failed to write runtime state: %v", err)
+	}
+
+	connectBlocked := &Message{
+		JSONRPC: "2.0",
+		Method:  "tools/call",
+		ID:      json.RawMessage(`"reconnect-rimworld-no-force"`),
+		Params: map[string]interface{}{
+			"name": "games.connect",
+			"arguments": map[string]interface{}{
+				"gameId": "rimworld",
+			},
+		},
+	}
+
+	blockedResp := joinerServer.HandleMessage(connectBlocked)
+	blockedBytes, _ := json.Marshal(blockedResp)
+	blockedText := string(blockedBytes)
+	if strings.Contains(blockedText, `"isError":true`) {
+		t.Fatalf("expected non-error response for blocked connect, got: %s", blockedText)
+	}
+	if !strings.Contains(blockedText, "another live GABS session") {
+		t.Fatalf("expected ownership block message, got: %s", blockedText)
+	}
+
+	connectForced := &Message{
+		JSONRPC: "2.0",
+		Method:  "tools/call",
+		ID:      json.RawMessage(`"reconnect-rimworld-force"`),
+		Params: map[string]interface{}{
+			"name": "games.connect",
+			"arguments": map[string]interface{}{
+				"gameId":        "rimworld",
+				"forceTakeover": true,
+			},
+		},
+	}
+
+	forcedResp := joinerServer.HandleMessage(connectForced)
+	forcedBytes, _ := json.Marshal(forcedResp)
+	forcedText := string(forcedBytes)
+	if strings.Contains(forcedText, `"isError":true`) {
+		t.Fatalf("expected forced reconnect to succeed, got: %s", forcedText)
+	}
+	if !strings.Contains(forcedText, "Force-took ownership") {
+		t.Fatalf("expected force takeover success message, got: %s", forcedText)
+	}
+
+	runtimeState, err := process.LoadRuntimeState("rimworld", tmpDir)
+	if err != nil {
+		t.Fatalf("failed to load runtime state: %v", err)
+	}
+	if runtimeState == nil {
+		t.Fatal("expected runtime state after forced reconnect")
+	}
+	if runtimeState.OwnerInstanceID != joinerServer.instanceID {
+		t.Fatalf("expected runtime state owner instance to change, got %q", runtimeState.OwnerInstanceID)
 	}
 
 	if err := <-serverDone; err != nil {

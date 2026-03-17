@@ -56,9 +56,14 @@ GABS currently uses **local-only communication** for security and simplicity:
 During game configuration:
 - Bridge connections use localhost (127.0.0.1) only
 - Unique ports and tokens generated automatically
+- Game mods should prefer `GABP_SERVER_PORT`, `GABP_TOKEN`, and
+  `GABS_GAME_ID`; `bridge.json` remains a fallback/debug path through
+  `GABS_BRIDGE_PATH`
 - Maximum security with no network exposure
 
-Game mods read bridge configuration from `~/.gabs/{gameId}/bridge.json`
+GABS writes bridge metadata to `~/.gabs/{gameId}/bridge.json`, but current
+mods should usually read the environment variables first and use that file only
+as a fallback.
 
 ## Common Deployment Scenarios
 
@@ -82,21 +87,23 @@ gabs server
 - Maximum security with localhost-only communication
 - Perfect for development and production use
 
-### Scenario 2: Cloud AI with Local Gaming
+### Scenario 2: Remote AI Access to Local GABS
 
-**Setup:** AI running in cloud (like Claude Desktop), GABS and game on local machine.
+**Setup:** GABS and the game run on your local machine, while an AI client
+reaches GABS over HTTP from another machine or service.
 
 **On local machine:**
 1. Configure and run GABS:
    ```bash
    gabs games add minecraft
-   gabs server --http 0.0.0.0:8080
+   gabs server --http localhost:8080
    ```
 
-2. Configure port forwarding on router for port 8080
+2. Put the HTTP endpoint behind a reverse proxy, VPN, or controlled firewall
+   rule before exposing it outside the machine or LAN
 
-**On cloud AI side:**
-Configure AI to connect to your GABS HTTP server.
+**On remote AI side:**
+Configure the client to connect to your GABS HTTP endpoint.
 
 **Benefits:**
 - Powerful cloud AI capabilities
@@ -104,9 +111,9 @@ Configure AI to connect to your GABS HTTP server.
 - GABS manages secure local communication with games
 
 **Considerations:**
-- Security: Use firewall rules, consider VPN
+- Security: Prefer API key auth, reverse proxy auth, or VPN
 - Latency: Network delay affects responsiveness  
-- Game communication remains local and secure
+- GABP communication between GABS and the mod remains local and secure
 
 ### Scenario 3: Multiple Game Server Management
 
@@ -143,15 +150,16 @@ All GABP connections use token authentication. Tokens are:
 ### Network Security
 
 **For remote connections:**
-- Use strong, unique tokens
-- Consider VPN for additional security
-- Limit port exposure with firewall rules
+- Use API key auth for the HTTP server when exposing GABS over a network
+- Consider VPN or reverse proxy authentication for additional security
+- Limit HTTP port exposure with firewall rules
 - Monitor connections and implement rate limiting if needed
+- Do not expose GABP ports directly; GABP is intended to stay on loopback only
 
 **Recommended firewall rule:**
 ```bash
-# Allow GABP connections from specific IPs only
-sudo ufw allow from <trusted_ai_ip> to any port <gabp_port>
+# Allow remote access only to the GABS HTTP endpoint from trusted IPs
+sudo ufw allow from <trusted_ai_ip> to any port 8080
 ```
 
 ### Mod Security
@@ -167,21 +175,28 @@ Game mods should:
 ### Connection Issues
 
 1. **"failed to connect to GABP"**
-   - Check if game mod is running and has created bridge.json
-   - Verify host/port configuration
-   - Check firewall settings
-   - Ensure token matches between GABS and mod
+   - Check that the game mod is running and listening on
+     `127.0.0.1:GABP_SERVER_PORT`
+   - Ensure `GABP_TOKEN` matches between GABS and the mod
+   - Verify the mod is reading the environment variables GABS provides, or
+     using `bridge.json` only as a fallback
+   - Check game logs to confirm the mod finished starting its GABP server
 
 2. **"failed to read bridge.json"** 
-   - Ensure game mod has started and is GABP-compliant
-   - Check that mod is reading from `~/.gabs/{gameId}/bridge.json` or using `GABS_BRIDGE_PATH` environment variable
+   - Ensure GABS launched or reattached the game first; GABS is the component
+     that writes `bridge.json`
+   - Prefer reading the environment variables that GABS injects, and use
+     `~/.gabs/{gameId}/bridge.json` or `GABS_BRIDGE_PATH` only as a fallback
    - Check file permissions on config directory
    - Verify gameId matches between GABS and mod
 
 3. **Connection timeout**
-   - Increase `--reconnectBackoff` for unstable networks
-   - Check network connectivity between GABS and mod
-   - Verify mod is accepting connections on correct interface
+   - Check that the mod has actually started its GABP server yet
+   - Verify the mod is listening on loopback and using the expected port/token
+   - Adjust `--reconnectBackoff` if the mod starts slowly or retries need a
+     wider window
+   - If you are using HTTP mode remotely, check the HTTP path separately from
+     the local GABP path
 
 ### Performance Optimization
 
@@ -199,14 +214,14 @@ Game mods should:
 
 ### Mod Development
 
-1. **Read bridge.json on mod startup:**
+1. **Read bridge settings on mod startup:**
    ```csharp
-   var config = ReadBridgeConfig(); // Read from GABS_BRIDGE_PATH env var or ~/.gabs/{gameId}/bridge.json
-   var server = new GABPServer(config.Host, config.Port, config.Token);
+   var config = ReadBridgeConfig(); // Prefer env vars, fall back to GABS_BRIDGE_PATH or ~/.gabs/{gameId}/bridge.json
+   var server = new GABPServer("127.0.0.1", config.Port, config.Token);
    ```
 
 2. **Handle reconnections gracefully:**
-   - Allow multiple GABS connections over mod lifetime
+   - Allow GABS to reconnect over the mod lifetime
    - Clean up resources on disconnect
    - Maintain game state consistency
 
@@ -218,12 +233,12 @@ Game mods should:
 ### GABS Integration
 
 1. **Use appropriate connection mode:**
-   - Local for development
-   - Remote for production cloud AI
-   - Connect for advanced mod scenarios
+   - Use stdio when the AI client runs locally
+   - Use HTTP when a remote client needs to reach GABS
+   - Use `games.connect` when you need to reattach to an already running game
 
 2. **Configure proper timeouts:**
-   - Match reconnect settings to network conditions
+   - Match reconnect settings to mod startup behavior
    - Consider game loading times in timeout values
 
 3. **Monitor connection health:**
@@ -257,8 +272,9 @@ Potential improvements being considered:
 
 | Flag | Description | Default |
 |------|-------------|---------|
+| `--addr` | HTTP server address used by `gabs server http` | `localhost:8080` |
 | `--http` | HTTP server address (e.g., :8080, localhost:8080) | stdio only |
-| `--reconnectBackoff` | Reconnection retry timing (e.g., 100ms..5s) | 100ms..5s |
+| `--reconnectBackoff` | GABP reconnect retry window (for example `100ms..5s`) | `100ms..5s` |
 | `--configDir` | Override config directory | Platform-specific |
 | `--log-level` | Log level: trace\|debug\|info\|warn\|error | info |
 | `--grace` | Graceful stop timeout before kill | 3s |

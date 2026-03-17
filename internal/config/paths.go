@@ -25,7 +25,7 @@ func NewConfigPaths(baseDir string) (*ConfigPaths, error) {
 		}
 		resolvedBaseDir = filepath.Join(homeDir, ".gabs")
 	}
-	
+
 	return &ConfigPaths{baseDir: resolvedBaseDir}, nil
 }
 
@@ -47,6 +47,11 @@ func (cp *ConfigPaths) GetGameDir(gameID string) string {
 // GetBridgeConfigPath returns the path to a game's bridge configuration file
 func (cp *ConfigPaths) GetBridgeConfigPath(gameID string) string {
 	return filepath.Join(cp.GetGameDir(gameID), "bridge.json")
+}
+
+// GetRuntimeStatePath returns the path to a game's shared runtime state file.
+func (cp *ConfigPaths) GetRuntimeStatePath(gameID string) string {
+	return filepath.Join(cp.GetGameDir(gameID), "runtime.json")
 }
 
 // EnsureGameDir creates the game-specific directory if it doesn't exist

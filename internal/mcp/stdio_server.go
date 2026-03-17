@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pardeike/gabs/internal/config"
@@ -34,6 +36,31 @@ type Server struct {
 	gameResources map[string][]string        // Track which resources belong to which games
 	gabpClients   map[string]*gabp.Client    // Track GABP connections per game
 	starter       *process.SerializedStarter // Serialized process starter
+	instanceID    string
+}
+
+var serverInstanceCounter uint64
+
+type gameAlreadyActiveError struct {
+	status string
+}
+
+func (e *gameAlreadyActiveError) Error() string {
+	switch e.status {
+	case process.RuntimeStateStatusStarting:
+		return "game launch is already in progress"
+	default:
+		return "game is already running"
+	}
+}
+
+func (e *gameAlreadyActiveError) ToolMessage(game config.GameConfig) string {
+	switch e.status {
+	case process.RuntimeStateStatusStarting:
+		return fmt.Sprintf("Game '%s' (%s) is already starting. Wait for launch to finish, then use games.connect if you need to attach to the existing instance.", game.ID, game.Name)
+	default:
+		return fmt.Sprintf("Game '%s' (%s) is already running. Use games.status or games.connect instead of starting it again.", game.ID, game.Name)
+	}
 }
 
 // ToolHandler represents a tool handler function
@@ -60,6 +87,7 @@ func NewServer(log util.Logger) *Server {
 		gameResources: make(map[string][]string),
 		gabpClients:   make(map[string]*gabp.Client),
 		starter:       process.NewSerializedStarter(), // Initialize serialized starter
+		instanceID:    newServerInstanceID(),
 	}
 }
 
@@ -76,7 +104,13 @@ func NewServerForTesting(log util.Logger) *Server {
 		gameResources: make(map[string][]string),
 		gabpClients:   make(map[string]*gabp.Client),
 		starter:       process.NewSerializedStarterForTesting(), // Use testing timeouts
+		instanceID:    newServerInstanceID(),
 	}
+}
+
+func newServerInstanceID() string {
+	seq := atomic.AddUint64(&serverInstanceCounter, 1)
+	return fmt.Sprintf("%d-%d-%d", os.Getpid(), time.Now().UnixNano(), seq)
 }
 
 // RegisterTool registers a tool with its handler, applying normalization if configured
@@ -328,6 +362,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 
 		err := s.startGame(*game, gamesConfig, backoffMin, backoffMax)
 		if err != nil {
+			var activeErr *gameAlreadyActiveError
+			if errors.As(err, &activeErr) {
+				return &ToolResult{
+					Content: []Content{{Type: "text", Text: activeErr.ToolMessage(*game)}},
+				}, nil
+			}
+
 			return &ToolResult{
 				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to start %s: %v", game.ID, err)}},
 				IsError: true,
@@ -1236,6 +1277,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 					"type":        "string",
 					"description": "Game ID to connect to (required)",
 				},
+				"forceTakeover": map[string]interface{}{
+					"type":        "boolean",
+					"description": "When true, override another live GABS session's ownership record and attempt to connect anyway. Defaults to false.",
+				},
 			},
 			"required": []string{"gameId"},
 		},
@@ -1256,7 +1301,12 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		// Check if already connected - re-sync tools
+		forceTakeover, _, forceTakeoverErr := getOptionalBoolArg(args, "forceTakeover")
+		if forceTakeoverErr != nil {
+			return forceTakeoverErr, nil
+		}
+
+		// Check if already connected - re-sync tools.
 		s.mu.RLock()
 		existingClient, alreadyConnected := s.gabpClients[game.ID]
 		s.mu.RUnlock()
@@ -1271,6 +1321,21 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			toolCount := len(s.getGameSpecificTools(game.ID))
 			return &ToolResult{
 				Content: []Content{{Type: "text", Text: fmt.Sprintf("Already connected to '%s'. Re-synced %d tools.", game.ID, toolCount)}},
+			}, nil
+		}
+
+		runtimeState, runtimeErr := process.LoadRuntimeState(game.ID, s.configDir)
+		if runtimeErr != nil {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to inspect shared runtime state for '%s': %v", game.ID, runtimeErr)}},
+				IsError: true,
+			}, nil
+		}
+
+		hadForeignOwner := process.RuntimeStateOwnedByAnotherLiveOwner(runtimeState, os.Getpid(), s.instanceID)
+		if hadForeignOwner && !forceTakeover {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' is already owned by another live GABS session (pid %d). Skipping games.connect here to avoid competing bridge clients.", game.ID, runtimeState.OwnerPID)}},
 			}, nil
 		}
 
@@ -1290,6 +1355,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		connector := NewServerGABPConnector(s)
 		connectCtx, connectCancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer connectCancel()
+
 		success := connector.AttemptConnection(connectCtx, game.ID, port, token)
 		if !success {
 			if status != "running" && status != "connected" {
@@ -1306,6 +1372,34 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}
 
 		toolCount := len(s.getGameSpecificTools(game.ID))
+
+		updatedState := process.RuntimeState{
+			GameID:          game.ID,
+			Status:          process.RuntimeStateStatusRunning,
+			OwnerPID:        os.Getpid(),
+			OwnerInstanceID: s.instanceID,
+			StopProcessName: game.StopProcessName,
+		}
+		if runtimeState != nil {
+			updatedState = *runtimeState
+			updatedState.GameID = game.ID
+			updatedState.Status = process.RuntimeStateStatusRunning
+			updatedState.OwnerPID = os.Getpid()
+			updatedState.OwnerInstanceID = s.instanceID
+			if updatedState.StopProcessName == "" {
+				updatedState.StopProcessName = game.StopProcessName
+			}
+		}
+		if err := process.SaveRuntimeState(game.ID, s.configDir, updatedState); err != nil {
+			s.log.Warnw("failed to persist runtime ownership after connect", "gameId", game.ID, "error", err)
+		}
+
+		if hadForeignOwner && forceTakeover {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Force-took ownership of '%s' from GABS pid %d and connected to the GABP server on port %d. Discovered %d tools.", game.ID, runtimeState.OwnerPID, port, toolCount)}},
+			}, nil
+		}
+
 		return &ToolResult{
 			Content: []Content{{Type: "text", Text: fmt.Sprintf("Successfully connected to '%s' GABP server on port %d. Discovered %d tools.", game.ID, port, toolCount)}},
 		}, nil
@@ -1767,6 +1861,10 @@ func (s *Server) getStatusDescription(gameID string, gameConfig *config.GameConf
 // This avoids calling checkGameStatus again when the status is already known
 func (s *Server) getStatusDescriptionFromStatus(status string, gameConfig *config.GameConfig) string {
 	switch status {
+	case process.RuntimeStateStatusStarting:
+		return "starting (another GABS session is launching the game)"
+	case "shared-running":
+		return "running (another GABS session owns the process; use games.connect to attach)"
 	case "running":
 		// Check if this is a launcher-based game with process tracking
 		if gameConfig.LaunchMode == "SteamAppId" || gameConfig.LaunchMode == "EpicAppId" {
@@ -1788,6 +1886,68 @@ func (s *Server) getStatusDescriptionFromStatus(status string, gameConfig *confi
 	}
 }
 
+func (s *Server) resolveSharedRuntimeStatus(gameID string) string {
+	runtimeState, err := process.LoadRuntimeState(gameID, s.configDir)
+	if err != nil {
+		s.log.Warnw("failed to read shared runtime state", "gameId", gameID, "error", err)
+		return ""
+	}
+	if runtimeState == nil {
+		return ""
+	}
+
+	status := process.ResolveRuntimeStateStatus(runtimeState)
+	if status != "" {
+		return status
+	}
+
+	if err := process.RemoveRuntimeState(gameID, s.configDir); err != nil {
+		s.log.Warnw("failed to remove stale runtime state", "gameId", gameID, "error", err)
+	} else {
+		s.cleanupBridgeConfigInternal(gameID)
+		s.log.Debugw("removed stale runtime state", "gameId", gameID)
+	}
+
+	return ""
+}
+
+func (s *Server) claimSharedRuntimeState(game config.GameConfig, spec process.LaunchSpec) (process.RuntimeState, error) {
+	state := process.NewRuntimeState(spec, process.RuntimeStateStatusStarting)
+	state.OwnerInstanceID = s.instanceID
+
+	for attempt := 0; attempt < 2; attempt++ {
+		err := process.ClaimRuntimeState(game.ID, s.configDir, state)
+		if err == nil {
+			return state, nil
+		}
+		if !errors.Is(err, process.ErrRuntimeStateExists) {
+			return process.RuntimeState{}, err
+		}
+
+		existingState, loadErr := process.LoadRuntimeState(game.ID, s.configDir)
+		if loadErr != nil {
+			return process.RuntimeState{}, loadErr
+		}
+		if status := process.ResolveRuntimeStateStatus(existingState); status != "" {
+			return process.RuntimeState{}, &gameAlreadyActiveError{status: status}
+		}
+
+		if removeErr := process.RemoveRuntimeState(game.ID, s.configDir); removeErr != nil {
+			return process.RuntimeState{}, removeErr
+		}
+
+		s.log.Infow("removed stale shared runtime state before retrying launch", "gameId", game.ID)
+	}
+
+	return process.RuntimeState{}, fmt.Errorf("failed to claim shared runtime state for %s", game.ID)
+}
+
+func (s *Server) cleanupRuntimeStateInternal(gameId string) {
+	if err := process.RemoveRuntimeState(gameId, s.configDir); err != nil {
+		s.log.Warnw("failed to cleanup runtime state", "gameId", gameId, "error", err)
+	}
+}
+
 func (s *Server) checkGameStatus(gameID string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1796,6 +1956,12 @@ func (s *Server) checkGameStatus(gameID string) string {
 	if !exists {
 		if _, connected := s.gabpClients[gameID]; connected {
 			return "connected"
+		}
+		if status := s.resolveSharedRuntimeStatus(gameID); status != "" {
+			if status == process.RuntimeStateStatusRunning {
+				return "shared-running"
+			}
+			return status
 		}
 		return "stopped"
 	}
@@ -1846,31 +2012,13 @@ func (s *Server) cleanupStoppedGame(gameID string) {
 	s.cleanupGABPConnectionInternal(gameID)
 	s.cleanupGameResourcesInternal(gameID)
 	s.cleanupBridgeConfigInternal(gameID)
+	s.cleanupRuntimeStateInternal(gameID)
 	s.log.Debugw("cleaned up dead game process and resources", "gameId", gameID)
 }
 
 // startGame starts a game process using the serialized starter approach
 // This implements @pardeike's requirements for serialized, verified process starting
 func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration) error {
-	// Check if already running (this is still needed for safety)
-	s.mu.Lock()
-	if controller, exists := s.games[game.ID]; exists && controller != nil && controller.IsRunning() {
-		s.mu.Unlock()
-		return fmt.Errorf("game %s is already running", game.ID)
-	}
-
-	// Clean up any stale controller reference
-	delete(s.games, game.ID)
-	s.mu.Unlock()
-
-	// Create GABP bridge configuration (prepare environment variables)
-	port, token, bridgePath, err := config.WriteBridgeJSONWithConfig(game.ID, s.configDir, gamesConfig)
-	if err != nil {
-		return fmt.Errorf("failed to create bridge config for game '%s': %w", game.ID, err)
-	}
-
-	s.log.Infow("created GABP bridge configuration", "gameId", game.ID, "port", port, "token", token[:8]+"...", "host", "127.0.0.1", "configPath", bridgePath)
-
 	// Convert GameConfig to LaunchSpec
 	launchSpec := process.LaunchSpec{
 		GameId:          game.ID,
@@ -1888,6 +2036,42 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 			game.ID, game.LaunchMode, game.Target, err)
 	}
 
+	runtimeState, err := s.claimSharedRuntimeState(game, launchSpec)
+	if err != nil {
+		return err
+	}
+
+	cleanupRuntimeState := true
+	cleanupBridgeConfig := false
+	defer func() {
+		if cleanupRuntimeState {
+			s.cleanupRuntimeStateInternal(game.ID)
+		}
+		if cleanupBridgeConfig {
+			s.cleanupBridgeConfigInternal(game.ID)
+		}
+	}()
+
+	// Check if already running (this is still needed for safety)
+	s.mu.Lock()
+	if trackedController, exists := s.games[game.ID]; exists && trackedController != nil && trackedController.IsRunning() {
+		s.mu.Unlock()
+		return &gameAlreadyActiveError{status: "running"}
+	}
+
+	// Clean up any stale controller reference
+	delete(s.games, game.ID)
+	s.mu.Unlock()
+
+	// Create GABP bridge configuration (prepare environment variables)
+	port, token, bridgePath, err := config.WriteBridgeJSONWithConfig(game.ID, s.configDir, gamesConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create bridge config for game '%s': %w", game.ID, err)
+	}
+	cleanupBridgeConfig = true
+
+	s.log.Infow("created GABP bridge configuration", "gameId", game.ID, "port", port, "token", token[:8]+"...", "host", "127.0.0.1", "configPath", bridgePath)
+
 	// Set bridge connection info for environment variables
 	controller.SetBridgeInfo(port, token)
 
@@ -1900,6 +2084,14 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 		return fmt.Errorf("failed to start game '%s' (mode: %s, target: %s): %w",
 			game.ID, game.LaunchMode, game.Target, result.Error)
 	}
+
+	runtimeState.Status = process.RuntimeStateStatusRunning
+	runtimeState.GamePID = controller.GetPID()
+	if err := process.SaveRuntimeState(game.ID, s.configDir, runtimeState); err != nil {
+		s.log.Warnw("failed to persist running runtime state", "gameId", game.ID, "error", err)
+	}
+	cleanupRuntimeState = false
+	cleanupBridgeConfig = false
 
 	// Track the running game
 	s.mu.Lock()
