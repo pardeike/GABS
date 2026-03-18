@@ -3,7 +3,9 @@ package gabp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"math/rand"
 	"net"
@@ -19,22 +21,31 @@ import (
 
 // Client speaks GABP over TCP NDJSON.
 type Client struct {
-	conn          net.Conn
-	writer        *util.LSPFrameWriter
-	reader        *util.LSPFrameReader
-	token         string
-	agentId       string
-	capabilities  Capabilities
-	pendingReqs   map[string]chan *util.GABPMessage
-	mu            sync.RWMutex
-	log           util.Logger
-	eventHandlers map[string][]EventHandler
-	sequences     map[string]int
-	connected     bool
+	conn           net.Conn
+	writer         *util.LSPFrameWriter
+	reader         *util.LSPFrameReader
+	token          string
+	agentId        string
+	capabilities   Capabilities
+	pendingReqs    map[string]chan *util.GABPMessage
+	mu             sync.RWMutex
+	log            util.Logger
+	eventHandlers  map[string][]EventHandler
+	sequences      map[string]int
+	connected      bool
+	disconnected   chan struct{}
+	disconnectErr  error
+	disconnectOnce sync.Once
+	onDisconnect   func(error)
 }
 
 // EventHandler is a function that handles events
 type EventHandler func(channel string, seq int, payload interface{})
+
+var (
+	ErrClientNotConnected = errors.New("GABP client is not connected")
+	ErrClientClosed       = errors.New("GABP client connection closed")
+)
 
 type Capabilities = gabpruntime.Capabilities
 type Limits = gabpruntime.Limits
@@ -55,6 +66,7 @@ func NewClient(log util.Logger) *Client {
 		eventHandlers: make(map[string][]EventHandler),
 		sequences:     make(map[string]int),
 		log:           log,
+		disconnected:  make(chan struct{}),
 	}
 }
 
@@ -183,17 +195,18 @@ func (c *Client) handshake() error {
 }
 
 func (c *Client) messageHandler() {
-	defer func() {
-		c.connected = false
-		if c.conn != nil {
-			c.conn.Close()
-		}
-	}()
+	var loopErr error
+	defer c.markDisconnected(loopErr, true)
 
-	for c.connected {
+	for c.IsConnected() {
 		data, err := c.reader.ReadMessage()
 		if err != nil {
-			c.log.Errorw("failed to read message", "error", err)
+			if !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.EOF) {
+				c.log.Errorw("failed to read message", "error", err)
+			} else {
+				c.log.Infow("GABP connection closed", "error", err)
+			}
+			loopErr = fmt.Errorf("failed to read message: %w", err)
 			break
 		}
 
@@ -250,6 +263,10 @@ func (c *Client) sendRequest(method string, params interface{}) (interface{}, er
 
 func (c *Client) sendRequestWithTimeout(method string, params interface{}, timeout time.Duration) (interface{}, error) {
 	req := util.NewGABPRequest(method, params)
+	writer, disconnected, err := c.prepareRequest()
+	if err != nil {
+		return nil, err
+	}
 
 	// Register response channel
 	respCh := make(chan *util.GABPMessage, 1)
@@ -265,18 +282,24 @@ func (c *Client) sendRequestWithTimeout(method string, params interface{}, timeo
 	}()
 
 	// Send request
-	if err := c.writer.WriteJSON(req); err != nil {
-		return nil, fmt.Errorf("failed to write request: %w", err)
+	if err := writer.WriteJSON(req); err != nil {
+		c.markDisconnected(fmt.Errorf("failed to write request: %w", err), true)
+		return nil, c.connectionUnavailableError()
 	}
 
 	// Wait for response
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
 	select {
 	case resp := <-respCh:
 		if resp.Error != nil {
 			return nil, fmt.Errorf("GABP error %d: %s", resp.Error.Code, resp.Error.Message)
 		}
 		return resp.Result, nil
-	case <-time.After(timeout):
+	case <-disconnected:
+		return nil, c.connectionUnavailableError()
+	case <-timer.C:
 		return nil, fmt.Errorf("request timeout after %s", timeout)
 	}
 }
@@ -461,20 +484,30 @@ func (c *Client) GetCapabilities() Capabilities {
 	return c.capabilities
 }
 
-// Close gracefully closes the GABP connection
-func (c *Client) Close() error {
+// IsConnected reports whether the underlying GABP transport is still active.
+func (c *Client) IsConnected() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.connected
+}
+
+// DisconnectError returns the reason the GABP transport last disconnected.
+func (c *Client) DisconnectError() error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.disconnectErr
+}
+
+// SetDisconnectHandler registers a callback invoked when the transport drops unexpectedly.
+func (c *Client) SetDisconnectHandler(handler func(error)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.onDisconnect = handler
+}
 
-	if !c.connected {
-		return nil
-	}
-
-	c.connected = false
-	if c.conn != nil {
-		return c.conn.Close()
-	}
-	return nil
+// Close gracefully closes the GABP connection
+func (c *Client) Close() error {
+	return c.markDisconnected(nil, false)
 }
 
 // mapToStruct converts a generic interface{} to a specific struct
@@ -484,4 +517,57 @@ func mapToStruct(src interface{}, dst interface{}) error {
 		return err
 	}
 	return json.Unmarshal(data, dst)
+}
+
+func (c *Client) prepareRequest() (*util.LSPFrameWriter, <-chan struct{}, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if !c.connected || c.writer == nil {
+		return nil, nil, c.connectionUnavailableErrorLocked()
+	}
+
+	return c.writer, c.disconnected, nil
+}
+
+func (c *Client) connectionUnavailableError() error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.connectionUnavailableErrorLocked()
+}
+
+func (c *Client) connectionUnavailableErrorLocked() error {
+	if c.disconnectErr != nil {
+		return fmt.Errorf("GABP connection unavailable: %w", c.disconnectErr)
+	}
+	return ErrClientNotConnected
+}
+
+func (c *Client) markDisconnected(err error, notify bool) error {
+	var closeErr error
+	var callback func(error)
+	disconnectErr := err
+	if disconnectErr == nil {
+		disconnectErr = ErrClientClosed
+	}
+
+	c.disconnectOnce.Do(func() {
+		c.mu.Lock()
+		c.connected = false
+		c.disconnectErr = disconnectErr
+		callback = c.onDisconnect
+		conn := c.conn
+		c.mu.Unlock()
+
+		if conn != nil {
+			closeErr = conn.Close()
+		}
+		close(c.disconnected)
+	})
+
+	if notify && callback != nil {
+		callback(disconnectErr)
+	}
+
+	return closeErr
 }

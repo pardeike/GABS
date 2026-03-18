@@ -26,10 +26,10 @@ func TestGameStatusNoDeadlock(t *testing.T) {
 		ID:         "test-game",
 		Name:       "Test Game",
 		LaunchMode: "DirectPath",
-		Target:     "/bin/echo", // Use echo command as a simple executable
-		Args:       []string{"Game started successfully"},
+		Target:     "/bin/sleep",
+		Args:       []string{"5"},
 	}
-	
+
 	gamesConfig := &config.GamesConfig{
 		Games: make(map[string]config.GameConfig),
 	}
@@ -129,7 +129,7 @@ func TestGameStatusNoDeadlock(t *testing.T) {
 			if strings.Contains(responseStr, `"error"`) {
 				t.Errorf("games.status returned error after start: %s", responseStr)
 			}
-			
+
 			t.Log("✅ games.status responded successfully after game start - no deadlock!")
 
 		case <-time.After(5 * time.Second):
@@ -140,7 +140,7 @@ func TestGameStatusNoDeadlock(t *testing.T) {
 	t.Run("Test multiple status calls work without blocking", func(t *testing.T) {
 		// Test multiple rapid calls to ensure no deadlock in concurrent scenarios
 		results := make(chan string, 3)
-		
+
 		for i := 0; i < 3; i++ {
 			go func(callNum int) {
 				statusMsg := &Message{
@@ -154,7 +154,7 @@ func TestGameStatusNoDeadlock(t *testing.T) {
 						},
 					},
 				}
-				
+
 				response := server.HandleMessage(statusMsg)
 				respBytes, _ := json.Marshal(response)
 				results <- string(respBytes)
@@ -170,7 +170,7 @@ func TestGameStatusNoDeadlock(t *testing.T) {
 				t.Fatalf("❌ Concurrent games.status call %d timed out", i+1)
 			}
 		}
-		
+
 		t.Log("✅ All concurrent games.status calls completed successfully!")
 	})
 }

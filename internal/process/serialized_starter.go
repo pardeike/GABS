@@ -9,15 +9,19 @@ import (
 
 // ProcessStartResult represents the result of a process start operation
 type ProcessStartResult struct {
-	ProcessStarted bool // Process found in system
-	GABPConnected  bool // Successfully connected to GABP server
-	Error          error
+	ProcessStarted          bool // Process found in system
+	GABPConnected           bool // Successfully connected to GABP server
+	GameStillRunning        bool // Whether the game still looked alive after GABP attempt
+	ProcessExitedDuringGABP bool // Process died before GABP became available
+	GABPConnectError        error
+	GABPConnectWait         time.Duration
+	Error                   error
 }
 
 // SerializedStarter ensures only one process is starting at a time
 // This implements the serialized starting approach requested by @pardeike
 type SerializedStarter struct {
-	mu                sync.Mutex
+	mu                  sync.Mutex
 	processStartTimeout time.Duration
 	gabpConnectTimeout  time.Duration
 }
@@ -26,7 +30,7 @@ type SerializedStarter struct {
 func NewSerializedStarter() *SerializedStarter {
 	return &SerializedStarter{
 		processStartTimeout: 10 * time.Second, // Time to wait for process to appear in system
-		gabpConnectTimeout:  120 * time.Second, // Time to wait for GABP connection
+		gabpConnectTimeout:  10 * time.Second, // Short startup window; use games.connect later if the mod loads slowly
 	}
 }
 
@@ -85,27 +89,78 @@ func (s *SerializedStarter) StartWithVerification(
 	// This doesn't need to be serialized since it doesn't affect environment variables
 	// and multiple GABP connections can be attempted simultaneously
 	if gabpConnector != nil {
-		connected := s.attemptGABPConnection(gabpConnector, gameID, port, token)
-		result.GABPConnected = connected
-
-		// Note: GABP connection failure is not considered an error for the process start
-		// The process is running, we just can't control it via GABP
+		gabpResult := s.attemptGABPConnection(controller, gabpConnector, gameID, port, token)
+		result.GABPConnected = gabpResult.Connected
+		result.GABPConnectError = gabpResult.Error
+		result.GABPConnectWait = gabpResult.Waited
+		result.GameStillRunning = gabpResult.GameStillRunning
+		result.ProcessExitedDuringGABP = gabpResult.ProcessExitedDuringGABP
+	} else {
+		result.GameStillRunning = controllerLooksAlive(controller)
 	}
 
 	return result
 }
 
+type gabpConnectAttemptResult struct {
+	Connected               bool
+	Error                   error
+	Waited                  time.Duration
+	GameStillRunning        bool
+	ProcessExitedDuringGABP bool
+}
+
 // attemptGABPConnection tries to establish GABP connection with timeout
 func (s *SerializedStarter) attemptGABPConnection(
+	controller ControllerInterface,
 	connector GABPConnector,
 	gameID string,
 	port int,
 	token string,
-) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), s.gabpConnectTimeout)
-	defer cancel()
+) gabpConnectAttemptResult {
+	startedAt := time.Now()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
 
-	return connector.AttemptConnection(ctx, gameID, port, token)
+	timeoutCtx, timeoutCancel := context.WithTimeoutCause(ctx, s.gabpConnectTimeout,
+		fmt.Errorf("no GABP server became available within %s", s.gabpConnectTimeout))
+	defer timeoutCancel()
+
+	monitorDone := make(chan struct{})
+	go func() {
+		defer close(monitorDone)
+
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-timeoutCtx.Done():
+				return
+			case <-ticker.C:
+				if !controllerLooksAlive(controller) {
+					cancel(fmt.Errorf("game process exited before GABP became available"))
+					return
+				}
+			}
+		}
+	}()
+
+	err := connector.AttemptConnection(timeoutCtx, gameID, port, token)
+	<-monitorDone
+
+	gameStillRunning := controllerLooksAlive(controller)
+	result := gabpConnectAttemptResult{
+		Connected:        err == nil,
+		Error:            err,
+		Waited:           time.Since(startedAt),
+		GameStillRunning: gameStillRunning,
+	}
+	if err != nil && !gameStillRunning {
+		result.ProcessExitedDuringGABP = true
+	}
+
+	return result
 }
 
 // SetTimeouts allows customization of timeout values
@@ -116,5 +171,22 @@ func (s *SerializedStarter) SetTimeouts(processStart, gabpConnect time.Duration)
 
 // GABPConnector interface for testing and abstraction
 type GABPConnector interface {
-	AttemptConnection(ctx context.Context, gameID string, port int, token string) bool
+	AttemptConnection(ctx context.Context, gameID string, port int, token string) error
+}
+
+func controllerLooksAlive(controller ControllerInterface) bool {
+	if controller == nil {
+		return false
+	}
+
+	if controller.IsRunning() {
+		return true
+	}
+
+	switch controller.GetLaunchMode() {
+	case "SteamAppId", "EpicAppId":
+		return controller.IsLauncherProcessRunning()
+	default:
+		return false
+	}
 }

@@ -35,6 +35,7 @@ type Controller struct {
 	cmd        *exec.Cmd
 	bridgeInfo *BridgeInfo
 	waitOnce   sync.Once // guards c.cmd.Wait() to prevent multiple calls
+	waitDone   chan struct{}
 }
 
 // Configure sets up the controller with the given launch specification
@@ -76,7 +77,7 @@ func (c *Controller) Configure(spec LaunchSpec) error {
 	return nil
 }
 
-// SetBridgeInfo sets the bridge connection information 
+// SetBridgeInfo sets the bridge connection information
 func (c *Controller) SetBridgeInfo(port int, token string) {
 	c.bridgeInfo = &BridgeInfo{
 		Port:  port,
@@ -133,6 +134,10 @@ func (c *Controller) Start() error {
 		}
 	}
 
+	c.waitOnce = sync.Once{}
+	c.waitDone = make(chan struct{})
+	go c.waitForExit()
+
 	return nil
 }
 
@@ -184,6 +189,12 @@ func (c *Controller) IsRunning() bool {
 		return c.isRunningByName()
 	}
 
+	select {
+	case <-c.waitDone:
+		return c.isRunningByName()
+	default:
+	}
+
 	// Check if the child process is still alive using a lightweight OS call
 	// (Windows: OpenProcess+GetExitCodeProcess, Unix: Signal(0))
 	if isProcessAlive(c.cmd.Process.Pid) {
@@ -192,9 +203,7 @@ func (c *Controller) IsRunning() bool {
 
 	// Child process is dead — reap it exactly once and fall back to name lookup
 	// (the launched exe may have been a launcher that spawned the real game and exited)
-	c.waitOnce.Do(func() {
-		go c.cmd.Wait()
-	})
+	go c.waitForExit()
 	return c.isRunningByName()
 }
 
@@ -230,6 +239,14 @@ func (c *Controller) WaitForProcessStart(timeout time.Duration) error {
 				Err:     fmt.Errorf("process not found in system after %v", timeout),
 			}
 		case <-ticker.C:
+			if c.cmd != nil && c.cmd.ProcessState != nil {
+				return nil
+			}
+			select {
+			case <-c.waitDone:
+				return nil
+			default:
+			}
 			if c.IsRunning() {
 				return nil
 			}
@@ -269,13 +286,8 @@ func (c *Controller) Stop(grace time.Duration) error {
 	}
 
 	// Wait for graceful shutdown with timeout
-	done := make(chan error, 1)
-	go func() {
-		done <- c.cmd.Wait()
-	}()
-
 	select {
-	case <-done:
+	case <-c.waitDone:
 		return nil
 	case <-time.After(grace):
 		// Grace period expired, force kill
@@ -357,8 +369,27 @@ func (c *Controller) IsLauncherProcessRunning() bool {
 		return false
 	}
 
+	select {
+	case <-c.waitDone:
+		return false
+	default:
+	}
+
 	err := c.cmd.Process.Signal(syscall.Signal(0))
 	return err == nil
+}
+
+func (c *Controller) waitForExit() {
+	if c.cmd == nil {
+		return
+	}
+
+	c.waitOnce.Do(func() {
+		_ = c.cmd.Wait()
+		if c.waitDone != nil {
+			close(c.waitDone)
+		}
+	})
 }
 
 // Helper methods

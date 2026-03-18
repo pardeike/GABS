@@ -2,7 +2,9 @@ package mcp
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -126,6 +128,119 @@ func TestGamesConnectCanReattachUsingBridgeConfigWithoutTrackedProcess(t *testin
 	toolsText := string(toolsBytes)
 	if !strings.Contains(toolsText, "rimworld.rimbridge.core.ping") {
 		t.Fatalf("expected mirrored tool after reconnect, got: %s", toolsText)
+	}
+
+	if err := <-serverDone; err != nil {
+		t.Fatalf("test GABP server failed: %v", err)
+	}
+}
+
+func TestGamesCallToolFailsFastAndStatusTurnsDisconnectedAfterBridgeDrop(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "gabs-reconnect-disconnect")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer listener.Close()
+
+	bridgeToken := "disconnect-on-call-token"
+	serverDone := make(chan error, 1)
+	go serveTestGabpSessionDisconnectOnToolCall(listener, bridgeToken, serverDone)
+
+	bridgeDir := filepath.Join(tmpDir, "rimworld")
+	if err := os.MkdirAll(bridgeDir, 0755); err != nil {
+		t.Fatalf("failed to create bridge dir: %v", err)
+	}
+
+	bridgeData, err := json.MarshalIndent(config.BridgeJSON{
+		Port:   listener.Addr().(*net.TCPAddr).Port,
+		Token:  bridgeToken,
+		GameId: "rimworld",
+	}, "", "  ")
+	if err != nil {
+		t.Fatalf("failed to marshal bridge.json: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(bridgeDir, "bridge.json"), bridgeData, 0644); err != nil {
+		t.Fatalf("failed to write bridge.json: %v", err)
+	}
+
+	gamesConfig := &config.GamesConfig{
+		Games: map[string]config.GameConfig{
+			"rimworld": {
+				ID:         "rimworld",
+				Name:       "RimWorld",
+				LaunchMode: "DirectPath",
+				Target:     "/Applications/RimWorldMac.app/Contents/MacOS/RimWorld by Ludeon Studios",
+			},
+		},
+	}
+
+	log := util.NewLogger("error")
+	server := NewServerForTesting(log)
+	server.SetConfigDir(tmpDir)
+	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, 1*time.Second)
+
+	connectResp := server.HandleMessage(&Message{
+		JSONRPC: "2.0",
+		Method:  "tools/call",
+		ID:      json.RawMessage(`"connect-disconnect"`),
+		Params: map[string]interface{}{
+			"name": "games.connect",
+			"arguments": map[string]interface{}{
+				"gameId": "rimworld",
+			},
+		},
+	})
+	connectText := marshalMessage(t, connectResp)
+	if strings.Contains(connectText, `"isError":true`) {
+		t.Fatalf("expected connect to succeed, got: %s", connectText)
+	}
+
+	callStart := time.Now()
+	callResp := server.HandleMessage(&Message{
+		JSONRPC: "2.0",
+		Method:  "tools/call",
+		ID:      json.RawMessage(`"call-disconnect"`),
+		Params: map[string]interface{}{
+			"name": "games.call_tool",
+			"arguments": map[string]interface{}{
+				"tool":    "rimworld.rimbridge.core.ping",
+				"timeout": 120,
+			},
+		},
+	})
+	callDuration := time.Since(callStart)
+	callText := marshalMessage(t, callResp)
+	if callDuration > 2*time.Second {
+		t.Fatalf("expected call_tool to fail fast after disconnect, took %v (%s)", callDuration, callText)
+	}
+	if !strings.Contains(callText, `"isError":true`) {
+		t.Fatalf("expected call_tool to fail after disconnect, got: %s", callText)
+	}
+	if !strings.Contains(callText, "connection unavailable") {
+		t.Fatalf("expected disconnect details in call_tool response, got: %s", callText)
+	}
+
+	statusResp := server.HandleMessage(&Message{
+		JSONRPC: "2.0",
+		Method:  "tools/call",
+		ID:      json.RawMessage(`"status-disconnect"`),
+		Params: map[string]interface{}{
+			"name": "games.status",
+			"arguments": map[string]interface{}{
+				"gameId": "rimworld",
+			},
+		},
+	})
+	statusText := marshalMessage(t, statusResp)
+	if !strings.Contains(statusText, "GABP disconnected") {
+		t.Fatalf("expected disconnected status after bridge drop, got: %s", statusText)
 	}
 
 	if err := <-serverDone; err != nil {
@@ -438,6 +553,20 @@ func serveTestGabpSession(listener net.Listener, expectedToken string, done chan
 		}
 	}
 
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		done <- err
+		return
+	}
+	if _, err := reader.ReadMessage(); err != nil {
+		var netErr net.Error
+		if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || (errors.As(err, &netErr) && netErr.Timeout()) {
+			done <- nil
+			return
+		}
+		done <- err
+		return
+	}
+
 	done <- nil
 }
 
@@ -533,6 +662,91 @@ func serveTestGabpSessionWithToolCalls(listener net.Listener, expectedToken stri
 				done <- err
 				return
 			}
+		default:
+			done <- fmt.Errorf("unexpected method: %s", request.Method)
+			return
+		}
+	}
+
+	done <- nil
+}
+
+func serveTestGabpSessionDisconnectOnToolCall(listener net.Listener, expectedToken string, done chan<- error) {
+	conn, err := listener.Accept()
+	if err != nil {
+		done <- err
+		return
+	}
+	defer conn.Close()
+
+	reader := util.NewLSPFrameReader(conn)
+	writer := util.NewLSPFrameWriter(conn)
+
+	for i := 0; i < 3; i++ {
+		data, err := reader.ReadMessage()
+		if err != nil {
+			done <- err
+			return
+		}
+
+		var request util.GABPMessage
+		if err := json.Unmarshal(data, &request); err != nil {
+			done <- err
+			return
+		}
+
+		switch request.Method {
+		case "session/hello":
+			params, ok := request.Params.(map[string]interface{})
+			if !ok {
+				done <- fmt.Errorf("session/hello params not decoded as object: %#v", request.Params)
+				return
+			}
+			if token, _ := params["token"].(string); token != expectedToken {
+				done <- fmt.Errorf("unexpected handshake token: %q", token)
+				return
+			}
+
+			response := util.NewGABPResponse(request.ID, gabp.SessionWelcomeResult{
+				AgentID: "rimworld",
+				App: gabp.AppInfo{
+					Name:    "RimBridgeServer",
+					Version: "0.1.0",
+				},
+				Capabilities: gabp.Capabilities{
+					Methods:   []string{"tools/list", "tools/call"},
+					Events:    []string{"system/log"},
+					Resources: []string{},
+				},
+				SchemaVersion: "1.0",
+			})
+			if err := writer.WriteJSON(response); err != nil {
+				done <- err
+				return
+			}
+		case "tools/list":
+			response := util.NewGABPResponse(request.ID, map[string]interface{}{
+				"tools": []map[string]interface{}{
+					{
+						"name":        "rimbridge.core/ping",
+						"description": "Connectivity test",
+						"inputSchema": map[string]interface{}{
+							"type":       "object",
+							"properties": map[string]interface{}{},
+						},
+						"outputSchema": map[string]interface{}{
+							"type": "object",
+						},
+					},
+				},
+			})
+			if err := writer.WriteJSON(response); err != nil {
+				done <- err
+				return
+			}
+		case "tools/call":
+			done <- nil
+			return
 		default:
 			done <- fmt.Errorf("unexpected method: %s", request.Method)
 			return

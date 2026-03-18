@@ -31,7 +31,7 @@ func TestGameStopFix(t *testing.T) {
 				Name:       "Direct Path Game",
 				LaunchMode: "DirectPath",
 				Target:     "sleep",
-				Args:       []string{"0.1"}, // Very short sleep for testing
+				Args:       []string{"5"},
 			},
 			"steam-game": {
 				ID:         "steam-game",
@@ -144,7 +144,7 @@ func TestGameStopFix(t *testing.T) {
 			t.Error("Steam game stop should be marked as error when stopProcessName is missing")
 		}
 
-		// Should contain warning about missing configuration OR indicate process not tracked  
+		// Should contain warning about missing configuration OR indicate process not tracked
 		if strings.Contains(responseStr, "Configure 'stopProcessName'") {
 			t.Log("✓ Shows proper stopProcessName configuration warning")
 		} else if strings.Contains(responseStr, "no process tracked") {
@@ -155,7 +155,7 @@ func TestGameStopFix(t *testing.T) {
 
 		// Should reference the launch mode or be a generic error for untracked processes
 		if strings.Contains(responseStr, "SteamAppId") {
-			t.Log("✓ Mentions SteamAppId specifically")  
+			t.Log("✓ Mentions SteamAppId specifically")
 		} else if strings.Contains(responseStr, "no process tracked") {
 			t.Log("✓ Generic message for untracked processes (acceptable)")
 		} else {
@@ -200,7 +200,7 @@ func TestGameStopFix(t *testing.T) {
 		t.Logf("Steam game status: %s", responseStr)
 
 		// For Steam games without stopProcessName, status could be:
-		// 1. "launcher active" - if launcher is still running  
+		// 1. "launcher active" - if launcher is still running
 		// 2. "launched via SteamAppId...cannot track" - if launcher exited but we remember it was launched
 		// 3. "stopped" - if launcher exited and we're using stateless approach (valid behavior)
 		if strings.Contains(responseStr, "launcher active") {
@@ -236,7 +236,7 @@ func TestGameStopFix(t *testing.T) {
 		if strings.Contains(responseStr, "Missing stopProcessName") {
 			t.Error("games.list should be simplified - validation warnings should be in games.show")
 		}
-		
+
 		// Should NOT contain limitation warnings - that's for games.status
 		if strings.Contains(responseStr, "cannot directly stop SteamAppId games") {
 			t.Error("games.list should be simplified and not show stop limitations")
@@ -244,7 +244,7 @@ func TestGameStopFix(t *testing.T) {
 		if strings.Contains(responseStr, "Note:") {
 			t.Error("games.list should not contain verbose notes - should be simplified")
 		}
-		
+
 		// Should contain game IDs only
 		if !strings.Contains(responseStr, "direct-game") {
 			t.Error("Expected to see game ID 'direct-game' in simplified output")
@@ -340,7 +340,7 @@ func TestGameStopFix(t *testing.T) {
 			},
 		}
 
-		response = serverWithTracking.HandleMessage(statusMsg) 
+		response = serverWithTracking.HandleMessage(statusMsg)
 		respBytes, _ := json.Marshal(response)
 		responseStr := string(respBytes)
 		t.Logf("Steam game with tracking status: %s", responseStr)

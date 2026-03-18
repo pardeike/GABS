@@ -9,6 +9,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -225,6 +226,36 @@ Once the server is running, use MCP tools to manage games:
 // === Server Command ===
 
 func runServer(ctx context.Context, log util.Logger, opts options) int {
+	// Enforce a single global GABS server process per user.
+	lockPaths, err := config.NewConfigPaths("")
+	if err != nil {
+		log.Errorw("failed to resolve server lock path", "error", err)
+		return 1
+	}
+	if err := lockPaths.EnsureBaseDir(); err != nil {
+		log.Errorw("failed to create server lock directory", "path", lockPaths.GetBaseDir(), "error", err)
+		return 1
+	}
+
+	serverLock, err := config.AcquireServerLock(lockPaths.GetServerLockPath())
+	if err != nil {
+		var runningErr *config.ServerAlreadyRunningError
+		if errors.As(err, &runningErr) {
+			log.Errorw("another GABS server is already running",
+				"pid", runningErr.Info.PID,
+				"startedAt", runningErr.Info.StartedAt,
+				"lockPath", runningErr.Path)
+		} else {
+			log.Errorw("failed to acquire server singleton lock", "lockPath", lockPaths.GetServerLockPath(), "error", err)
+		}
+		return 1
+	}
+	defer func() {
+		if err := serverLock.Release(); err != nil {
+			log.Warnw("failed to release server lock", "lockPath", lockPaths.GetServerLockPath(), "error", err)
+		}
+	}()
+
 	// Load games configuration
 	gamesConfig, err := config.LoadGamesConfigFromDir(opts.configDir)
 	if err != nil {

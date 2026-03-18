@@ -31,7 +31,7 @@ func TestApplicationLifecycleManagement(t *testing.T) {
 				Name:       "Test Direct Launch",
 				LaunchMode: "DirectPath",
 				Target:     "/bin/sleep",
-				Args:       []string{"0.01"}, // Very short sleep for testing
+				Args:       []string{"5"},
 			},
 			"test-steam": {
 				ID:         "test-steam",

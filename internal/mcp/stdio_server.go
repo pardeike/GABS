@@ -23,20 +23,26 @@ import (
 
 // Server runs MCP over stdio.
 type Server struct {
-	log           util.Logger
-	tools         map[string]*ToolHandler
-	resources     map[string]*ResourceHandler
-	games         map[string]process.ControllerInterface // Track running games
-	configDir     string                                 // Config directory for bridge files
-	apiKey        string                                 // API key for HTTP authentication
-	mu            sync.RWMutex
-	writers       []util.FrameWriter         // Track client connections for notifications
-	writersMu     sync.RWMutex               // Protect writers slice
-	gameTools     map[string][]string        // Track which tools belong to which games
-	gameResources map[string][]string        // Track which resources belong to which games
-	gabpClients   map[string]*gabp.Client    // Track GABP connections per game
-	starter       *process.SerializedStarter // Serialized process starter
-	instanceID    string
+	log             util.Logger
+	tools           map[string]*ToolHandler
+	resources       map[string]*ResourceHandler
+	games           map[string]process.ControllerInterface // Track running games
+	configDir       string                                 // Config directory for bridge files
+	apiKey          string                                 // API key for HTTP authentication
+	mu              sync.RWMutex
+	writers         []util.FrameWriter      // Track client connections for notifications
+	writersMu       sync.RWMutex            // Protect writers slice
+	gameTools       map[string][]string     // Track which tools belong to which games
+	gameResources   map[string][]string     // Track which resources belong to which games
+	gabpClients     map[string]*gabp.Client // Track GABP connections per game
+	gabpDisconnects map[string]gabpDisconnectRecord
+	starter         *process.SerializedStarter // Serialized process starter
+	instanceID      string
+}
+
+type gabpDisconnectRecord struct {
+	At      time.Time
+	Message string
 }
 
 var serverInstanceCounter uint64
@@ -77,34 +83,36 @@ type ResourceHandler struct {
 
 func NewServer(log util.Logger) *Server {
 	return &Server{
-		log:           log,
-		tools:         make(map[string]*ToolHandler),
-		resources:     make(map[string]*ResourceHandler),
-		games:         make(map[string]process.ControllerInterface),
-		configDir:     "", // Will be set by SetConfigDir
-		writers:       make([]util.FrameWriter, 0),
-		gameTools:     make(map[string][]string),
-		gameResources: make(map[string][]string),
-		gabpClients:   make(map[string]*gabp.Client),
-		starter:       process.NewSerializedStarter(), // Initialize serialized starter
-		instanceID:    newServerInstanceID(),
+		log:             log,
+		tools:           make(map[string]*ToolHandler),
+		resources:       make(map[string]*ResourceHandler),
+		games:           make(map[string]process.ControllerInterface),
+		configDir:       "", // Will be set by SetConfigDir
+		writers:         make([]util.FrameWriter, 0),
+		gameTools:       make(map[string][]string),
+		gameResources:   make(map[string][]string),
+		gabpClients:     make(map[string]*gabp.Client),
+		gabpDisconnects: make(map[string]gabpDisconnectRecord),
+		starter:         process.NewSerializedStarter(), // Initialize serialized starter
+		instanceID:      newServerInstanceID(),
 	}
 }
 
 // NewServerForTesting creates a server with shorter timeouts for testing
 func NewServerForTesting(log util.Logger) *Server {
 	return &Server{
-		log:           log,
-		tools:         make(map[string]*ToolHandler),
-		resources:     make(map[string]*ResourceHandler),
-		games:         make(map[string]process.ControllerInterface),
-		configDir:     "", // Will be set by SetConfigDir
-		writers:       make([]util.FrameWriter, 0),
-		gameTools:     make(map[string][]string),
-		gameResources: make(map[string][]string),
-		gabpClients:   make(map[string]*gabp.Client),
-		starter:       process.NewSerializedStarterForTesting(), // Use testing timeouts
-		instanceID:    newServerInstanceID(),
+		log:             log,
+		tools:           make(map[string]*ToolHandler),
+		resources:       make(map[string]*ResourceHandler),
+		games:           make(map[string]process.ControllerInterface),
+		configDir:       "", // Will be set by SetConfigDir
+		writers:         make([]util.FrameWriter, 0),
+		gameTools:       make(map[string][]string),
+		gameResources:   make(map[string][]string),
+		gabpClients:     make(map[string]*gabp.Client),
+		gabpDisconnects: make(map[string]gabpDisconnectRecord),
+		starter:         process.NewSerializedStarterForTesting(), // Use testing timeouts
+		instanceID:      newServerInstanceID(),
 	}
 }
 
@@ -304,6 +312,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			status := s.checkGameStatus(game.ID)
 			statusDesc := s.getStatusDescriptionFromStatus(status, game)
 			content.WriteString(fmt.Sprintf("**%s** (%s): %s\n", game.ID, game.Name, statusDesc))
+			if disconnectNote := s.describeLastGABPDisconnect(game.ID); disconnectNote != "" {
+				content.WriteString(fmt.Sprintf("\n%s\n", disconnectNote))
+			}
 
 			// Add helpful info for launcher games ONLY when we cannot track them
 			if game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId" {
@@ -360,7 +371,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		err := s.startGame(*game, gamesConfig, backoffMin, backoffMax)
+		startResult, err := s.startGame(*game, gamesConfig, backoffMin, backoffMax)
 		if err != nil {
 			var activeErr *gameAlreadyActiveError
 			if errors.As(err, &activeErr) {
@@ -375,8 +386,38 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
+		if startResult != nil && !startResult.GABPConnected {
+			message := fmt.Sprintf("Game '%s' (%s) started, but GABP was not ready after %s", game.ID, game.Name, startResult.GABPConnectWait.Round(time.Millisecond))
+			if startResult.GABPConnectError != nil {
+				message = fmt.Sprintf("%s: %v", message, startResult.GABPConnectError)
+			}
+			message = fmt.Sprintf("%s. The game may still be loading or the mod may be missing. Use games.status, then games.connect once the mod is ready.", message)
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: message}},
+				StructuredContent: map[string]interface{}{
+					"gameId":           game.ID,
+					"processStarted":   startResult.ProcessStarted,
+					"gabpConnected":    startResult.GABPConnected,
+					"gameStillRunning": startResult.GameStillRunning,
+					"gabpWaitMs":       startResult.GABPConnectWait.Milliseconds(),
+					"gabpError": func() interface{} {
+						if startResult.GABPConnectError == nil {
+							return nil
+						}
+						return startResult.GABPConnectError.Error()
+					}(),
+				},
+			}, nil
+		}
+
 		return &ToolResult{
-			Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' (%s) started successfully", game.ID, game.Name)}},
+			Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' (%s) started successfully and connected via GABP.", game.ID, game.Name)}},
+			StructuredContent: map[string]interface{}{
+				"gameId":           game.ID,
+				"processStarted":   true,
+				"gabpConnected":    true,
+				"gameStillRunning": true,
+			},
 		}, nil
 	}, normalizationConfig)
 
@@ -1311,7 +1352,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		existingClient, alreadyConnected := s.gabpClients[game.ID]
 		s.mu.RUnlock()
 
-		if alreadyConnected {
+		if alreadyConnected && existingClient.IsConnected() {
 			if err := s.syncGABPTools(existingClient, game.ID); err != nil {
 				return &ToolResult{
 					Content: []Content{{Type: "text", Text: fmt.Sprintf("Already connected to '%s' but failed to sync tools: %v", game.ID, err)}},
@@ -1353,20 +1394,30 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		// attempt a direct GABP reconnect even when this GABS instance does not
 		// currently track the process as running.
 		connector := NewServerGABPConnector(s)
-		connectCtx, connectCancel := context.WithTimeout(context.Background(), 120*time.Second)
+		connectCtx, connectCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer connectCancel()
 
-		success := connector.AttemptConnection(connectCtx, game.ID, port, token)
-		if !success {
+		err = connector.AttemptConnection(connectCtx, game.ID, port, token)
+		if err != nil {
+			disconnectNote := s.describeLastGABPDisconnect(game.ID)
 			if status != "running" && status != "connected" {
+				if status == "running-disconnected" {
+					status = "running"
+				}
+				if disconnectNote != "" {
+					disconnectNote = "\n" + disconnectNote
+				}
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to connect to GABP server for '%s' on port %d. GABS currently sees status '%s'. Make sure the game is still running and the mod is fully loaded.", game.ID, port, status)}},
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to connect to GABP server for '%s' on port %d after 15s: %v. GABS currently sees status '%s'. Make sure the game is still running and the mod is fully loaded.%s", game.ID, port, err, status, disconnectNote)}},
 					IsError: true,
 				}, nil
 			}
 
+			if disconnectNote != "" {
+				disconnectNote = "\n" + disconnectNote
+			}
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to connect to GABP server for '%s' on port %d. Make sure the game mod is loaded.", game.ID, port)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to connect to GABP server for '%s' on port %d after 15s: %v. Make sure the game mod is loaded.%s", game.ID, port, err, disconnectNote)}},
 				IsError: true,
 			}, nil
 		}
@@ -1468,9 +1519,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		client, connected := s.gabpClients[entry.GameID]
 		s.mu.RUnlock()
 
-		if !connected {
+		if !connected || !client.IsConnected() {
+			disconnectNote := s.describeLastGABPDisconnect(entry.GameID)
+			if disconnectNote != "" {
+				disconnectNote = " " + disconnectNote
+			}
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' is not connected via GABP. Use games.connect to establish a connection first.", entry.GameID)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' is not connected via GABP. Use games.status to verify whether it is still running, then use games.connect or games.start as appropriate.%s", entry.GameID, disconnectNote)}},
 				IsError: true,
 			}, nil
 		}
@@ -1483,8 +1538,12 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 
 		result, isError, err := client.CallToolWithTimeout(gabpToolName, toolArgs, timeout)
 		if err != nil {
+			disconnectNote := s.describeLastGABPDisconnect(entry.GameID)
+			if disconnectNote != "" {
+				disconnectNote = " " + disconnectNote
+			}
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("GABP tool call failed: %v", err)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("GABP tool call failed: %v.%s", err, disconnectNote)}},
 				IsError: true,
 			}, nil
 		}
@@ -1865,6 +1924,8 @@ func (s *Server) getStatusDescriptionFromStatus(status string, gameConfig *confi
 		return "starting (another GABS session is launching the game)"
 	case "shared-running":
 		return "running (another GABS session owns the process; use games.connect to attach)"
+	case "running-disconnected":
+		return "running, but the GABP bridge disconnected"
 	case "running":
 		// Check if this is a launcher-based game with process tracking
 		if gameConfig.LaunchMode == "SteamAppId" || gameConfig.LaunchMode == "EpicAppId" {
@@ -1875,6 +1936,8 @@ func (s *Server) getStatusDescriptionFromStatus(status string, gameConfig *confi
 		return "running (GABS controls the process)"
 	case "connected":
 		return "running (connected via GABP; process not managed by this GABS instance)"
+	case "disconnected":
+		return "GABP disconnected (the game may have crashed or closed the bridge)"
 	case "stopped":
 		return "stopped"
 	case "launcher-running":
@@ -1884,6 +1947,62 @@ func (s *Server) getStatusDescriptionFromStatus(status string, gameConfig *confi
 	default:
 		return status
 	}
+}
+
+func (s *Server) describeLastGABPDisconnect(gameID string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.describeLastGABPDisconnectLocked(gameID)
+}
+
+func (s *Server) describeLastGABPDisconnectLocked(gameID string) string {
+	record, exists := s.gabpDisconnects[gameID]
+	if !exists {
+		return ""
+	}
+
+	return fmt.Sprintf("Last GABP disconnect at %s: %s", record.At.Format(time.RFC3339), record.Message)
+}
+
+func (s *Server) recordGABPDisconnectLocked(gameID string, err error) {
+	message := "connection closed"
+	if err != nil {
+		message = err.Error()
+	}
+
+	s.gabpDisconnects[gameID] = gabpDisconnectRecord{
+		At:      time.Now().UTC(),
+		Message: message,
+	}
+}
+
+func (s *Server) clearGABPDisconnectLocked(gameID string) {
+	delete(s.gabpDisconnects, gameID)
+}
+
+// HandleUnexpectedGABPDisconnect records bridge loss and removes mirrored tools immediately.
+func (s *Server) HandleUnexpectedGABPDisconnect(gameID string, client *gabp.Client, err error) {
+	s.mu.Lock()
+	current, exists := s.gabpClients[gameID]
+	if !exists || current != client {
+		s.mu.Unlock()
+		return
+	}
+
+	s.recordGABPDisconnectLocked(gameID, err)
+	toolsChanged := len(s.gameTools[gameID]) > 0
+	resourcesChanged := len(s.gameResources[gameID]) > 0
+	s.cleanupGameResourcesInternal(gameID)
+	s.mu.Unlock()
+
+	if toolsChanged {
+		s.SendToolsListChangedNotification()
+	}
+	if resourcesChanged {
+		s.SendResourcesListChangedNotification()
+	}
+
+	s.log.Warnw("unexpected GABP disconnect", "gameId", gameID, "error", err)
 }
 
 func (s *Server) resolveSharedRuntimeStatus(gameID string) string {
@@ -1953,9 +2072,13 @@ func (s *Server) checkGameStatus(gameID string) string {
 	defer s.mu.Unlock()
 
 	controller, exists := s.games[gameID]
+	client, clientConnected := s.gabpClients[gameID]
 	if !exists {
-		if _, connected := s.gabpClients[gameID]; connected {
-			return "connected"
+		if clientConnected {
+			if client.IsConnected() {
+				return "connected"
+			}
+			return "disconnected"
 		}
 		if status := s.resolveSharedRuntimeStatus(gameID); status != "" {
 			if status == process.RuntimeStateStatusRunning {
@@ -1972,6 +2095,9 @@ func (s *Server) checkGameStatus(gameID string) string {
 	// For Steam/Epic launcher games, check the actual game process
 	if launchMode == "SteamAppId" || launchMode == "EpicAppId" {
 		if controller.IsRunning() {
+			if clientConnected && !client.IsConnected() {
+				return "running-disconnected"
+			}
 			return "running" // We can track it and it's running
 		} else {
 			// Check if the launcher process is still active
@@ -1994,6 +2120,9 @@ func (s *Server) checkGameStatus(gameID string) string {
 
 	// For direct processes, check if the process is actually running
 	if controller.IsRunning() {
+		if clientConnected && !client.IsConnected() {
+			return "running-disconnected"
+		}
 		return "running"
 	}
 
@@ -2018,7 +2147,7 @@ func (s *Server) cleanupStoppedGame(gameID string) {
 
 // startGame starts a game process using the serialized starter approach
 // This implements @pardeike's requirements for serialized, verified process starting
-func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration) error {
+func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration) (*process.ProcessStartResult, error) {
 	// Convert GameConfig to LaunchSpec
 	launchSpec := process.LaunchSpec{
 		GameId:          game.ID,
@@ -2032,13 +2161,13 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	// Create and configure controller
 	controller := process.NewController()
 	if err := controller.Configure(launchSpec); err != nil {
-		return fmt.Errorf("failed to configure game launcher for '%s' (mode: %s, target: %s): %w",
+		return nil, fmt.Errorf("failed to configure game launcher for '%s' (mode: %s, target: %s): %w",
 			game.ID, game.LaunchMode, game.Target, err)
 	}
 
 	runtimeState, err := s.claimSharedRuntimeState(game, launchSpec)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	cleanupRuntimeState := true
@@ -2056,7 +2185,7 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	s.mu.Lock()
 	if trackedController, exists := s.games[game.ID]; exists && trackedController != nil && trackedController.IsRunning() {
 		s.mu.Unlock()
-		return &gameAlreadyActiveError{status: "running"}
+		return nil, &gameAlreadyActiveError{status: "running"}
 	}
 
 	// Clean up any stale controller reference
@@ -2066,7 +2195,7 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	// Create GABP bridge configuration (prepare environment variables)
 	port, token, bridgePath, err := config.WriteBridgeJSONWithConfig(game.ID, s.configDir, gamesConfig)
 	if err != nil {
-		return fmt.Errorf("failed to create bridge config for game '%s': %w", game.ID, err)
+		return nil, fmt.Errorf("failed to create bridge config for game '%s': %w", game.ID, err)
 	}
 	cleanupBridgeConfig = true
 
@@ -2081,8 +2210,15 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	result := s.starter.StartWithVerification(controller, gabpConnector, game.ID, port, token)
 
 	if result.Error != nil {
-		return fmt.Errorf("failed to start game '%s' (mode: %s, target: %s): %w",
+		return result, fmt.Errorf("failed to start game '%s' (mode: %s, target: %s): %w",
 			game.ID, game.LaunchMode, game.Target, result.Error)
+	}
+
+	if !result.GameStillRunning {
+		if result.GABPConnectError != nil {
+			return result, fmt.Errorf("game '%s' exited during startup before GABP became available: %w", game.ID, result.GABPConnectError)
+		}
+		return result, fmt.Errorf("game '%s' exited during startup", game.ID)
 	}
 
 	runtimeState.Status = process.RuntimeStateStatusRunning
@@ -2106,12 +2242,18 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	if result.GABPConnected {
 		logMsg += ", GABP connected"
 	} else {
-		logMsg += ", GABP connection failed/timeout"
+		logMsg += ", GABP not ready yet"
 	}
 
-	s.log.Infow(logMsg, "gameId", game.ID, "mode", game.LaunchMode, "processStarted", result.ProcessStarted, "gabpConnected", result.GABPConnected)
+	s.log.Infow(logMsg,
+		"gameId", game.ID,
+		"mode", game.LaunchMode,
+		"processStarted", result.ProcessStarted,
+		"gabpConnected", result.GABPConnected,
+		"gabpWait", result.GABPConnectWait,
+		"gabpError", result.GABPConnectError)
 
-	return nil
+	return result, nil
 }
 
 // establishGABPConnection attempts to connect to the game's GABP server with retry logic
@@ -2493,6 +2635,7 @@ func (s *Server) CleanupGABPConnection(gameId string) {
 		delete(s.gabpClients, gameId)
 		s.log.Debugw("cleaned up GABP client connection", "gameId", gameId)
 	}
+	delete(s.gabpDisconnects, gameId)
 }
 
 // CleanupBridgeConfig removes the bridge configuration file for a game
@@ -2560,6 +2703,7 @@ func (s *Server) cleanupGABPConnectionInternal(gameId string) {
 		delete(s.gabpClients, gameId)
 		s.log.Debugw("cleaned up GABP client connection", "gameId", gameId)
 	}
+	delete(s.gabpDisconnects, gameId)
 }
 
 // cleanupBridgeConfigInternal removes bridge config without acquiring mutex

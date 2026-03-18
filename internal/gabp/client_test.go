@@ -7,6 +7,7 @@ import (
 	"math"
 	"net"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -283,6 +284,97 @@ func TestConnectCompletesHandshakeWhenServerResponds(t *testing.T) {
 	capabilities := client.GetCapabilities()
 	if len(capabilities.Methods) != 2 || capabilities.Methods[0] != "tools/list" || capabilities.Methods[1] != "tools/call" {
 		t.Fatalf("unexpected capabilities after handshake: %#v", capabilities)
+	}
+
+	if err := <-serverDone; err != nil {
+		t.Fatalf("server goroutine failed: %v", err)
+	}
+}
+
+func TestCallToolFailsFastWhenConnectionDrops(t *testing.T) {
+	log := util.NewLogger("error")
+	client := NewClient(log)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer listener.Close()
+
+	serverDone := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer conn.Close()
+
+		reader := util.NewLSPFrameReader(conn)
+		writer := util.NewLSPFrameWriter(conn)
+
+		data, err := reader.ReadMessage()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+
+		var hello util.GABPMessage
+		if err := json.Unmarshal(data, &hello); err != nil {
+			serverDone <- err
+			return
+		}
+
+		if err := writer.WriteJSON(util.NewGABPResponse(hello.ID, SessionWelcomeResult{
+			AgentID: "rimworld",
+			Capabilities: Capabilities{
+				Methods: []string{"tools/call"},
+			},
+			SchemaVersion: "1.0",
+		})); err != nil {
+			serverDone <- err
+			return
+		}
+
+		data, err = reader.ReadMessage()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+
+		var call util.GABPMessage
+		if err := json.Unmarshal(data, &call); err != nil {
+			serverDone <- err
+			return
+		}
+
+		if call.Method != "tools/call" {
+			serverDone <- fmt.Errorf("unexpected method: %s", call.Method)
+			return
+		}
+
+		serverDone <- nil
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := client.Connect(ctx, listener.Addr().String(), "test-token", 10*time.Millisecond, 50*time.Millisecond); err != nil {
+		t.Fatalf("expected handshake to succeed, got: %v", err)
+	}
+	defer client.Close()
+
+	start := time.Now()
+	_, _, err = client.CallToolWithTimeout("rimbridge/core/ping", map[string]any{}, 30*time.Second)
+	duration := time.Since(start)
+	if err == nil {
+		t.Fatal("expected tool call to fail when the connection drops")
+	}
+	if duration > time.Second {
+		t.Fatalf("expected disconnect to fail fast, took %v", duration)
+	}
+	if !strings.Contains(err.Error(), "connection unavailable") {
+		t.Fatalf("expected disconnect error, got: %v", err)
 	}
 
 	if err := <-serverDone; err != nil {
