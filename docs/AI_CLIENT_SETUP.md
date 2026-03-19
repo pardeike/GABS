@@ -109,6 +109,10 @@ args = ["server"]
 
 On Windows, use the full path to `gabs.exe`.
 
+Each live Codex session will start its own stdio GABS process. That is
+intentional. GABS coordinates shared ownership per game, not with a machine-wide
+`gabs server` singleton.
+
 ### Generic MCP Clients
 
 If your MCP client supports stdio servers, the essential configuration is:

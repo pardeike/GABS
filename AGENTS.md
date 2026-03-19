@@ -755,6 +755,18 @@ GABS creates configuration in the user's home directory:
 
 - **All platforms**: `~/.gabs/{gameId}/bridge.json`
 
+### Local Redeploy Preference
+
+When redeploying GABS locally for this workspace:
+
+- Keep the binary name as `gabs`
+- Overwrite the existing installed binary in place
+- Do not create backup copies like `gabs.bak-*`
+- Do not switch the MCP config to alternate binary filenames
+
+This repository expects a stable binary path for local MCP clients, especially
+Codex sessions that launch `gabs server` directly.
+
 ### Environment Variables
 
 - `GABS_LAUNCH_ID`: Unique session identifier

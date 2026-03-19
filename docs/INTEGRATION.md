@@ -98,6 +98,10 @@ command = "/path/to/gabs"
 args = ["server"]
 ```
 
+Each live Codex session runs its own stdio GABS process. Cross-session
+coordination happens only when those sessions interact with the same configured
+game.
+
 ### Custom AI Tools
 
 Here's a Python example using an MCP client:

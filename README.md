@@ -133,6 +133,10 @@ command = "/absolute/path/to/gabs"
 args = ["server"]
 ```
 
+Each Codex or Claude session starts its own stdio GABS process. That process is
+session-local; GABS only coordinates ownership at the game level so two live AI
+sessions do not both launch or attach to the same game by accident.
+
 **Generic MCP client:**
 
 Point your client at the `gabs` binary with the `server` subcommand:

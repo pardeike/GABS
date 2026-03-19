@@ -39,11 +39,6 @@ func (cp *ConfigPaths) GetMainConfigPath() string {
 	return filepath.Join(cp.baseDir, "config.json")
 }
 
-// GetServerLockPath returns the path to the global server lock file.
-func (cp *ConfigPaths) GetServerLockPath() string {
-	return filepath.Join(cp.baseDir, "server.lock")
-}
-
 // GetGameDir returns the directory path for a specific game's configuration files
 func (cp *ConfigPaths) GetGameDir(gameID string) string {
 	return filepath.Join(cp.baseDir, gameID)
