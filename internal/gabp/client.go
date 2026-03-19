@@ -47,6 +47,8 @@ var (
 	ErrClientClosed       = errors.New("GABP client connection closed")
 )
 
+const defaultRequestTimeout = 30 * time.Second
+
 type Capabilities = gabpruntime.Capabilities
 type Limits = gabpruntime.Limits
 type SessionHelloParams = gabpruntime.SessionHelloParams
@@ -137,9 +139,10 @@ func (c *Client) Connect(ctx context.Context, addr string, token string, backoff
 	go c.messageHandler()
 
 	// Perform handshake in a way that observes ctx cancellation.
+	handshakeTimeout := timeoutFromContextOrDefault(ctx, defaultRequestTimeout)
 	handshakeErrCh := make(chan error, 1)
 	go func() {
-		handshakeErrCh <- c.handshake()
+		handshakeErrCh <- c.handshakeWithTimeout(handshakeTimeout)
 	}()
 
 	select {
@@ -163,6 +166,10 @@ func (c *Client) Connect(ctx context.Context, addr string, token string, backoff
 }
 
 func (c *Client) handshake() error {
+	return c.handshakeWithTimeout(defaultRequestTimeout)
+}
+
+func (c *Client) handshakeWithTimeout(timeout time.Duration) error {
 	// Send session/hello
 	launchId := uuid.New().String()
 	params := SessionHelloParams{
@@ -176,7 +183,7 @@ func (c *Client) handshake() error {
 		},
 	}
 
-	result, err := c.sendRequest(gabpruntime.MethodSessionHello, params)
+	result, err := c.sendRequestWithTimeout(gabpruntime.MethodSessionHello, params, timeout)
 	if err != nil {
 		return fmt.Errorf("handshake failed: %w", err)
 	}
@@ -192,6 +199,24 @@ func (c *Client) handshake() error {
 
 	c.log.Infow("GABP handshake complete", "agentId", c.agentId, "methods", len(c.capabilities.Methods))
 	return nil
+}
+
+func timeoutFromContextOrDefault(ctx context.Context, fallback time.Duration) time.Duration {
+	if ctx == nil {
+		return fallback
+	}
+
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return fallback
+	}
+
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return time.Millisecond
+	}
+
+	return remaining
 }
 
 func (c *Client) messageHandler() {
@@ -258,7 +283,7 @@ func (c *Client) handleEvent(msg *util.GABPMessage) {
 }
 
 func (c *Client) sendRequest(method string, params interface{}) (interface{}, error) {
-	return c.sendRequestWithTimeout(method, params, 30*time.Second)
+	return c.sendRequestWithTimeout(method, params, defaultRequestTimeout)
 }
 
 func (c *Client) sendRequestWithTimeout(method string, params interface{}, timeout time.Duration) (interface{}, error) {
@@ -404,7 +429,11 @@ func mapTypeToJSONSchema(typeName string) string {
 }
 
 func (c *Client) ListTools() ([]ToolDescriptor, error) {
-	result, err := c.sendRequest(gabpruntime.MethodToolsList, map[string]interface{}{})
+	return c.ListToolsWithTimeout(defaultRequestTimeout)
+}
+
+func (c *Client) ListToolsWithTimeout(timeout time.Duration) ([]ToolDescriptor, error) {
+	result, err := c.sendRequestWithTimeout(gabpruntime.MethodToolsList, map[string]interface{}{}, timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -436,7 +465,7 @@ func (c *Client) ListTools() ([]ToolDescriptor, error) {
 }
 
 func (c *Client) CallTool(name string, args map[string]any) (map[string]any, bool, error) {
-	return c.CallToolWithTimeout(name, args, 30*time.Second)
+	return c.CallToolWithTimeout(name, args, defaultRequestTimeout)
 }
 
 // CallToolWithTimeout calls a tool with a custom timeout

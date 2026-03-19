@@ -121,6 +121,91 @@ func newServerInstanceID() string {
 	return fmt.Sprintf("%d-%d-%d", os.Getpid(), time.Now().UnixNano(), seq)
 }
 
+func parseOptionalPositiveIntValue(raw interface{}, key string) (int, bool, *ToolResult) {
+	if raw == nil {
+		return 0, false, nil
+	}
+
+	var value int
+	switch typed := raw.(type) {
+	case float64:
+		if typed != float64(int(typed)) {
+			return 0, false, &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Argument '%s' must be an integer", key)}},
+				IsError: true,
+			}
+		}
+		value = int(typed)
+	case int:
+		value = typed
+	case int32:
+		value = int(typed)
+	case int64:
+		value = int(typed)
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(typed))
+		if err != nil {
+			return 0, false, &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Argument '%s' must be an integer", key)}},
+				IsError: true,
+			}
+		}
+		value = parsed
+	default:
+		return 0, false, &ToolResult{
+			Content: []Content{{Type: "text", Text: fmt.Sprintf("Argument '%s' must be an integer", key)}},
+			IsError: true,
+		}
+	}
+
+	if value <= 0 {
+		return 0, false, nil
+	}
+
+	return value, true, nil
+}
+
+func parseOptionalTimeoutSecondsArg(args map[string]interface{}, key string, defaultValue time.Duration) (time.Duration, *ToolResult) {
+	raw, exists := args[key]
+	if !exists || raw == nil {
+		return defaultValue, nil
+	}
+
+	seconds, hasValue, invalidArg := parseOptionalPositiveIntValue(raw, key)
+	if invalidArg != nil {
+		return defaultValue, invalidArg
+	}
+	if !hasValue {
+		return defaultValue, nil
+	}
+
+	return time.Duration(seconds) * time.Second, nil
+}
+
+func deriveMirroredToolCallTimeout(args map[string]interface{}, defaultValue time.Duration) (time.Duration, *ToolResult) {
+	timeout := defaultValue
+
+	if timeoutMs, hasValue, invalidArg := parseOptionalPositiveIntValue(args["timeoutMs"], "timeoutMs"); invalidArg != nil {
+		return defaultValue, invalidArg
+	} else if hasValue {
+		candidate := time.Duration(timeoutMs)*time.Millisecond + (5 * time.Second)
+		if candidate > timeout {
+			timeout = candidate
+		}
+	}
+
+	if timeoutSeconds, hasValue, invalidArg := parseOptionalPositiveIntValue(args["timeout"], "timeout"); invalidArg != nil {
+		return defaultValue, invalidArg
+	} else if hasValue {
+		candidate := time.Duration(timeoutSeconds) * time.Second
+		if candidate > timeout {
+			timeout = candidate
+		}
+	}
+
+	return timeout, nil
+}
+
 // RegisterTool registers a tool with its handler, applying normalization if configured
 func (s *Server) RegisterTool(tool Tool, handler func(args map[string]interface{}) (*ToolResult, error)) {
 	s.RegisterToolWithConfig(tool, handler, nil)
@@ -1322,6 +1407,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 					"type":        "boolean",
 					"description": "When true, override another live GABS session's ownership record and attempt to connect anyway. Defaults to false.",
 				},
+				"timeout": map[string]interface{}{
+					"type":        "integer",
+					"description": "Request timeout in seconds (optional, default 15). Increase for slow game loads or slow tool discovery.",
+				},
 			},
 			"required": []string{"gameId"},
 		},
@@ -1346,6 +1435,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		if forceTakeoverErr != nil {
 			return forceTakeoverErr, nil
 		}
+		connectTimeout, invalidTimeout := parseOptionalTimeoutSecondsArg(args, "timeout", 15*time.Second)
+		if invalidTimeout != nil {
+			return invalidTimeout, nil
+		}
 
 		// Check if already connected - re-sync tools.
 		s.mu.RLock()
@@ -1353,7 +1446,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		s.mu.RUnlock()
 
 		if alreadyConnected && existingClient.IsConnected() {
-			if err := s.syncGABPTools(existingClient, game.ID); err != nil {
+			if err := s.syncGABPToolsWithTimeout(existingClient, game.ID, connectTimeout); err != nil {
 				return &ToolResult{
 					Content: []Content{{Type: "text", Text: fmt.Sprintf("Already connected to '%s' but failed to sync tools: %v", game.ID, err)}},
 					IsError: true,
@@ -1393,8 +1486,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		// Allow reattaching after a GABS restart. If bridge.json is present,
 		// attempt a direct GABP reconnect even when this GABS instance does not
 		// currently track the process as running.
-		connector := NewServerGABPConnector(s)
-		connectCtx, connectCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		connector := NewServerGABPConnector(s, backoffMin, backoffMax)
+		connectCtx, connectCancel := context.WithTimeout(context.Background(), connectTimeout)
 		defer connectCancel()
 
 		err = connector.AttemptConnection(connectCtx, game.ID, port, token)
@@ -1408,7 +1501,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 					disconnectNote = "\n" + disconnectNote
 				}
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to connect to GABP server for '%s' on port %d after 15s: %v. GABS currently sees status '%s'. Make sure the game is still running and the mod is fully loaded.%s", game.ID, port, err, status, disconnectNote)}},
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to connect to GABP server for '%s' on port %d after %s: %v. GABS currently sees status '%s'. Make sure the game is still running and the mod is fully loaded.%s", game.ID, port, connectTimeout.Round(time.Second), err, status, disconnectNote)}},
 					IsError: true,
 				}, nil
 			}
@@ -1417,7 +1510,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				disconnectNote = "\n" + disconnectNote
 			}
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to connect to GABP server for '%s' on port %d after 15s: %v. Make sure the game mod is loaded.%s", game.ID, port, err, disconnectNote)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to connect to GABP server for '%s' on port %d after %s: %v. Make sure the game mod is loaded.%s", game.ID, port, connectTimeout.Round(time.Second), err, disconnectNote)}},
 				IsError: true,
 			}, nil
 		}
@@ -1477,7 +1570,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				},
 				"timeout": map[string]interface{}{
 					"type":        "integer",
-					"description": "Request timeout in seconds (optional, default 30). Increase for long-running tools like wait_for_screen.",
+					"description": "Request timeout in seconds (optional, default 30). Increase for long-running tools like wait_for_screen or wait_for_game_loaded.",
 				},
 			},
 			"required": []string{"tool"},
@@ -1500,13 +1593,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			toolArgs = map[string]interface{}{}
 		}
 
-		// Parse optional timeout (in seconds), default 30s, max 120s
-		timeout := 30 * time.Second
-		if timeoutArg, ok := args["timeout"].(float64); ok && timeoutArg > 0 {
-			timeout = time.Duration(timeoutArg) * time.Second
-			if timeout > 120*time.Second {
-				timeout = 120 * time.Second
-			}
+		timeout, invalidTimeout := parseOptionalTimeoutSecondsArg(args, "timeout", 30*time.Second)
+		if invalidTimeout != nil {
+			return invalidTimeout, nil
 		}
 
 		entry, resolveErr := resolveListedTool(gameIdArg, hasGameID, toolName)
@@ -2206,7 +2295,7 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 
 	// Use serialized starter with verification
 	// This implements the asynchronous handling requested by @pardeike
-	gabpConnector := NewServerGABPConnector(s)
+	gabpConnector := NewServerGABPConnector(s, backoffMin, backoffMax)
 	result := s.starter.StartWithVerification(controller, gabpConnector, game.ID, port, token)
 
 	if result.Error != nil {
@@ -2311,8 +2400,12 @@ func (s *Server) establishGABPConnection(gameID string, port int, token string, 
 
 // syncGABPTools mirrors GABP tools to MCP tools with game-specific naming
 func (s *Server) syncGABPTools(client *gabp.Client, gameID string) error {
+	return s.syncGABPToolsWithTimeout(client, gameID, 30*time.Second)
+}
+
+func (s *Server) syncGABPToolsWithTimeout(client *gabp.Client, gameID string, timeout time.Duration) error {
 	// Get tools from GABP client
-	gabpTools, err := client.ListTools()
+	gabpTools, err := client.ListToolsWithTimeout(timeout)
 	if err != nil {
 		return fmt.Errorf("failed to list GABP tools: %w", err)
 	}
@@ -2335,8 +2428,13 @@ func (s *Server) syncGABPTools(client *gabp.Client, gameID string) error {
 		originalToolName := tool.Name // Capture original name for GABP call
 		handler := func(toolName string) func(args map[string]interface{}) (*ToolResult, error) {
 			return func(args map[string]interface{}) (*ToolResult, error) {
+				proxyTimeout, invalidTimeout := deriveMirroredToolCallTimeout(args, 30*time.Second)
+				if invalidTimeout != nil {
+					return invalidTimeout, nil
+				}
+
 				// Call GABP with original tool name (without game prefix)
-				result, isError, err := client.CallTool(toolName, args)
+				result, isError, err := client.CallToolWithTimeout(toolName, args, proxyTimeout)
 				if err != nil {
 					return &ToolResult{
 						Content: []Content{{Type: "text", Text: err.Error()}},
@@ -2565,6 +2663,12 @@ func (s *Server) RegisterGameTool(gameId string, tool Tool, handler func(args ma
 	}
 
 	s.mu.Lock()
+	for _, existing := range s.gameTools[gameId] {
+		if existing == trackedToolName {
+			s.mu.Unlock()
+			return
+		}
+	}
 	s.gameTools[gameId] = append(s.gameTools[gameId], trackedToolName)
 	s.mu.Unlock()
 }
@@ -2575,6 +2679,12 @@ func (s *Server) RegisterGameResource(gameId string, resource Resource, handler 
 
 	// Track which game this resource belongs to
 	s.mu.Lock()
+	for _, existing := range s.gameResources[gameId] {
+		if existing == resource.URI {
+			s.mu.Unlock()
+			return
+		}
+	}
 	s.gameResources[gameId] = append(s.gameResources[gameId], resource.URI)
 	s.mu.Unlock()
 }

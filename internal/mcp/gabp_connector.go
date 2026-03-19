@@ -11,15 +11,26 @@ import (
 
 // ServerGABPConnector implements the GABPConnector interface for the MCP server
 type ServerGABPConnector struct {
-	server *Server
-	log    util.Logger
+	server     *Server
+	log        util.Logger
+	backoffMin time.Duration
+	backoffMax time.Duration
 }
 
 // NewServerGABPConnector creates a new GABP connector for the server
-func NewServerGABPConnector(server *Server) *ServerGABPConnector {
+func NewServerGABPConnector(server *Server, backoffMin, backoffMax time.Duration) *ServerGABPConnector {
+	if backoffMin <= 0 {
+		backoffMin = 100 * time.Millisecond
+	}
+	if backoffMax <= 0 {
+		backoffMax = 2 * time.Second
+	}
+
 	return &ServerGABPConnector{
-		server: server,
-		log:    server.log,
+		server:     server,
+		log:        server.log,
+		backoffMin: backoffMin,
+		backoffMax: backoffMax,
 	}
 }
 
@@ -40,11 +51,7 @@ func (c *ServerGABPConnector) AttemptConnection(ctx context.Context, gameID stri
 	delete(c.server.gabpDisconnects, gameID)
 	c.server.mu.Unlock()
 
-	// Attempt connection with retry logic
-	backoffMin := 100 * time.Millisecond
-	backoffMax := 2 * time.Second
-
-	err := client.Connect(ctx, addr, token, backoffMin, backoffMax)
+	err := client.Connect(ctx, addr, token, c.backoffMin, c.backoffMax)
 	if err != nil {
 		c.log.Debugw("GABP connection failed", "gameId", gameID, "addr", addr, "error", err)
 
@@ -60,7 +67,7 @@ func (c *ServerGABPConnector) AttemptConnection(ctx context.Context, gameID stri
 	c.log.Infow("GABP connection established", "gameId", gameID, "addr", addr)
 
 	// Mirror synchronously so tools are registered before games.start returns
-	if err := c.setupToolMirroring(gameID, client); err != nil {
+	if err := c.setupToolMirroring(ctx, gameID, client); err != nil {
 		c.server.HandleUnexpectedGABPDisconnect(gameID, client, err)
 		return err
 	}
@@ -69,11 +76,11 @@ func (c *ServerGABPConnector) AttemptConnection(ctx context.Context, gameID stri
 }
 
 // setupToolMirroring syncs GABP tools/resources to the MCP server
-func (c *ServerGABPConnector) setupToolMirroring(gameID string, client *gabp.Client) error {
+func (c *ServerGABPConnector) setupToolMirroring(ctx context.Context, gameID string, client *gabp.Client) error {
 	c.log.Debugw("setting up tool mirroring for game", "gameId", gameID)
 
 	// Sync tools from GABP to MCP
-	if err := c.server.syncGABPTools(client, gameID); err != nil {
+	if err := c.server.syncGABPToolsWithTimeout(client, gameID, timeoutFromContextOrDefault(ctx, 30*time.Second)); err != nil {
 		c.log.Warnw("failed to sync GABP tools", "gameId", gameID, "error", err)
 		return err
 	}
@@ -87,4 +94,22 @@ func (c *ServerGABPConnector) setupToolMirroring(gameID string, client *gabp.Cli
 	c.log.Infow("GABP resources exposed successfully", "gameId", gameID)
 
 	return nil
+}
+
+func timeoutFromContextOrDefault(ctx context.Context, fallback time.Duration) time.Duration {
+	if ctx == nil {
+		return fallback
+	}
+
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return fallback
+	}
+
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return time.Millisecond
+	}
+
+	return remaining
 }
