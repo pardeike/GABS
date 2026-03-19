@@ -2,7 +2,10 @@
 # This Makefile demonstrates how to build GABS with version information
 
 # Version information
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+# Use the declared source version for local builds so rebuilt workspace binaries
+# keep the release semantic version instead of inheriting a git "-dirty" suffix.
+SOURCE_VERSION ?= $(shell sed -n 's/^[[:space:]]*Version = "\([^"]*\)".*/\1/p' internal/version/version.go | head -n 1)
+VERSION ?= $(if $(SOURCE_VERSION),v$(SOURCE_VERSION),dev)
 COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
@@ -44,6 +47,7 @@ install:
 # Show version information that would be embedded
 .PHONY: version-info
 version-info:
+	@echo "Source Version: $(SOURCE_VERSION)"
 	@echo "Version: $(VERSION)"
 	@echo "Commit: $(COMMIT)"
 	@echo "Build Date: $(BUILD_DATE)"
