@@ -13,6 +13,15 @@ import (
 
 const attentionRefreshTimeout = 2 * time.Second
 
+var attentionGateBypassToolSuffixes = []string{
+	"rimbridge/get_bridge_status",
+	"rimbridge/list_operation_events",
+	"rimbridge/list_logs",
+	"rimbridge.get_bridge_status",
+	"rimbridge.list_operation_events",
+	"rimbridge.list_logs",
+}
+
 type gameAttentionState struct {
 	Supported     bool
 	Current       *gabp.AttentionItem
@@ -215,6 +224,23 @@ func (s *Server) enforceAttentionGate(gameID string, exposedToolName string, cli
 	}
 
 	return buildAttentionBlockedToolResult(gameID, exposedToolName, current)
+}
+
+func shouldBypassAttentionGate(toolNames ...string) bool {
+	for _, toolName := range toolNames {
+		normalized := strings.TrimSpace(strings.ToLower(toolName))
+		if normalized == "" {
+			continue
+		}
+
+		for _, suffix := range attentionGateBypassToolSuffixes {
+			if normalized == suffix || strings.HasSuffix(normalized, "."+suffix) {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func buildAttentionBlockedToolResult(gameID string, toolName string, attention *gabp.AttentionItem) *ToolResult {

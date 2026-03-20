@@ -707,6 +707,113 @@ func TestMirroredToolCallBlocksWhileAttentionIsOpen(t *testing.T) {
 	}
 }
 
+func TestDiagnosticsToolCanBypassAttentionGate(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "gabs-attention-diagnostics")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer listener.Close()
+
+	var forwardedToolCalls int32
+	bridgeToken := "attention-diagnostics-token"
+	serverDone := make(chan error, 1)
+	go serveTestGabpSessionWithAttention(listener, bridgeToken, &forwardedToolCalls, serverDone)
+
+	bridgeDir := filepath.Join(tmpDir, "rimworld")
+	if err := os.MkdirAll(bridgeDir, 0755); err != nil {
+		t.Fatalf("failed to create bridge dir: %v", err)
+	}
+
+	bridgeData, err := json.MarshalIndent(config.BridgeJSON{
+		Port:   listener.Addr().(*net.TCPAddr).Port,
+		Token:  bridgeToken,
+		GameId: "rimworld",
+	}, "", "  ")
+	if err != nil {
+		t.Fatalf("failed to marshal bridge.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bridgeDir, "bridge.json"), bridgeData, 0644); err != nil {
+		t.Fatalf("failed to write bridge.json: %v", err)
+	}
+
+	gamesConfig := &config.GamesConfig{
+		Games: map[string]config.GameConfig{
+			"rimworld": {
+				ID:         "rimworld",
+				Name:       "RimWorld",
+				LaunchMode: "DirectPath",
+				Target:     "/Applications/RimWorldMac.app/Contents/MacOS/RimWorld by Ludeon Studios",
+			},
+		},
+	}
+
+	log := util.NewLogger("error")
+	server := NewServerForTesting(log)
+	server.SetConfigDir(tmpDir)
+	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
+	defer server.CleanupGABPConnection("rimworld")
+
+	connectText := marshalMessage(t, server.HandleMessage(&Message{
+		JSONRPC: "2.0",
+		Method:  "tools/call",
+		ID:      json.RawMessage(`"connect-diagnostics-attention"`),
+		Params: map[string]interface{}{
+			"name": "games.connect",
+			"arguments": map[string]interface{}{
+				"gameId": "rimworld",
+			},
+		},
+	}))
+	if strings.Contains(connectText, `"isError":true`) {
+		t.Fatalf("expected connect to succeed, got: %s", connectText)
+	}
+
+	toolsText := marshalMessage(t, server.HandleMessage(&Message{
+		JSONRPC: "2.0",
+		Method:  "tools/call",
+		ID:      json.RawMessage(`"tools-diagnostics-attention"`),
+		Params: map[string]interface{}{
+			"name": "games.tools",
+			"arguments": map[string]interface{}{
+				"gameId": "rimworld",
+			},
+		},
+	}))
+	if !strings.Contains(toolsText, "list_logs") {
+		t.Fatalf("expected diagnostics tool to be mirrored after connect, got: %s", toolsText)
+	}
+
+	diagnosticsText := marshalMessage(t, server.HandleMessage(&Message{
+		JSONRPC: "2.0",
+		Method:  "tools/call",
+		ID:      json.RawMessage(`"diagnostics-bypass"`),
+		Params: map[string]interface{}{
+			"name": "games.call_tool",
+			"arguments": map[string]interface{}{
+				"gameId": "rimworld",
+				"tool":   "rimbridge.list_logs",
+			},
+		},
+	}))
+	if strings.Contains(diagnosticsText, `"status":"blocked_by_attention"`) || strings.Contains(diagnosticsText, `"isError":true`) {
+		t.Fatalf("expected rimbridge/list_logs to bypass the attention gate, got: %s", diagnosticsText)
+	}
+	if !strings.Contains(diagnosticsText, `"logs":[]`) {
+		t.Fatalf("expected diagnostics call result, got: %s", diagnosticsText)
+	}
+	if got := atomic.LoadInt32(&forwardedToolCalls); got != 1 {
+		t.Fatalf("expected exactly one forwarded diagnostics tool call, got %d", got)
+	}
+
+	server.CleanupGABPConnection("rimworld")
+}
+
 func serveTestGabpSession(listener net.Listener, expectedToken string, done chan<- error) {
 	conn, err := listener.Accept()
 	if err != nil {
@@ -1096,6 +1203,17 @@ func serveTestGabpSessionWithAttention(listener net.Listener, expectedToken stri
 							"type": "object",
 						},
 					},
+					{
+						"name":        "rimbridge/list_logs",
+						"description": "Diagnostics log listing",
+						"inputSchema": map[string]interface{}{
+							"type":       "object",
+							"properties": map[string]interface{}{},
+						},
+						"outputSchema": map[string]interface{}{
+							"type": "object",
+						},
+					},
 				},
 			})
 			if err := writer.WriteJSON(response); err != nil {
@@ -1154,8 +1272,19 @@ func serveTestGabpSessionWithAttention(listener net.Listener, expectedToken stri
 			}
 		case "tools/call":
 			if requestParams, ok := request.Params.(map[string]interface{}); ok {
-				if name, _ := requestParams["name"].(string); name != "rimbridge/core/ping" {
+				if name, _ := requestParams["name"].(string); name != "rimbridge/core/ping" && name != "rimbridge/list_logs" {
 					done <- fmt.Errorf("unexpected tools/call target: %q", name)
+					return
+				}
+
+				if name, _ := requestParams["name"].(string); name == "rimbridge/list_logs" {
+					atomic.AddInt32(forwardedToolCalls, 1)
+					response := util.NewGABPResponse(request.ID, map[string]interface{}{
+						"logs": []map[string]interface{}{},
+					})
+					if err := writer.WriteJSON(response); err != nil {
+						done <- err
+					}
 					return
 				}
 			}

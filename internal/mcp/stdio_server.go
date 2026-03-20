@@ -1794,8 +1794,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		// normalization as well.
 		gabpToolName := gabpToolNameFromTool(entry.GameID, entry.Tool)
 
-		if blocked := s.enforceAttentionGate(entry.GameID, entry.Tool.Name, client); blocked != nil {
-			return blocked, nil
+		if !shouldBypassAttentionGate(toolName, gabpToolName, entry.Tool.Name) {
+			if blocked := s.enforceAttentionGate(entry.GameID, entry.Tool.Name, client); blocked != nil {
+				return blocked, nil
+			}
 		}
 
 		result, isError, err := client.CallToolWithTimeout(gabpToolName, toolArgs, timeout)
@@ -2607,8 +2609,10 @@ func (s *Server) syncGABPToolsWithTimeout(client *gabp.Client, gameID string, ti
 					return invalidTimeout, nil
 				}
 
-				if blocked := s.enforceAttentionGate(gameID, gameSpecificName, client); blocked != nil {
-					return blocked, nil
+				if !shouldBypassAttentionGate(gameSpecificName, toolName) {
+					if blocked := s.enforceAttentionGate(gameID, gameSpecificName, client); blocked != nil {
+						return blocked, nil
+					}
 				}
 
 				// Call GABP with original tool name (without game prefix)
