@@ -93,6 +93,8 @@ func (c *ServerGABPConnector) setupToolMirroring(ctx context.Context, gameID str
 	}
 	c.log.Infow("GABP resources exposed successfully", "gameId", gameID)
 
+	c.server.setupGABPAttention(gameID, client, timeoutFromContextOrDefault(ctx, 10*time.Second))
+
 	return nil
 }
 

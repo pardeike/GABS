@@ -35,6 +35,7 @@ type Server struct {
 	gameTools       map[string][]string     // Track which tools belong to which games
 	gameResources   map[string][]string     // Track which resources belong to which games
 	gabpClients     map[string]*gabp.Client // Track GABP connections per game
+	gabpAttention   map[string]*gameAttentionState
 	gabpDisconnects map[string]gabpDisconnectRecord
 	starter         *process.SerializedStarter // Serialized process starter
 	instanceID      string
@@ -92,6 +93,7 @@ func NewServer(log util.Logger) *Server {
 		gameTools:       make(map[string][]string),
 		gameResources:   make(map[string][]string),
 		gabpClients:     make(map[string]*gabp.Client),
+		gabpAttention:   make(map[string]*gameAttentionState),
 		gabpDisconnects: make(map[string]gabpDisconnectRecord),
 		starter:         process.NewSerializedStarter(), // Initialize serialized starter
 		instanceID:      newServerInstanceID(),
@@ -110,6 +112,7 @@ func NewServerForTesting(log util.Logger) *Server {
 		gameTools:       make(map[string][]string),
 		gameResources:   make(map[string][]string),
 		gabpClients:     make(map[string]*gabp.Client),
+		gabpAttention:   make(map[string]*gameAttentionState),
 		gabpDisconnects: make(map[string]gabpDisconnectRecord),
 		starter:         process.NewSerializedStarterForTesting(), // Use testing timeouts
 		instanceID:      newServerInstanceID(),
@@ -1549,6 +1552,172 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}, nil
 	}, normalizationConfig)
 
+	// games.get_attention - Inspect the current attention state for a connected game
+	s.RegisterToolWithConfig(Tool{
+		Name:        "games.get_attention",
+		Description: "Inspect the current attention item for a connected game. Use this when GABS blocks further game calls due to important async game information.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"gameId": map[string]interface{}{
+					"type":        "string",
+					"description": "Game ID to inspect (optional if exactly one game is connected via GABP)",
+				},
+				"timeout": map[string]interface{}{
+					"type":        "integer",
+					"description": "Request timeout in seconds when refreshing the current attention state from the game (optional, default 10)",
+				},
+			},
+		},
+	}, func(args map[string]interface{}) (*ToolResult, error) {
+		gameID, hasGameID, invalidArg := getOptionalStringArg(args, "gameId")
+		if invalidArg != nil {
+			return invalidArg, nil
+		}
+
+		timeout, invalidTimeout := parseOptionalTimeoutSecondsArg(args, "timeout", 10*time.Second)
+		if invalidTimeout != nil {
+			return invalidTimeout, nil
+		}
+
+		game, client, resolveErr := s.resolveAttentionClient(gamesConfig, gameID, hasGameID)
+		if resolveErr != nil {
+			return resolveErr, nil
+		}
+
+		if !client.SupportsAttention() {
+			s.setGameAttentionSupport(game.ID, false)
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' does not advertise attention support yet.", game.ID)}},
+				StructuredContent: map[string]interface{}{
+					"gameId":    game.ID,
+					"supported": false,
+					"attention": nil,
+				},
+			}, nil
+		}
+
+		current, err := s.refreshCurrentAttention(game.ID, client, timeout)
+		if err != nil {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to query current attention for game '%s': %v", game.ID, err)}},
+				IsError: true,
+			}, nil
+		}
+
+		if current == nil || strings.EqualFold(current.State, "cleared") {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' has no open attention item.", game.ID)}},
+				StructuredContent: map[string]interface{}{
+					"gameId":    game.ID,
+					"supported": true,
+					"attention": nil,
+					"blocking":  false,
+				},
+			}, nil
+		}
+
+		return &ToolResult{
+			Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' has an open %s attention item '%s'. %s", game.ID, current.Severity, current.AttentionID, current.Summary)}},
+			StructuredContent: map[string]interface{}{
+				"gameId":    game.ID,
+				"supported": true,
+				"attention": current,
+				"blocking":  current.Blocking,
+			},
+		}, nil
+	}, normalizationConfig)
+
+	// games.ack_attention - Acknowledge the current blocking attention item for a connected game
+	s.RegisterToolWithConfig(Tool{
+		Name:        "games.ack_attention",
+		Description: "Acknowledge a current attention item for a connected game so blocked game calls can resume once the game has no remaining blocking attention.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"gameId": map[string]interface{}{
+					"type":        "string",
+					"description": "Game ID to acknowledge attention for (optional if exactly one game is connected via GABP)",
+				},
+				"attentionId": map[string]interface{}{
+					"type":        "string",
+					"description": "Attention item identifier returned by games.get_attention or a blocked tool result",
+				},
+				"timeout": map[string]interface{}{
+					"type":        "integer",
+					"description": "Request timeout in seconds for the acknowledgement request (optional, default 10)",
+				},
+			},
+			"required": []string{"attentionId"},
+		},
+	}, func(args map[string]interface{}) (*ToolResult, error) {
+		gameID, hasGameID, invalidArg := getOptionalStringArg(args, "gameId")
+		if invalidArg != nil {
+			return invalidArg, nil
+		}
+
+		attentionID, ok := args["attentionId"].(string)
+		if !ok || strings.TrimSpace(attentionID) == "" {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: "Missing required argument: attentionId"}},
+				IsError: true,
+			}, nil
+		}
+
+		timeout, invalidTimeout := parseOptionalTimeoutSecondsArg(args, "timeout", 10*time.Second)
+		if invalidTimeout != nil {
+			return invalidTimeout, nil
+		}
+
+		game, client, resolveErr := s.resolveAttentionClient(gamesConfig, gameID, hasGameID)
+		if resolveErr != nil {
+			return resolveErr, nil
+		}
+
+		if !client.SupportsAttention() {
+			s.setGameAttentionSupport(game.ID, false)
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' does not advertise attention support yet.", game.ID)}},
+				StructuredContent: map[string]interface{}{
+					"gameId":       game.ID,
+					"supported":    false,
+					"acknowledged": false,
+					"attentionId":  attentionID,
+				},
+			}, nil
+		}
+
+		result, err := client.AcknowledgeAttentionWithTimeout(attentionID, timeout)
+		if err != nil {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to acknowledge attention '%s' for game '%s': %v", attentionID, game.ID, err)}},
+				IsError: true,
+			}, nil
+		}
+
+		s.setGameAttentionCurrent(game.ID, result.CurrentAttention)
+
+		message := fmt.Sprintf("Attention '%s' was not acknowledged for game '%s'.", attentionID, game.ID)
+		if result.Acknowledged {
+			message = fmt.Sprintf("Acknowledged attention '%s' for game '%s'.", attentionID, game.ID)
+		}
+		if result.CurrentAttention != nil && strings.TrimSpace(result.CurrentAttention.Summary) != "" {
+			message = fmt.Sprintf("%s Current attention: %s", strings.TrimRight(message, "."), result.CurrentAttention.Summary)
+		}
+
+		return &ToolResult{
+			Content: []Content{{Type: "text", Text: message}},
+			StructuredContent: map[string]interface{}{
+				"gameId":           game.ID,
+				"supported":        true,
+				"acknowledged":     result.Acknowledged,
+				"attentionId":      result.AttentionID,
+				"currentAttention": result.CurrentAttention,
+			},
+			IsError: !result.Acknowledged,
+		}, nil
+	}, normalizationConfig)
+
 	// games.call_tool - Proxy tool calls to a game's GABP server
 	s.RegisterToolWithConfig(Tool{
 		Name:        "games.call_tool",
@@ -1624,6 +1793,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		// local tool name, so games.call_tool keeps working under OpenAI tool name
 		// normalization as well.
 		gabpToolName := gabpToolNameFromTool(entry.GameID, entry.Tool)
+
+		if blocked := s.enforceAttentionGate(entry.GameID, entry.Tool.Name, client); blocked != nil {
+			return blocked, nil
+		}
 
 		result, isError, err := client.CallToolWithTimeout(gabpToolName, toolArgs, timeout)
 		if err != nil {
@@ -2081,6 +2254,7 @@ func (s *Server) HandleUnexpectedGABPDisconnect(gameID string, client *gabp.Clie
 	s.recordGABPDisconnectLocked(gameID, err)
 	toolsChanged := len(s.gameTools[gameID]) > 0
 	resourcesChanged := len(s.gameResources[gameID]) > 0
+	s.clearGameAttentionStateLocked(gameID)
 	s.cleanupGameResourcesInternal(gameID)
 	s.mu.Unlock()
 
@@ -2433,6 +2607,10 @@ func (s *Server) syncGABPToolsWithTimeout(client *gabp.Client, gameID string, ti
 					return invalidTimeout, nil
 				}
 
+				if blocked := s.enforceAttentionGate(gameID, gameSpecificName, client); blocked != nil {
+					return blocked, nil
+				}
+
 				// Call GABP with original tool name (without game prefix)
 				result, isError, err := client.CallToolWithTimeout(toolName, args, proxyTimeout)
 				if err != nil {
@@ -2745,6 +2923,7 @@ func (s *Server) CleanupGABPConnection(gameId string) {
 		delete(s.gabpClients, gameId)
 		s.log.Debugw("cleaned up GABP client connection", "gameId", gameId)
 	}
+	s.clearGameAttentionStateLocked(gameId)
 	delete(s.gabpDisconnects, gameId)
 }
 
@@ -2813,6 +2992,7 @@ func (s *Server) cleanupGABPConnectionInternal(gameId string) {
 		delete(s.gabpClients, gameId)
 		s.log.Debugw("cleaned up GABP client connection", "gameId", gameId)
 	}
+	s.clearGameAttentionStateLocked(gameId)
 	delete(s.gabpDisconnects, gameId)
 }
 

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -474,6 +475,238 @@ func TestGamesConnectForceTakeoverCanOverrideSharedOwner(t *testing.T) {
 	}
 }
 
+func TestGamesCallToolBlocksUntilAttentionIsAcknowledged(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "gabs-attention")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer listener.Close()
+
+	var forwardedToolCalls int32
+	bridgeToken := "attention-token"
+	serverDone := make(chan error, 1)
+	go serveTestGabpSessionWithAttention(listener, bridgeToken, &forwardedToolCalls, serverDone)
+
+	bridgeDir := filepath.Join(tmpDir, "rimworld")
+	if err := os.MkdirAll(bridgeDir, 0755); err != nil {
+		t.Fatalf("failed to create bridge dir: %v", err)
+	}
+
+	bridgeData, err := json.MarshalIndent(config.BridgeJSON{
+		Port:   listener.Addr().(*net.TCPAddr).Port,
+		Token:  bridgeToken,
+		GameId: "rimworld",
+	}, "", "  ")
+	if err != nil {
+		t.Fatalf("failed to marshal bridge.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bridgeDir, "bridge.json"), bridgeData, 0644); err != nil {
+		t.Fatalf("failed to write bridge.json: %v", err)
+	}
+
+	gamesConfig := &config.GamesConfig{
+		Games: map[string]config.GameConfig{
+			"rimworld": {
+				ID:         "rimworld",
+				Name:       "RimWorld",
+				LaunchMode: "DirectPath",
+				Target:     "/Applications/RimWorldMac.app/Contents/MacOS/RimWorld by Ludeon Studios",
+			},
+		},
+	}
+
+	log := util.NewLogger("error")
+	server := NewServerForTesting(log)
+	server.SetConfigDir(tmpDir)
+	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
+	defer server.CleanupGABPConnection("rimworld")
+
+	connectText := marshalMessage(t, server.HandleMessage(&Message{
+		JSONRPC: "2.0",
+		Method:  "tools/call",
+		ID:      json.RawMessage(`"connect-attention"`),
+		Params: map[string]interface{}{
+			"name": "games.connect",
+			"arguments": map[string]interface{}{
+				"gameId": "rimworld",
+			},
+		},
+	}))
+	if strings.Contains(connectText, `"isError":true`) {
+		t.Fatalf("expected connect to succeed, got: %s", connectText)
+	}
+
+	getAttentionText := marshalMessage(t, server.HandleMessage(&Message{
+		JSONRPC: "2.0",
+		Method:  "tools/call",
+		ID:      json.RawMessage(`"get-attention"`),
+		Params: map[string]interface{}{
+			"name": "games.get_attention",
+			"arguments": map[string]interface{}{
+				"gameId": "rimworld",
+			},
+		},
+	}))
+	if !strings.Contains(getAttentionText, `"supported":true`) || !strings.Contains(getAttentionText, `"attentionId":"attn_42"`) {
+		t.Fatalf("expected open attention item, got: %s", getAttentionText)
+	}
+
+	blockedText := marshalMessage(t, server.HandleMessage(&Message{
+		JSONRPC: "2.0",
+		Method:  "tools/call",
+		ID:      json.RawMessage(`"call-blocked"`),
+		Params: map[string]interface{}{
+			"name": "games.call_tool",
+			"arguments": map[string]interface{}{
+				"gameId": "rimworld",
+				"tool":   "rimworld.rimbridge.core.ping",
+			},
+		},
+	}))
+	if !strings.Contains(blockedText, `"status":"blocked_by_attention"`) {
+		t.Fatalf("expected blocked_by_attention result, got: %s", blockedText)
+	}
+	if got := atomic.LoadInt32(&forwardedToolCalls); got != 0 {
+		t.Fatalf("expected no forwarded tool calls while attention is open, got %d", got)
+	}
+
+	ackText := marshalMessage(t, server.HandleMessage(&Message{
+		JSONRPC: "2.0",
+		Method:  "tools/call",
+		ID:      json.RawMessage(`"ack-attention"`),
+		Params: map[string]interface{}{
+			"name": "games.ack_attention",
+			"arguments": map[string]interface{}{
+				"gameId":      "rimworld",
+				"attentionId": "attn_42",
+			},
+		},
+	}))
+	if !strings.Contains(ackText, `"acknowledged":true`) {
+		t.Fatalf("expected acknowledgement to succeed, got: %s", ackText)
+	}
+
+	callAfterAckText := marshalMessage(t, server.HandleMessage(&Message{
+		JSONRPC: "2.0",
+		Method:  "tools/call",
+		ID:      json.RawMessage(`"call-after-ack"`),
+		Params: map[string]interface{}{
+			"name": "games.call_tool",
+			"arguments": map[string]interface{}{
+				"gameId": "rimworld",
+				"tool":   "rimworld.rimbridge.core.ping",
+			},
+		},
+	}))
+	if strings.Contains(callAfterAckText, `"isError":true`) || !strings.Contains(callAfterAckText, "pong") {
+		t.Fatalf("expected call to succeed after ack, got: %s", callAfterAckText)
+	}
+
+	if got := atomic.LoadInt32(&forwardedToolCalls); got != 1 {
+		t.Fatalf("expected exactly one forwarded tool call after acknowledgement, got %d", got)
+	}
+
+	server.CleanupGABPConnection("rimworld")
+	if err := <-serverDone; err != nil {
+		t.Fatalf("test GABP server failed: %v", err)
+	}
+}
+
+func TestMirroredToolCallBlocksWhileAttentionIsOpen(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "gabs-attention-mirrored")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer listener.Close()
+
+	var forwardedToolCalls int32
+	bridgeToken := "attention-mirrored-token"
+	serverDone := make(chan error, 1)
+	go serveTestGabpSessionWithAttention(listener, bridgeToken, &forwardedToolCalls, serverDone)
+
+	bridgeDir := filepath.Join(tmpDir, "rimworld")
+	if err := os.MkdirAll(bridgeDir, 0755); err != nil {
+		t.Fatalf("failed to create bridge dir: %v", err)
+	}
+
+	bridgeData, err := json.MarshalIndent(config.BridgeJSON{
+		Port:   listener.Addr().(*net.TCPAddr).Port,
+		Token:  bridgeToken,
+		GameId: "rimworld",
+	}, "", "  ")
+	if err != nil {
+		t.Fatalf("failed to marshal bridge.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bridgeDir, "bridge.json"), bridgeData, 0644); err != nil {
+		t.Fatalf("failed to write bridge.json: %v", err)
+	}
+
+	gamesConfig := &config.GamesConfig{
+		Games: map[string]config.GameConfig{
+			"rimworld": {
+				ID:         "rimworld",
+				Name:       "RimWorld",
+				LaunchMode: "DirectPath",
+				Target:     "/Applications/RimWorldMac.app/Contents/MacOS/RimWorld by Ludeon Studios",
+			},
+		},
+	}
+
+	log := util.NewLogger("error")
+	server := NewServerForTesting(log)
+	server.SetConfigDir(tmpDir)
+	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
+	defer server.CleanupGABPConnection("rimworld")
+
+	connectText := marshalMessage(t, server.HandleMessage(&Message{
+		JSONRPC: "2.0",
+		Method:  "tools/call",
+		ID:      json.RawMessage(`"connect-mirrored-attention"`),
+		Params: map[string]interface{}{
+			"name": "games.connect",
+			"arguments": map[string]interface{}{
+				"gameId": "rimworld",
+			},
+		},
+	}))
+	if strings.Contains(connectText, `"isError":true`) {
+		t.Fatalf("expected connect to succeed, got: %s", connectText)
+	}
+
+	mirroredBlockedText := marshalMessage(t, server.HandleMessage(&Message{
+		JSONRPC: "2.0",
+		Method:  "tools/call",
+		ID:      json.RawMessage(`"mirrored-blocked"`),
+		Params: map[string]interface{}{
+			"name":      "rimworld.rimbridge.core.ping",
+			"arguments": map[string]interface{}{},
+		},
+	}))
+	if !strings.Contains(mirroredBlockedText, `"status":"blocked_by_attention"`) {
+		t.Fatalf("expected mirrored tool call to be blocked by attention, got: %s", mirroredBlockedText)
+	}
+	if got := atomic.LoadInt32(&forwardedToolCalls); got != 0 {
+		t.Fatalf("expected mirrored tool call to be blocked before forwarding, got %d forwarded calls", got)
+	}
+
+	server.CleanupGABPConnection("rimworld")
+	if err := <-serverDone; err != nil {
+		t.Fatalf("test GABP server failed: %v", err)
+	}
+}
+
 func serveTestGabpSession(listener net.Listener, expectedToken string, done chan<- error) {
 	conn, err := listener.Accept()
 	if err != nil {
@@ -754,4 +987,190 @@ func serveTestGabpSessionDisconnectOnToolCall(listener net.Listener, expectedTok
 	}
 
 	done <- nil
+}
+
+func serveTestGabpSessionWithAttention(listener net.Listener, expectedToken string, forwardedToolCalls *int32, done chan<- error) {
+	conn, err := listener.Accept()
+	if err != nil {
+		done <- err
+		return
+	}
+	defer conn.Close()
+
+	reader := util.NewLSPFrameReader(conn)
+	writer := util.NewLSPFrameWriter(conn)
+
+	attentionOpen := true
+	attentionItem := map[string]interface{}{
+		"attentionId":        "attn_42",
+		"state":              "open",
+		"severity":           "error",
+		"blocking":           true,
+		"stateInvalidated":   true,
+		"summary":            "Game state may have changed after the last operation.",
+		"openedAtSequence":   1201,
+		"latestSequence":     1237,
+		"totalUrgentEntries": 3,
+		"sample": []map[string]interface{}{
+			{
+				"level":          "error",
+				"message":        "Test attention error",
+				"repeatCount":    1,
+				"latestSequence": 1237,
+			},
+		},
+	}
+
+	for {
+		if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			done <- err
+			return
+		}
+
+		data, err := reader.ReadMessage()
+		if err != nil {
+			var netErr net.Error
+			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || (errors.As(err, &netErr) && netErr.Timeout()) {
+				done <- nil
+				return
+			}
+			done <- err
+			return
+		}
+
+		var request util.GABPMessage
+		if err := json.Unmarshal(data, &request); err != nil {
+			done <- err
+			return
+		}
+
+		switch request.Method {
+		case "session/hello":
+			params, ok := request.Params.(map[string]interface{})
+			if !ok {
+				done <- fmt.Errorf("session/hello params not decoded as object: %#v", request.Params)
+				return
+			}
+			if token, _ := params["token"].(string); token != expectedToken {
+				done <- fmt.Errorf("unexpected handshake token: %q", token)
+				return
+			}
+
+			response := util.NewGABPResponse(request.ID, gabp.SessionWelcomeResult{
+				AgentID: "rimworld",
+				App: gabp.AppInfo{
+					Name:    "RimBridgeServer",
+					Version: "0.1.0",
+				},
+				Capabilities: gabp.Capabilities{
+					Methods: []string{
+						"tools/list",
+						"tools/call",
+						gabp.AttentionCurrentMethod,
+						gabp.AttentionAckMethod,
+					},
+					Events: []string{
+						gabp.AttentionOpenedChannel,
+						gabp.AttentionUpdatedChannel,
+						gabp.AttentionClearedChannel,
+					},
+					Resources: []string{},
+				},
+				SchemaVersion: "1.0",
+			})
+			if err := writer.WriteJSON(response); err != nil {
+				done <- err
+				return
+			}
+		case "tools/list":
+			response := util.NewGABPResponse(request.ID, map[string]interface{}{
+				"tools": []map[string]interface{}{
+					{
+						"name":        "rimbridge.core/ping",
+						"description": "Connectivity test",
+						"inputSchema": map[string]interface{}{
+							"type":       "object",
+							"properties": map[string]interface{}{},
+						},
+						"outputSchema": map[string]interface{}{
+							"type": "object",
+						},
+					},
+				},
+			})
+			if err := writer.WriteJSON(response); err != nil {
+				done <- err
+				return
+			}
+		case "events/subscribe":
+			response := util.NewGABPResponse(request.ID, map[string]interface{}{
+				"channels": []string{
+					gabp.AttentionOpenedChannel,
+					gabp.AttentionUpdatedChannel,
+					gabp.AttentionClearedChannel,
+				},
+			})
+			if err := writer.WriteJSON(response); err != nil {
+				done <- err
+				return
+			}
+		case gabp.AttentionCurrentMethod:
+			var current interface{}
+			if attentionOpen {
+				current = attentionItem
+			}
+			response := util.NewGABPResponse(request.ID, map[string]interface{}{
+				"attention": current,
+			})
+			if err := writer.WriteJSON(response); err != nil {
+				done <- err
+				return
+			}
+		case gabp.AttentionAckMethod:
+			params, ok := request.Params.(map[string]interface{})
+			if !ok {
+				done <- fmt.Errorf("attention/ack params not decoded as object: %#v", request.Params)
+				return
+			}
+			attentionID, _ := params["attentionId"].(string)
+			acknowledged := attentionOpen && attentionID == "attn_42"
+			if acknowledged {
+				attentionOpen = false
+			}
+
+			var current interface{}
+			if attentionOpen {
+				current = attentionItem
+			}
+
+			response := util.NewGABPResponse(request.ID, map[string]interface{}{
+				"acknowledged":     acknowledged,
+				"attentionId":      attentionID,
+				"currentAttention": current,
+			})
+			if err := writer.WriteJSON(response); err != nil {
+				done <- err
+				return
+			}
+		case "tools/call":
+			if requestParams, ok := request.Params.(map[string]interface{}); ok {
+				if name, _ := requestParams["name"].(string); name != "rimbridge/core/ping" {
+					done <- fmt.Errorf("unexpected tools/call target: %q", name)
+					return
+				}
+			}
+			atomic.AddInt32(forwardedToolCalls, 1)
+			response := util.NewGABPResponse(request.ID, map[string]interface{}{
+				"text":    "pong",
+				"message": "pong",
+			})
+			if err := writer.WriteJSON(response); err != nil {
+				done <- err
+				return
+			}
+		default:
+			done <- fmt.Errorf("unexpected method: %s", request.Method)
+			return
+		}
+	}
 }
