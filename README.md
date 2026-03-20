@@ -197,6 +197,8 @@ Once connected, your AI starts with a stable MCP surface and can then discover d
 - **`games.tool_detail`** - Show one game-specific tool's description, parameters, defaults, and output schema; `gameId` is optional when the tool name is fully qualified or uniquely discoverable
 - **`games.tools`** - List currently available game-specific tools in detailed form for compatibility and human-readable inspection, with optional filtering, pagination, and structured output
 - **`games.connect`** - Manually connect or reconnect to a running game's GABP server after the mod finishes loading or after a GABS restart. Set `forceTakeover: true` only when you intentionally want this session to replace another live GABS owner.
+- **`games.get_attention`** - Inspect a game's current blocking attention item when async game state needs review before more calls run
+- **`games.ack_attention`** - Acknowledge the current attention item after review so normal game calls can resume
 - **`games.call_tool`** - Call a discovered game tool through the stable core surface: `{"tool": "minecraft.inventory.get", "arguments": {"playerId": "steve"}}` (`gameId` is optional when the tool name is fully qualified or uniquely discoverable)
 
 ### Game-Specific Tools from Mods
@@ -240,6 +242,19 @@ If your MCP client supports dynamic tool refresh, it can call mirrored tools dir
 Connected games also expose a state resource at `gab://<gameId>/state`.
 
 **Pro tip**: You can use game names (`"minecraft"`) or launch IDs (`"294100"` for Steam) interchangeably in the `games.*` tools. If OpenAI tool normalization is enabled, dotted MCP tool names may be normalized to underscores; the examples above use the canonical MCP names.
+
+### Attention Gating
+
+Some game bridges publish blocking attention when async game state invalidates the agent's assumptions even though the last tool call itself did not fail.
+
+When that happens, GABS stops forwarding ordinary game-bound calls and returns a structured `status: "blocked_by_attention"` result instead. The intended recovery flow is:
+
+1. Call `games.get_attention` to inspect the current item and keep the stable `attentionId`.
+2. Inspect diagnostics that explain the issue.
+3. Call `games.ack_attention` with that `attentionId`.
+4. Retry the original game call.
+
+For RimBridge-style bridges, GABS still allows `rimbridge/get_bridge_status`, `rimbridge/list_operation_events`, and `rimbridge/list_logs` through the gate so the model can inspect what happened without resuming normal gameplay actions too early.
 
 ## Documentation
 
