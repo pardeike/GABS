@@ -26,6 +26,9 @@ GABS now includes configurable tool name normalization that:
 
 Add the `toolNormalization` section to your GABS config file:
 
+The top-level `"version"` field shown here is the GABS config schema version,
+not the GABP protocol version.
+
 ```json
 {
   "version": "1.0",

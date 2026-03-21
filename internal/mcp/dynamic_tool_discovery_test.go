@@ -63,7 +63,21 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 		t.Logf("Phase 1 - Available tools: %s", responseStr)
 
 		// Verify AI sees only core game management tools
-		expectedCoreTools := []string{"games.list", "games.start", "games.stop", "games.kill", "games.status", "games.tools", "games.connect", "games.get_attention", "games.ack_attention", "games.call_tool"}
+		expectedCoreTools := []string{
+			"games.list",
+			"games.show",
+			"games.start",
+			"games.stop",
+			"games.kill",
+			"games.status",
+			"games.tool_names",
+			"games.tool_detail",
+			"games.tools",
+			"games.connect",
+			"games.get_attention",
+			"games.ack_attention",
+			"games.call_tool",
+		}
 		for _, tool := range expectedCoreTools {
 			if !strings.Contains(responseStr, tool) {
 				t.Errorf("Expected core tool '%s' not found", tool)
@@ -75,7 +89,7 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 			t.Error("Should not see game-specific tools before games are connected")
 		}
 
-		t.Log("✅ Phase 1 Complete: AI agent sees 6 core game management tools")
+		t.Log("✅ Phase 1 Complete: AI agent sees the current stable core management surface")
 	})
 
 	// Step 2: Simulate game connection with GABP mod - tools expand dramatically

@@ -19,7 +19,7 @@ import (
 	"github.com/pardeike/gabs/internal/version"
 )
 
-// Client speaks GABP over TCP NDJSON.
+// Client speaks framed GABP messages over TCP.
 type Client struct {
 	conn           net.Conn
 	writer         *util.LSPFrameWriter

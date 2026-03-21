@@ -1,34 +1,36 @@
 # Configuration Guide
 
-This guide shows you how to configure GABS to work with your games.
+This guide shows you how to add games to GABS and what the important config
+fields mean.
 
 ## Quick Setup
 
-The easiest way to add games is with the interactive command:
+For most users, this is the only command you need:
 
 ```bash
 gabs games add minecraft
 ```
 
-This will ask you questions and set up everything automatically.
+GABS will ask a few questions and save the result to your local config file.
 
-## Adding Games Step by Step
+## What GABS Asks You
 
-When you run `gabs games add [game-name]`, you'll be asked:
+When you run `gabs games add <game-id>`, GABS asks for:
 
 ### 1. Game Name
-A friendly name for your game (like "Minecraft Server" or "My RimWorld").
+A friendly label such as `Minecraft Server` or `RimWorld`.
 
 ### 2. Launch Mode
-How GABS should start your game:
+How GABS should start the game:
 
-- **DirectPath**: Point to the game's `.exe` file
-- **SteamAppId**: Use Steam's App ID number (like `294100` for RimWorld)
+- **DirectPath**: a local executable or script
+- **SteamAppId**: a Steam App ID such as `294100` for RimWorld
 - **EpicAppId**: Use Epic Games Store ID
 - **CustomCommand**: Use a custom command with arguments
 
 ### 3. Target
-The specific path, ID, or command based on your launch mode:
+The executable path, App ID, or command for the selected launch mode:
+
 - For DirectPath: `/path/to/game.exe`
 - For Steam: `294100` (the App ID)
 - For Epic: The Epic App ID
@@ -37,32 +39,46 @@ The specific path, ID, or command based on your launch mode:
 ### 4. Working Directory (Optional)
 Where the game should run from. Leave blank to use the game's default location.
 
-### 5. Stop Process Name (Required for Steam/Epic Games)
-The name of the actual game process to stop when using games.stop or games.kill. **This is required for Steam/Epic games** to enable proper game termination. Without it, GABS can only stop the launcher process, not the actual game. Examples:
+### 5. Stop Process Name
+The real game process name used by `games.stop` and `games.kill`.
+
+This is required for Steam and Epic launch modes. Without it, GABS can launch
+the game but cannot stop the actual game process reliably.
+
+Examples:
 - For RimWorld: `RimWorldWin64.exe` (Windows) or `RimWorld` (Linux/macOS)
 - For Minecraft with Java: `java`
 - For Unity games: often the game name with `.exe` extension
 
-**Note:** For `SteamAppId` and `EpicAppId` launch modes, you must provide a `stopProcessName` or GABS will not be able to properly terminate the game.
+### 6. Save and verify
 
-### 6. Game Configuration Complete
+After setup, verify the saved config:
 
-All games configured through GABS use **local-only GABP communication** for
-maximum security and simplicity.
+```bash
+gabs games list
+gabs games show minecraft
+```
 
-#### What is "Bridge Configuration"?
-When you start a game via AI commands, GABS automatically creates **bridge configuration** - connection details that tell your game mod how to communicate with GABS:
+## What Most Users Need To Know
 
-- **Port**: Unique port number your mod should listen on (e.g., 12345)
-- **Token**: Secure authentication token to verify connections
-- **Game ID**: Your game's identifier for namespacing
-- **Host**: Always localhost (127.0.0.1) for security
+- GABS stores your games in `~/.gabs/config.json`
+- GABS starts games using the launch data you entered above
+- If the game also has a GABP-compatible mod, GABS can connect to that mod and
+  mirror game-specific tools into MCP
 
-This configuration is provided to your game via:
-1. **Environment variables** (recommended): `GABP_SERVER_PORT`, `GABP_TOKEN`, `GABS_GAME_ID`
-2. **Bridge file** (fallback): `~/.gabs/{gameId}/bridge.json`
+## Optional: How GABS Talks To Your Mod
 
-**Key Point**: Your game mod acts as the GABP server (listening), while GABS acts as the GABP client (connecting).
+Most users can skip this section.
+
+GABS uses local-only GABP communication for security and simplicity.
+
+When you start a game, GABS passes bridge configuration to the mod through:
+
+1. Environment variables: `GABP_SERVER_PORT`, `GABP_TOKEN`, `GABS_GAME_ID`
+2. A bridge file fallback: `~/.gabs/{gameId}/bridge.json`
+
+In the GABP layer, your game mod listens for the connection and GABS connects
+to it.
 
 GABS also keeps an internal ownership record at `~/.gabs/{gameId}/runtime.json`
 so separate GABS sessions do not accidentally launch or attach to the same game
@@ -90,7 +106,12 @@ Removes the game from your configuration.
 
 ## Configuration File
 
-Your games are saved in `~/.gabs/config.json`. Here's what it looks like:
+Your games are saved in `~/.gabs/config.json`.
+
+Example:
+
+The top-level `"version"` field below is the GABS config schema version, not
+the GABP wire version.
 
 ```json
 {
@@ -124,7 +145,7 @@ Your games are saved in `~/.gabs/config.json`. Here's what it looks like:
 ## Launch Modes Explained
 
 ### DirectPath
-Best for: Custom game installations or modded games
+Best for custom game installs, scripts, and local test setups.
 ```json
 {
   "launchMode": "DirectPath",
@@ -134,7 +155,7 @@ Best for: Custom game installations or modded games
 ```
 
 ### SteamAppId
-Best for: Games installed through Steam
+Best for games installed through Steam.
 ```json
 {
   "launchMode": "SteamAppId", 
@@ -142,10 +163,11 @@ Best for: Games installed through Steam
   "stopProcessName": "RimWorldWin64.exe"
 }
 ```
-You can find Steam App IDs on the game's Steam store page URL. **The `stopProcessName` is required** for Steam games to enable proper game termination.
+You can find the App ID in the game's Steam store URL. `stopProcessName` is
+required for Steam games.
 
 ### EpicAppId
-Best for: Games installed through Epic Games Store
+Best for games installed through Epic Games Store.
 ```json
 {
   "launchMode": "EpicAppId",
@@ -153,10 +175,10 @@ Best for: Games installed through Epic Games Store
   "stopProcessName": "GameName.exe"
 }
 ```
-**The `stopProcessName` is required** for Epic games to enable proper game termination.
+`stopProcessName` is required for Epic games.
 
 ### CustomCommand
-Best for: Complex launch setups or special requirements
+Best for complex launch setups or special requirements.
 ```json
 {
   "launchMode": "CustomCommand",
@@ -165,15 +187,16 @@ Best for: Complex launch setups or special requirements
 }
 ```
 
-## GABP Communication
+## GABP Communication Reference
 
-GABS uses **local-only GABP communication** for security and simplicity. Here's how it works:
+This section is mainly useful if you are writing or debugging a mod bridge.
+
+GABS uses local-only GABP communication.
 
 ### Local Communication (Current Implementation)
-- Game mods connect to GABS on localhost (127.0.0.1) only
-- Each game gets a unique port and secure token
-- Bridge configuration stored in `~/.gabs/{gameId}/bridge.json`
-- Maximum security with no network exposure
+- GABS connects to game mods on localhost (`127.0.0.1`) only
+- Each game gets a unique port and token
+- Bridge configuration is also written to `~/.gabs/{gameId}/bridge.json`
 
 ### Bridge Configuration
 When you start a game, GABS creates a bridge configuration file that looks like this:
@@ -186,8 +209,7 @@ When you start a game, GABS creates a bridge configuration file that looks like 
 }
 ```
 
-Your game mod can read this file to establish a secure connection with GABS, but
-environment variables remain the preferred source.
+Mods can read this file, but environment variables remain the preferred source.
 
 ## Shared Runtime Ownership
 
@@ -202,12 +224,12 @@ has an owner.
 - `games.status` can report that another GABS session owns the process
 
 If you intentionally want a different GABS session to take over a running game,
-use `games.connect` with `forceTakeover: true`. That parameter defaults to
-`false` and should only be used when you want to move ownership explicitly.
+use `games.connect` with `forceTakeover: true`.
 
 ## Tool Normalization Configuration
 
-GABS can automatically normalize MCP tool names to be compatible with different AI platforms, particularly OpenAI's API which has strict naming requirements.
+Only use this if your AI platform has strict tool naming rules, such as the
+OpenAI API.
 
 ### Tool Normalization Options
 
@@ -251,11 +273,9 @@ For complete details about tool normalization, see the [OpenAI Tool Normalizatio
 
 ## Improved Game Stopping
 
-GABS now supports better game stopping through the optional `stopProcessName` configuration. This addresses the limitation where Steam/Epic launcher games could only have their launcher process stopped, not the actual game.
+GABS can stop games more reliably when `stopProcessName` is set correctly.
 
-### How It Works
-
-When you configure a `stopProcessName`, GABS will:
+When `stopProcessName` is configured, GABS will:
 1. First try to find and stop processes with that name
 2. If no processes are found with that name, fall back to stopping the launched process (if any)
 3. Support both graceful termination (games.stop) and force killing (games.kill)
@@ -301,7 +321,8 @@ The process finding works across platforms:
 }
 ```
 
-**Important:** For launcher-based games (`SteamAppId` and `EpicAppId`), the `stopProcessName` field is mandatory. GABS will refuse to save configurations for these launch modes without it, as proper game termination would not be possible.
+For launcher-based games (`SteamAppId` and `EpicAppId`), `stopProcessName` is
+mandatory.
 
 ## Troubleshooting
 

@@ -9,15 +9,18 @@ This guide explains how to deploy GABS in different scenarios, from local develo
 GABS uses a **configuration-first approach** where games are configured once, then controlled through MCP tools:
 
 ```
-AI Agent ← MCP → GABS ← GABP → Game Mod ← Game API → Game
+AI Agent ← MCP → GABS ← GABP Client → GABP Server (Game Mod) ← Game API → Game
 ```
 
 **Key Components:**
 - **AI Agent**: Your AI assistant (Claude, ChatGPT, custom tools)
 - **MCP**: Model Context Protocol for AI-tool communication
 - **GABS**: Game Agent Bridge Server (this project)
-- **GABP**: Game Agent Bridge Protocol (JSON-RPC style messaging)
+- **GABP**: Game Agent Bridge Protocol on wire major `gabp/1`
 - **Game Mod**: GABP compliant modification in your game
+
+Current GABS releases are compatible with the additive GABP v1.1 surface while
+remaining on wire major `gabp/1`.
 
 ## Basic Deployment Flow
 

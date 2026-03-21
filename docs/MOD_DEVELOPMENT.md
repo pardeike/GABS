@@ -8,6 +8,9 @@ This guide helps you add GABP support to your game mods so they can work with GA
 
 [GABP](https://github.com/pardeike/GABP) (Game Agent Bridge Protocol) is a simple way for AI tools to talk to your game mods. Think of it like a translator between AI assistants and your game.
 
+Current GABS releases are compatible with **GABP v1.1** while remaining on the
+stable wire major **`gabp/1`**.
+
 ## Architecture Overview
 
 **IMPORTANT: Understanding Client-Server Roles**
@@ -76,7 +79,8 @@ Your mod acts as a GABP server and needs to:
 1. **Start a TCP server** on `127.0.0.1:GABP_SERVER_PORT`
 2. **Wait for GABS to connect** (GABS acts as the client)
 3. **Authenticate** using `GABP_TOKEN`
-4. **Handle GABP protocol messages** (JSON-RPC format)
+4. **Handle GABP protocol messages** using the `gabp/1` envelope with
+   JSON-RPC-style request/response semantics
 5. **Respond to tool calls** and **send events**
 
 ### Why Your Mod is the Server
@@ -128,7 +132,7 @@ public class GABPMod : Mod
         var config = ReadBridgeConfig();
         
         // Start GABP server
-        server = new GABPServer(config.Host, config.Port, config.Token);
+        server = new GABPServer("127.0.0.1", config.Port, config.Token);
         
         // Register your mod's capabilities
         server.RegisterTool("inventory/get", GetPlayerInventory);
@@ -138,7 +142,7 @@ public class GABPMod : Mod
         // Start listening for GABS connections
         server.Listen();
         
-        Console.WriteLine($"GABP server started on {config.Host}:{config.Port}");
+        Console.WriteLine($"GABP server started on 127.0.0.1:{config.Port}");
     }
     
     private BridgeConfig ReadBridgeConfig()
@@ -233,7 +237,7 @@ public class GABPMod {
             BridgeConfig config = readBridgeConfig();
             
             // Start GABP server
-            server = new GABPServer(config.host, config.port, config.token);
+            server = new GABPServer("127.0.0.1", config.port, config.token);
             
             // Register tools
             server.registerTool("inventory/get", this::getInventory);
@@ -242,7 +246,7 @@ public class GABPMod {
             // Start listening
             server.start();
             
-            System.out.println("GABP server started on " + config.host + ":" + config.port);
+            System.out.println("GABP server started on 127.0.0.1:" + config.port);
             
         } catch (Exception e) {
             e.printStackTrace();
@@ -335,7 +339,7 @@ class GABPMod:
         config = self.read_bridge_config()
         
         # Start GABP server
-        self.server = GABPServer(config['host'], config['port'], config['token'])
+        self.server = GABPServer('127.0.0.1', config['port'], config['token'])
         
         # Register capabilities
         self.server.register_tool('inventory/get', self.get_inventory)
@@ -343,7 +347,7 @@ class GABPMod:
         
         # Start listening
         self.server.listen()
-        print(f"GABP server started on {config['host']}:{config['port']}")
+        print(f"GABP server started on 127.0.0.1:{config['port']}")
         
     def read_bridge_config(self):
         # Method 1: Use environment variables (recommended)
@@ -402,17 +406,79 @@ class GABPMod:
 
 ## Protocol Details
 
-GABP uses JSON-RPC 2.0 over TCP. Here are the main message types:
+GABP uses the `gabp/1` envelope over the bridge connection. The core runtime
+flow is:
+
+1. GABS sends `session/hello`
+2. Your mod returns a welcome response with capabilities
+3. GABS uses `tools/list` to discover your canonical tool schemas
+4. GABS uses `tools/call` to invoke your game functionality
+5. Your mod emits events with the same `gabp/1` envelope
+
+### Handshake Request (from GABS to your mod)
+```json
+{
+  "v": "gabp/1",
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "type": "request",
+  "method": "session/hello",
+  "params": {
+    "token": "secret-auth-token",
+    "bridgeVersion": "1.0.0",
+    "platform": "darwin",
+    "launchId": "f28c9f0d-bf7a-4f0a-9b42-5c61a54c5f7d",
+    "clientInfo": {
+      "name": "gabs",
+      "version": "1.0.0"
+    }
+  }
+}
+```
+
+### Welcome Response (from your mod to GABS)
+```json
+{
+  "v": "gabp/1",
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "type": "response",
+  "result": {
+    "agentId": "rimworld",
+    "app": {
+      "name": "RimBridgeServer",
+      "version": "1.1.0"
+    },
+    "capabilities": {
+      "methods": [
+        "tools/list",
+        "tools/call",
+        "attention/current",
+        "attention/ack"
+      ],
+      "events": [
+        "system/log",
+        "attention/opened",
+        "attention/updated",
+        "attention/cleared"
+      ],
+      "resources": []
+    },
+    "schemaVersion": "1.0"
+  }
+}
+```
 
 ### Tool Call (from GABS to your mod)
 ```json
 {
-  "jsonrpc": "2.0",
-  "id": 1,
+  "v": "gabp/1",
+  "id": "550e8400-e29b-41d4-a716-446655440001",
+  "type": "request",
   "method": "tools/call",
   "params": {
     "name": "inventory/get",
-    "arguments": {}
+    "arguments": {
+      "playerId": "steve"
+    }
   }
 }
 ```
@@ -420,8 +486,9 @@ GABP uses JSON-RPC 2.0 over TCP. Here are the main message types:
 ### Tool Response (from your mod to GABS)
 ```json
 {
-  "jsonrpc": "2.0", 
-  "id": 1,
+  "v": "gabp/1",
+  "id": "550e8400-e29b-41d4-a716-446655440001",
+  "type": "response",
   "result": {
     "items": ["sword", "potion", "gold"],
     "count": 3
@@ -432,19 +499,29 @@ GABP uses JSON-RPC 2.0 over TCP. Here are the main message types:
 ### Event Notification (from your mod to GABS)
 ```json
 {
-  "jsonrpc": "2.0",
-  "method": "notifications/event",
-  "params": {
-    "name": "player/move",
-    "data": {
-      "x": 10.5,
-      "y": 64.0,
-      "z": -15.2,
-      "player": "Steve"
-    }
+  "v": "gabp/1",
+  "id": "550e8400-e29b-41d4-a716-446655440002",
+  "type": "event",
+  "channel": "player/move",
+  "seq": 42,
+  "payload": {
+    "x": 10.5,
+    "y": 64.0,
+    "z": -15.2,
+    "player": "Steve"
   }
 }
 ```
+
+### Optional GABP v1.1 Attention Support
+
+GABP v1.1 is additive on top of `gabp/1`. If your bridge supports attention:
+
+- advertise `attention/current` and `attention/ack` in capabilities
+- advertise `attention/opened`, `attention/updated`, and
+  `attention/cleared` when you emit those lifecycle events
+- do not assume the other side always supports attention; discover it through
+  capabilities first
 
 ## Testing Your Implementation
 

@@ -1,53 +1,31 @@
 # GABS - Game Agent Bridge Server
 
-**Let AI control your games naturally!**
+Compatible with **GABP v1.1** on wire major **`gabp/1`**.
 
-GABS connects AI assistants to your games through a simple, secure bridge. Configure your games once, then ask your AI to start servers, check status, or manage multiple games—all through natural conversation.
+GABS lets MCP-capable AI tools start games, check status, and call tools exposed
+by GABP-compatible game mods.
+
+If you are installing GABS from a release archive, start with **Quick Start**
+below. If you want the full copy-paste setup guide, read the
+[AI Client Setup Guide](docs/AI_CLIENT_SETUP.md).
 
 ## Why GABS?
 
-**For Everyone:**
-- **Simple Setup**: Configure games once with easy commands
-- **Natural Control**: Ask AI to manage games in plain English
-- **Works Everywhere**: Windows, macOS, Linux—one tool for all your games
-- **Secure**: Everything runs locally by default
-- **Real Examples**: "Start my Minecraft server", "Check if RimWorld is running", "Stop all games"
+GABS is aimed at developers who want a practical way to connect local AI tools
+to real games.
 
-**For Modders:**
-- **AI-Powered Development**: Let AI help test and debug your mods
-- **Universal**: Works with any game that can add GABP support
-- **Easy Integration**: GABP/gabp-runtime-compatible handshake with canonical tool schemas
-
-## How It Works
-
-GABS uses a **configuration-first approach**. You set up your games once, then AI controls them through simple tools.
-
-![GABS Architecture](docs/architecture-flow.svg)
-
-### Key Architecture Concepts
-
-**Communication Flow:**
-```
-AI Agent ← MCP → GABS ← GABP → Game Mod ← Game API → Game
-```
-
-**Important:** In the GABP layer, **your game mod acts as the server** (listening on a port) while **GABS acts as the client** (connecting to your mod). This design ensures:
-- GABS manages port allocation for multiple games
-- All communication stays local (127.0.0.1)
-- Games can start independently and GABS connects when ready
-
-**Key Features:**
-- **Configure once**: Add games with `gabs games add`
-- **Control with AI**: Natural commands through MCP tools
-- **Any game**: Works with modded games that support GABP
-- **Any AI**: Works with Claude Desktop, Codex CLI, and other MCP-capable clients
-- **Live discovery**: AI gets MCP `tools/list_changed` and `resources/list_changed` notifications as games connect
+- Configure games once with `gabs games add`
+- Keep everything local by default
+- Work with Claude Desktop, Codex CLI, and other MCP clients
+- Support direct executables, Steam App IDs, Epic App IDs, and custom commands
+- Mirror game-specific mod tools into MCP when the mod connects
 
 ## Quick Start
 
-### 1. Download GABS
+### 1. Download and verify the binary
 
-Download the latest release bundle for your system from [GitHub Releases](releases/latest).
+Download the latest release bundle for your system from
+[GitHub Releases](releases/latest).
 
 Available archives are named like:
 - **Windows x64**: `gabs-<version>-windows-amd64.zip`
@@ -76,43 +54,33 @@ chmod +x gabs
 ./gabs version
 ```
 
-### 2. Add Your Games
+### 2. Add a game
 
 ```bash
-# Interactive setup (recommended)
+# Interactive setup
 gabs games add minecraft
-gabs games add rimworld
 
-# See what you've configured
+# See saved game IDs
 gabs games list
 
-# Validate one game's launch/stop setup
-gabs games show rimworld
+# Show one game's saved config
+gabs games show minecraft
 ```
 
-GABS will ask simple questions to set up each game:
-- **Game Name**: Friendly display name
-- **Launch Mode**: How to start the game (Direct executable, Steam App ID, Epic, or Custom command)
-- **Target**: Path to executable or Steam/Epic App ID
-- **Stop Process Name**: **Required for Steam/Epic games** - the actual game process name for proper stopping
+The setup is interactive. In most cases you only need to answer:
 
-**Critical for Steam/Epic users:** GABS **requires** the actual game process name (like `RimWorldWin64.exe` for RimWorld, `java` for Minecraft) to properly stop games launched through Steam or Epic. Without this, GABS can start games but cannot stop them reliably.
+- **Game name**: a label you recognize
+- **Launch mode**: direct path, Steam App ID, Epic App ID, or custom command
+- **Target**: the executable path or store App ID
+- **Stop process name**: the real game process name used by `games.stop` and
+  `games.kill`
 
-Use `gabs games show <game-id>` after setup to confirm the launch target and `stopProcessName` that AI will rely on.
+For Steam and Epic games, `stopProcessName` is required. Example values:
+`RimWorldWin64.exe`, `RimWorld`, or `java`.
 
-### 3. Start the Server
+### 3. Add GABS to your AI client
 
-```bash
-# For AI assistants
-gabs server
-
-# For web tools (optional)
-gabs server --http localhost:8080
-```
-
-### 4. Connect Your AI
-
-Add GABS to your AI's MCP settings:
+Paste one of these into your AI client's MCP config.
 
 **Claude Desktop:**
 ```json
@@ -133,14 +101,7 @@ command = "/absolute/path/to/gabs"
 args = ["server"]
 ```
 
-Each Codex or Claude session starts its own stdio GABS process. That process is
-session-local; GABS only coordinates ownership at the game level so two live AI
-sessions do not both launch or attach to the same game by accident.
-
 **Generic MCP client:**
-
-Point your client at the `gabs` binary with the `server` subcommand:
-
 ```json
 {
   "command": "/absolute/path/to/gabs",
@@ -148,72 +109,75 @@ Point your client at the `gabs` binary with the `server` subcommand:
 }
 ```
 
-If your client uses OpenAI-style tool calling constraints, enable the `toolNormalization` section in `~/.gabs/config.json`. See [OpenAI Tool Normalization](docs/OPENAI_TOOL_NORMALIZATION.md) for details.
+If your client uses strict OpenAI-style tool naming, enable
+`toolNormalization` in `~/.gabs/config.json`. See
+[OpenAI Tool Normalization](docs/OPENAI_TOOL_NORMALIZATION.md).
 
-For a full download-to-config walkthrough, including Claude Desktop, Codex CLI, and generic MCP/OpenAI-style clients, see the [AI Client Setup Guide](docs/AI_CLIENT_SETUP.md).
+### 4. Try these prompts
 
-**Then ask your AI:**
 - "List my games"
-- "Start the Minecraft server"
-- "Stop all running games"
-- "Check the status of RimWorld"
+- "Start RimWorld"
+- "Show the status of all games"
+- "Stop Minecraft"
 
-## Session Ownership
+If you want a download-to-working walkthrough, use the
+[AI Client Setup Guide](docs/AI_CLIENT_SETUP.md).
 
-GABS coordinates launches across live sessions on the same machine. When one
-GABS session already owns a running or starting game:
+## Common Setup Notes
 
-- `games.start` returns quickly with an "already starting" or "already running"
-  message instead of trying to launch a second copy
-- `games.connect` also returns quickly instead of waiting on a competing bridge
-  connection
-- `games.status` can report that another GABS session owns the process
+- **Steam/Epic stopping**: use the real game process name, not the launcher
+  name.
+- **More than one AI session**: that is fine. GABS coordinates ownership per
+  game so two live sessions do not both launch or attach to the same game by
+  accident.
+- **Game mod cannot find bridge config**: the mod should first read
+  `GABP_SERVER_PORT`, `GABP_TOKEN`, and `GABS_GAME_ID`, and only fall back to
+  `GABS_BRIDGE_PATH` or `~/.gabs/<gameId>/bridge.json`.
 
-If you intentionally want a different GABS session to take over a running game,
-use:
+## How It Works
 
-```json
-{
-  "gameId": "rimworld",
-  "forceTakeover": true
-}
+Most users only need this mental model:
+
+- Your AI client starts `gabs server`
+- GABS starts or attaches to your game
+- If the game mod speaks GABP, GABS mirrors that mod's tools into MCP
+
+Architecture details matter mainly if you are writing a mod or debugging a
+bridge issue.
+
+![GABS Architecture](docs/architecture-flow.svg)
+
+```
+AI Agent ← MCP → GABS ← GABP Client → GABP Server (Game Mod) ← Game API → Game
 ```
 
-with `games.connect`. This defaults to `false` and should only be used when you
-really do want the new session to become the owner.
+In the GABP layer, your mod is the server and GABS is the client.
 
-## AI Tools Available
+## Common MCP Tools
 
-Once connected, your AI starts with a stable MCP surface and can then discover dynamic game tools as mods connect.
+Most users only need a few tools at first:
 
-### Core MCP Tools
 - **`games.list`** - List configured game IDs
-- **`games.show`** - Show configuration and validation details for a specific game
-- **`games.start`** - Start a game: `{"gameId": "minecraft"}`
-- **`games.stop`** - Stop a game gracefully: `{"gameId": "minecraft"}`
-- **`games.kill`** - Force stop a game: `{"gameId": "minecraft"}`
-- **`games.status`** - Check one game or all configured games
-- **`games.tool_names`** - List compact game-specific tool names, with optional filtering, pagination, and optional brief summaries in structured output
-- **`games.tool_detail`** - Show one game-specific tool's description, parameters, defaults, and output schema; `gameId` is optional when the tool name is fully qualified or uniquely discoverable
-- **`games.tools`** - List currently available game-specific tools in detailed form for compatibility and human-readable inspection, with optional filtering, pagination, and structured output
-- **`games.connect`** - Manually connect or reconnect to a running game's GABP server after the mod finishes loading or after a GABS restart. Set `forceTakeover: true` only when you intentionally want this session to replace another live GABS owner.
-- **`games.get_attention`** - Inspect a game's current blocking attention item when async game state needs review before more calls run
-- **`games.ack_attention`** - Acknowledge the current attention item after review so normal game calls can resume
-- **`games.call_tool`** - Call a discovered game tool through the stable core surface: `{"tool": "minecraft.inventory.get", "arguments": {"playerId": "steve"}}` (`gameId` is optional when the tool name is fully qualified or uniquely discoverable)
+- **`games.show`** - Show one saved game config
+- **`games.start`** - Start a game
+- **`games.stop`** - Stop a game gracefully
+- **`games.kill`** - Force stop a game
+- **`games.status`** - Check if a game is running
+- **`games.connect`** - Reconnect to a running game's mod bridge
+- **`games.tool_names`** - List mirrored game-specific tools after a mod connects
+- **`games.tool_detail`** - Show the schema for one mirrored tool
+- **`games.call_tool`** - Call a mirrored tool through the stable core surface
 
-### Game-Specific Tools from Mods
+For the full MCP surface and advanced behavior, see the
+[AI Integration Guide](docs/INTEGRATION.md).
 
-**The real power comes from GABP-compliant mods that expose their own tools.**
+## Game-Specific Tools from Mods
 
-GABP mods typically expose canonical tool names such as `inventory/get`, `world/place_block`, `crafting/build`, or `core/ping`. GABS now consumes the current `gabp-runtime` method surface (`session/hello`, `tools/list`, `tools/call`) and mirrors those into MCP-friendly, game-prefixed tool names such as:
-- **`minecraft.inventory.get`** - Mirrored from GABP `inventory/get`
-- **`minecraft.world.place_block`** - Mirrored from GABP `world/place_block`
-- **`rimworld.crafting.build`** - Mirrored from GABP `crafting/build`
-- **`bannerlord.core.ping`** - Mirrored from GABP `core/ping`
+When a GABP-compatible mod connects, GABS mirrors the mod's canonical tool
+names into MCP-friendly names such as `minecraft.inventory.get` or
+`rimworld.crafting.build`.
 
-**Game ID Prefixing**: To avoid conflicts when multiple games are running, mirrored mod tools are automatically prefixed with the game ID (for example, `minecraft.` or `rimworld.`). This lets AI clearly specify which game to control, and GABS removes those mirrored tools again when the game disconnects.
-
-**Recommended Discovery Flow**: Use the compact discovery tools first, then fetch detail only for the few candidates you care about:
+The usual discovery flow is:
 ```
 AI: "Reconnect to RimWorld and show me its mod tools"
 GABS: games.connect {"gameId": "rimworld"}
@@ -221,40 +185,8 @@ GABS: games.tool_names {"gameId": "rimworld", "brief": true}
 GABS: games.tool_detail {"tool": "rimworld.crafting.build"}
 ```
 
-If another live GABS session already owns RimWorld, `games.connect` returns
-quickly instead of hanging. Use `games.connect {"gameId": "rimworld",
-"forceTakeover": true}` only when you want to move ownership to the current
-session.
-
-`games.tools` remains available for compatibility when you want the richer one-shot listing, but `games.tool_names -> games.tool_detail -> games.call_tool` is the most token-efficient path for AI clients such as Codex and Claude. `games.tool_names` now defaults to 50 names per page and can include one-line summaries in structured output with `brief: true`.
-
-If your MCP client supports dynamic tool refresh, it can call mirrored tools directly after the `tools/list_changed` notification. If it keeps a fixed tool surface, use `games.call_tool` with the mirrored name returned by `games.tool_names` or `games.tools`:
-
-```json
-{
-  "tool": "minecraft.inventory.get",
-  "arguments": {
-    "playerId": "steve"
-  }
-}
-```
-
-Connected games also expose a state resource at `gab://<gameId>/state`.
-
-**Pro tip**: You can use game names (`"minecraft"`) or launch IDs (`"294100"` for Steam) interchangeably in the `games.*` tools. If OpenAI tool normalization is enabled, dotted MCP tool names may be normalized to underscores; the examples above use the canonical MCP names.
-
-### Attention Gating
-
-Some game bridges publish blocking attention when async game state invalidates the agent's assumptions even though the last tool call itself did not fail.
-
-When that happens, GABS stops forwarding ordinary game-bound calls and returns a structured `status: "blocked_by_attention"` result instead. The intended recovery flow is:
-
-1. Call `games.get_attention` to inspect the current item and keep the stable `attentionId`.
-2. Inspect diagnostics that explain the issue.
-3. Call `games.ack_attention` with that `attentionId`.
-4. Retry the original game call.
-
-For RimBridge-style bridges, GABS still allows `rimbridge/get_bridge_status`, `rimbridge/list_operation_events`, and `rimbridge/list_logs` through the gate so the model can inspect what happened without resuming normal gameplay actions too early.
+Most users can ignore attention gating, resource mirroring, and protocol
+details until they need them. Those topics are covered in the dedicated docs.
 
 ## Documentation
 
@@ -279,6 +211,7 @@ Want your game to work with GABS? Add GABP support to your mod:
    - `GABS_BRIDGE_PATH` - Optional `bridge.json` fallback/debug path
 2. **Start a local GABP server** to listen for GABS connections (your mod = server, GABS = client)
 3. **Implement the current GABP runtime methods** (`session/hello`, `tools/list`, `tools/call`) or use the official `gabp-runtime` library so your schemas match what GABS expects
+   - For GABP v1.1 bridges, advertise optional attention support through capabilities before exposing `attention/current`, `attention/ack`, and the attention lifecycle channels
 4. **Expose game features** as tools, resources, and events using canonical GABP tool names such as `inventory/get` or `core/ping`
 
 See the [Mod Development Guide](docs/MOD_DEVELOPMENT.md) for complete examples in C#, Java, and Python.
@@ -295,7 +228,7 @@ go build ./cmd/gabs
 make build
 
 # Build with custom version
-go build -ldflags "-X github.com/pardeike/gabs/internal/version.Version=v1.0.0" ./cmd/gabs
+go build -ldflags "-X github.com/pardeike/gabs/internal/version.Version=vX.Y.Z" ./cmd/gabs
 ```
 
 ## Contributing & Support

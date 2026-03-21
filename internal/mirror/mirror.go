@@ -118,8 +118,8 @@ func (m *Mirror) SyncTools() error {
 
 	// Send tools/list_changed notification to AI agents
 	// This automatically alerts AI agents that new tools are available without
-	// them needing to poll. AI agents can then use games.tools to discover the
-	// new capabilities.
+	// them needing to poll. AI agents can then use games.tool_names and
+	// games.tool_detail to discover the new capabilities efficiently.
 	//
 	// This follows MCP specification for server-initiated notifications and ensures
 	// AI agents are immediately aware of dynamic tool expansion.

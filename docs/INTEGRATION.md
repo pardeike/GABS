@@ -24,6 +24,8 @@ Once GABS is running, AI can use these tools:
 - **`games.tool_detail`** - Inspect one mirrored tool's schema
 - **`games.tools`** - Fetch the richer compatibility listing of mirrored tools
 - **`games.connect`** - Attach to a running game's GABP server after the mod loads or after a GABS restart
+- **`games.get_attention`** - Inspect a game's current blocking attention item
+- **`games.ack_attention`** - Acknowledge the current blocking attention item and resume normal calls
 - **`games.call_tool`** - Call a mirrored game tool through the stable core surface
 
 **Pro tip**: You can use either the game ID (`"rimworld"`) or the launch target (`"294100"` for Steam) in any tool.
@@ -49,6 +51,20 @@ running game, call:
 ```
 
 with `games.connect`. This defaults to `false`.
+
+## Attention-Aware Bridges
+
+GABS is compatible with the additive attention surface introduced in GABP
+v1.1 while staying on wire major `gabp/1`.
+
+When a connected bridge advertises `attention/current` and `attention/ack`,
+GABS can gate normal game-bound tool calls until the current attention item is
+reviewed and acknowledged. The recovery flow is:
+
+1. Call `games.get_attention`
+2. Inspect the returned diagnostics or follow-up tooling
+3. Call `games.ack_attention` with the returned `attentionId`
+4. Retry the original game call
 
 ## Setting Up AI Assistants
 

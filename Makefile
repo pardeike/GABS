@@ -5,7 +5,7 @@
 # Use the declared source version for local builds so rebuilt workspace binaries
 # keep the release semantic version instead of inheriting a git "-dirty" suffix.
 SOURCE_VERSION ?= $(shell sed -n 's/^[[:space:]]*Version = "\([^"]*\)".*/\1/p' internal/version/version.go | head -n 1)
-VERSION ?= $(if $(SOURCE_VERSION),v$(SOURCE_VERSION),dev)
+VERSION ?= $(if $(SOURCE_VERSION),$(SOURCE_VERSION),dev)
 COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 

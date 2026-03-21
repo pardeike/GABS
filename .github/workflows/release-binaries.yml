@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Release tag to create or package, for example v0.2.2
+        description: Release tag to create or package, for example vX.Y.Z
         required: true
         type: string
       target_ref:
@@ -76,7 +76,7 @@ jobs:
             fi
 
             if ! printf '%s' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$'; then
-              echo "release_tag must look like v0.2.2 or v0.2.2-rc.1" >&2
+              echo "release_tag must look like vX.Y.Z or vX.Y.Z-rc.1" >&2
               exit 1
             fi
 
@@ -233,13 +233,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          VERSION="$RELEASE_TAG"
+          EMBEDDED_VERSION="${RELEASE_TAG#v}"
           COMMIT="$(git rev-parse HEAD)"
           BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-          STAGE_DIR="dist/gabs-${VERSION}-${GOOS}-${GOARCH}"
+          STAGE_DIR="dist/gabs-${RELEASE_TAG}-${GOOS}-${GOARCH}"
           BINARY_NAME="gabs${BINARY_EXTENSION}"
-          ARCHIVE_NAME="gabs-${VERSION}-${GOOS}-${GOARCH}.zip"
+          ARCHIVE_NAME="gabs-${RELEASE_TAG}-${GOOS}-${GOARCH}.zip"
 
           rm -rf "$STAGE_DIR"
           mkdir -p "$STAGE_DIR"
@@ -247,7 +247,7 @@ jobs:
           CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build \
             -trimpath \
             -ldflags "\
-              -X github.com/pardeike/gabs/internal/version.Version=${VERSION} \
+              -X github.com/pardeike/gabs/internal/version.Version=${EMBEDDED_VERSION} \
               -X github.com/pardeike/gabs/internal/version.Commit=${COMMIT} \
               -X github.com/pardeike/gabs/internal/version.BuildDate=${BUILD_DATE}" \
             -o "$STAGE_DIR/$BINARY_NAME" \

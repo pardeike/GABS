@@ -93,7 +93,7 @@ Content-Type: application/json
 ```
 GET /health
 ```
-Returns server status and configured games.
+Returns basic server metadata such as `status`, `server`, and `version`.
 
 ### Integration Examples
 
@@ -230,6 +230,9 @@ manageGames();
 ### Tool Normalization for AI Compatibility
 
 For advanced AI integrations, especially with OpenAI's API, you can configure tool name normalization:
+
+The top-level `"version"` field below is the GABS config schema version, not
+the GABP protocol version.
 
 ```json
 {

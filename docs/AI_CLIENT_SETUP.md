@@ -1,8 +1,21 @@
 # AI Client Setup Guide
 
-This guide assumes you downloaded one of the GABS release archives from the
-GitHub Releases page and want to get from "zip file" to "AI can control my
-games" as quickly as possible.
+This guide is for people who downloaded a GABS release archive and want to go
+from "zip file" to "my AI can start and manage my game" with as little setup
+friction as possible.
+
+## Fast Path
+
+If you only want the short version:
+
+1. Unzip the release archive.
+2. Run `gabs version` to verify the binary works.
+3. Run `gabs games add <game-id>`.
+4. Paste the GABS config snippet into Claude Desktop, Codex CLI, or another MCP
+   client.
+5. Ask your AI to list or start your games.
+
+The rest of this guide shows the exact commands and config snippets.
 
 ## What Is In The Release Archive
 
@@ -66,17 +79,32 @@ gabs games list
 gabs games show rimworld
 ```
 
-By default, GABS stores its configuration in:
+During setup, the important fields are:
 
-- `~/.gabs/config.json`
+- **Launch mode**: how GABS starts the game
+- **Target**: the executable path or store App ID
+- **Stop process name**: the real game process name used for stopping the game
 
-Per-game runtime files for running games are written under:
+Examples of `stopProcessName`:
 
-- `~/.gabs/<gameId>/bridge.json`
-- `~/.gabs/<gameId>/runtime.json` (internal ownership tracking used by GABS)
+- RimWorld on Windows: `RimWorldWin64.exe`
+- RimWorld on macOS/Linux: `RimWorld`
+- Java-based Minecraft setups: `java`
 
-If you need a complete config example, see `example-config.json` in the release
-archive.
+For Steam and Epic launch modes, `stopProcessName` is required. Without it,
+GABS can launch the game but cannot stop the real game process reliably.
+
+## What Success Looks Like
+
+After setup, these commands should work:
+
+```bash
+gabs games list
+gabs games show rimworld
+gabs version
+```
+
+If they do, your local GABS setup is in good shape.
 
 ## Configure Your AI Client
 
@@ -109,9 +137,9 @@ args = ["server"]
 
 On Windows, use the full path to `gabs.exe`.
 
-Each live Codex session will start its own stdio GABS process. That is
-intentional. GABS coordinates shared ownership per game, not with a machine-wide
-`gabs server` singleton.
+Each live Codex session starts its own stdio GABS process. That is normal.
+GABS coordinates ownership per game so two live AI sessions do not both launch
+or attach to the same game by accident.
 
 ### Generic MCP Clients
 
@@ -124,14 +152,14 @@ If your MCP client supports stdio servers, the essential configuration is:
 }
 ```
 
-The important part is that the client launches the GABS binary with the
-`server` subcommand.
+The key point is simple: your AI client should launch the `gabs` binary with
+the `server` subcommand.
 
 ### OpenAI-Style Tool Calling Clients
 
-Some OpenAI-style clients prefer stricter tool names than MCP itself requires.
-If that applies to your client, enable tool normalization in
-`~/.gabs/config.json`:
+Only do this if your client has strict OpenAI-style tool naming rules.
+
+Enable tool normalization in `~/.gabs/config.json`:
 
 ```json
 {
@@ -143,8 +171,8 @@ If that applies to your client, enable tool normalization in
 }
 ```
 
-This converts mirrored tool names like `minecraft.inventory.get` into
-OpenAI-compatible forms such as `minecraft_inventory_get`.
+This turns tool names like `minecraft.inventory.get` into
+`minecraft_inventory_get`.
 
 See also:
 
@@ -152,13 +180,14 @@ See also:
 
 ## Optional HTTP Mode
 
-If your tooling prefers HTTP instead of stdio:
+Most users do not need this. Use it only when your tooling wants HTTP instead
+of stdio.
 
 ```bash
 gabs server --http localhost:8080
 ```
 
-Then talk to the MCP endpoint over HTTP:
+Then send MCP requests to the HTTP endpoint:
 
 ```bash
 curl -X POST http://localhost:8080/mcp \
@@ -183,9 +212,9 @@ Once your AI client is connected, try prompts like:
 - "Show the status of all games"
 - "Reconnect to RimWorld and list its tools"
 
-If you have more than one live GABS session, the second session will not try to
-launch or connect to the same game again by default. To intentionally move a
-running game's ownership to the current session, use:
+If you have more than one live GABS session, the second session will not launch
+or connect to the same game again by default. To intentionally move ownership
+to the current session, use:
 
 ```json
 {
@@ -195,6 +224,21 @@ running game's ownership to the current session, use:
 ```
 
 with `games.connect`.
+
+## Where GABS Stores Files
+
+Most users do not need this section, but it helps when debugging.
+
+GABS stores its main config in:
+
+- `~/.gabs/config.json`
+
+Per-game runtime files live under:
+
+- `~/.gabs/<gameId>/bridge.json`
+- `~/.gabs/<gameId>/runtime.json`
+
+`runtime.json` is internal ownership tracking used by GABS itself.
 
 ## Troubleshooting
 

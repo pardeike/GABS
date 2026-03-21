@@ -203,11 +203,22 @@ session open.
 - If takeover is intentional, `games.connect {"gameId": "rimworld",
   "forceTakeover": true}` moves ownership to the current session
 
-### Future Enhancements Already Planned:
-- **Tool Change Notifications**: AI gets notified when new tools are available
-- **Resource Mirroring**: Game data exposed as MCP resources  
-- **Event Streaming**: Real-time game events via MCP
-- **Batch Operations**: Execute multiple game actions atomically
+### Current State
+- **Tool change notifications are live**: AI clients get MCP
+  `tools/list_changed` when mirrored tools appear or refresh.
+- **Basic game resource mirroring is live**: GABS exposes per-game MCP
+  resources such as event logs and current game state, and sends
+  `resources/list_changed` when that surface changes.
+- **Attention-aware guardrails are live**: when a bridge publishes blocking
+  attention, GABS can pause normal game-bound calls until the client inspects
+  and acknowledges the item.
+
+### Still Evolving
+- **Richer event streaming**: real-time event transport keeps improving as
+  bridges expose more event capabilities.
+- **Broader mirrored resources**: mods can keep expanding the game-specific
+  resource surface beyond the baseline state and log resources.
+- **Batch operations**: multi-action atomic workflows are still future work.
 
 ## Conclusion: Your Concern is Valid but Solved
 

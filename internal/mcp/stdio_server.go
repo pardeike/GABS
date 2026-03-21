@@ -1739,7 +1739,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				},
 				"timeout": map[string]interface{}{
 					"type":        "integer",
-					"description": "Request timeout in seconds (optional, default 30). Increase for long-running tools like wait_for_screen or wait_for_game_loaded.",
+					"description": "Request timeout in seconds (optional, default 30). Increase for long-running tools such as composite load-ready flows or screen-wait operations.",
 				},
 			},
 			"required": []string{"tool"},
@@ -1762,14 +1762,19 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			toolArgs = map[string]interface{}{}
 		}
 
+		entry, resolveErr := resolveListedTool(gameIdArg, hasGameID, toolName)
+		if resolveErr != nil {
+			return resolveErr, nil
+		}
+
 		timeout, invalidTimeout := parseOptionalTimeoutSecondsArg(args, "timeout", 30*time.Second)
 		if invalidTimeout != nil {
 			return invalidTimeout, nil
 		}
 
-		entry, resolveErr := resolveListedTool(gameIdArg, hasGameID, toolName)
-		if resolveErr != nil {
-			return resolveErr, nil
+		proxyTimeout, invalidProxyTimeout := deriveMirroredToolCallTimeout(toolArgs, timeout)
+		if invalidProxyTimeout != nil {
+			return invalidProxyTimeout, nil
 		}
 
 		// Get the GABP client for this game
@@ -1800,7 +1805,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}
 		}
 
-		result, isError, err := client.CallToolWithTimeout(gabpToolName, toolArgs, timeout)
+		result, isError, err := client.CallToolWithTimeout(gabpToolName, toolArgs, proxyTimeout)
 		if err != nil {
 			disconnectNote := s.describeLastGABPDisconnect(entry.GameID)
 			if disconnectNote != "" {

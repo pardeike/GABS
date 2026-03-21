@@ -14,6 +14,11 @@ import (
 	"time"
 )
 
+var (
+	steamLaunchCommandFactory = defaultSteamLaunchCommandFactory
+	epicLaunchCommandFactory  = defaultEpicLaunchCommandFactory
+)
+
 type LaunchSpec struct {
 	GameId          string
 	Mode            string // DirectPath|SteamAppId|EpicAppId|CustomCommand
@@ -96,15 +101,9 @@ func (c *Controller) Start() error {
 		cmdName = c.spec.PathOrId
 		cmdArgs = c.spec.Args
 	case "SteamAppId":
-		cmdName = c.getSteamLauncher()
-		if runtime.GOOS == "windows" {
-			cmdArgs = []string{"/c", "start", fmt.Sprintf("steam://rungameid/%s", c.spec.PathOrId)}
-		} else {
-			cmdArgs = []string{fmt.Sprintf("steam://rungameid/%s", c.spec.PathOrId)}
-		}
+		cmdName, cmdArgs = steamLaunchCommandFactory(c.spec.PathOrId)
 	case "EpicAppId":
-		cmdName = c.getSystemOpenCommand()
-		cmdArgs = []string{fmt.Sprintf("com.epicgames.launcher://apps/%s?action=launch&silent=true", c.spec.PathOrId)}
+		cmdName, cmdArgs = epicLaunchCommandFactory(c.spec.PathOrId)
 	case "CustomCommand":
 		cmdName = c.spec.PathOrId
 		cmdArgs = c.spec.Args
@@ -393,7 +392,19 @@ func (c *Controller) waitForExit() {
 }
 
 // Helper methods
-func (c *Controller) getSteamLauncher() string {
+func defaultSteamLaunchCommandFactory(target string) (string, []string) {
+	cmdName := getSteamLauncherCommand()
+	if runtime.GOOS == "windows" {
+		return cmdName, []string{"/c", "start", fmt.Sprintf("steam://rungameid/%s", target)}
+	}
+	return cmdName, []string{fmt.Sprintf("steam://rungameid/%s", target)}
+}
+
+func defaultEpicLaunchCommandFactory(target string) (string, []string) {
+	return getSystemOpenCommand(), []string{fmt.Sprintf("com.epicgames.launcher://apps/%s?action=launch&silent=true", target)}
+}
+
+func getSteamLauncherCommand() string {
 	switch runtime.GOOS {
 	case "windows":
 		return "cmd"
@@ -404,7 +415,7 @@ func (c *Controller) getSteamLauncher() string {
 	}
 }
 
-func (c *Controller) getSystemOpenCommand() string {
+func getSystemOpenCommand() string {
 	switch runtime.GOOS {
 	case "windows":
 		return "cmd"
@@ -412,6 +423,28 @@ func (c *Controller) getSystemOpenCommand() string {
 		return "open"
 	default:
 		return "xdg-open"
+	}
+}
+
+// SetLaunchCommandFactoriesForTesting overrides launcher resolution for tests.
+// It returns a restore function that resets the original factories.
+func SetLaunchCommandFactoriesForTesting(
+	steamFactory func(target string) (string, []string),
+	epicFactory func(target string) (string, []string),
+) func() {
+	prevSteam := steamLaunchCommandFactory
+	prevEpic := epicLaunchCommandFactory
+
+	if steamFactory != nil {
+		steamLaunchCommandFactory = steamFactory
+	}
+	if epicFactory != nil {
+		epicLaunchCommandFactory = epicFactory
+	}
+
+	return func() {
+		steamLaunchCommandFactory = prevSteam
+		epicLaunchCommandFactory = prevEpic
 	}
 }
 

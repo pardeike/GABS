@@ -6,8 +6,8 @@ import "fmt"
 
 var (
 	// Version is the main version string for GABS.
-	// Can be overridden at build time: go build -ldflags "-X github.com/pardeike/gabs/internal/version.Version=v1.0.0"
-	Version = "0.3.0"
+	// Can be overridden at build time: go build -ldflags "-X github.com/pardeike/gabs/internal/version.Version=vX.Y.Z"
+	Version = "1.0.0"
 
 	// BuildDate is when the binary was built.
 	// Can be overridden at build time: go build -ldflags "-X github.com/pardeike/gabs/internal/version.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)"

@@ -23,6 +23,8 @@ Stable core tools:
 - games.tool_detail  - Detailed schema for one tool
 - games.tools        - Rich compatibility listing
 - games.connect      - Reattach to a running game's GABP server
+- games.get_attention - Inspect the current blocking attention item
+- games.ack_attention - Acknowledge attention and resume normal calls
 - games.call_tool    - Call a mirrored tool through the stable core surface
 ```
 
