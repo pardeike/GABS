@@ -12,9 +12,8 @@ import (
 func TestStripOutputSchema(t *testing.T) {
 	logger := util.NewLogger("warn")
 
-	// Helper to create a server, register tools, add a game tool with outputSchema,
-	// and return the tools/list response.
-	setup := func(strip bool) *Message {
+	// Helper to create a server with game tools (one with outputSchema, one without).
+	setupServer := func(strip bool) *Server {
 		server := NewServerForTesting(logger)
 
 		gamesConfig := &config.GamesConfig{
@@ -64,6 +63,12 @@ func TestStripOutputSchema(t *testing.T) {
 			return &ToolResult{Content: []Content{{Type: "text", Text: "pong"}}}, nil
 		}, &config.ToolNormalizationConfig{})
 
+		return server
+	}
+
+	// Convenience: create server and return tools/list response.
+	setup := func(strip bool) *Message {
+		server := setupServer(strip)
 		listMsg := &Message{
 			JSONRPC: "2.0",
 			Method:  "tools/list",
@@ -72,12 +77,18 @@ func TestStripOutputSchema(t *testing.T) {
 		return server.HandleMessage(listMsg)
 	}
 
-	findTool := func(response *Message, name string) map[string]interface{} {
-		respBytes, _ := json.Marshal(response.Result)
+	findTool := func(t *testing.T, response *Message, name string) map[string]interface{} {
+		t.Helper()
+		respBytes, err := json.Marshal(response.Result)
+		if err != nil {
+			t.Fatalf("failed to marshal response: %v", err)
+		}
 		var result struct {
 			Tools []map[string]interface{} `json:"tools"`
 		}
-		json.Unmarshal(respBytes, &result)
+		if err := json.Unmarshal(respBytes, &result); err != nil {
+			t.Fatalf("failed to unmarshal tools list: %v", err)
+		}
 		for _, tool := range result.Tools {
 			if tool["name"] == name {
 				return tool
@@ -88,7 +99,7 @@ func TestStripOutputSchema(t *testing.T) {
 
 	t.Run("StripOutputSchema_false_preserves_field", func(t *testing.T) {
 		response := setup(false)
-		tool := findTool(response, "testgame.take_screenshot")
+		tool := findTool(t, response, "testgame.take_screenshot")
 		if tool == nil {
 			t.Fatal("tool testgame.take_screenshot not found in tools/list")
 		}
@@ -99,7 +110,7 @@ func TestStripOutputSchema(t *testing.T) {
 
 	t.Run("StripOutputSchema_true_removes_field", func(t *testing.T) {
 		response := setup(true)
-		tool := findTool(response, "testgame.take_screenshot")
+		tool := findTool(t, response, "testgame.take_screenshot")
 		if tool == nil {
 			t.Fatal("tool testgame.take_screenshot not found in tools/list")
 		}
@@ -110,7 +121,7 @@ func TestStripOutputSchema(t *testing.T) {
 
 	t.Run("StripOutputSchema_true_preserves_tools_without_it", func(t *testing.T) {
 		response := setup(true)
-		tool := findTool(response, "testgame.ping")
+		tool := findTool(t, response, "testgame.ping")
 		if tool == nil {
 			t.Fatal("tool testgame.ping not found in tools/list")
 		}
@@ -125,7 +136,7 @@ func TestStripOutputSchema(t *testing.T) {
 
 	t.Run("StripOutputSchema_true_preserves_inputSchema", func(t *testing.T) {
 		response := setup(true)
-		tool := findTool(response, "testgame.take_screenshot")
+		tool := findTool(t, response, "testgame.take_screenshot")
 		if tool == nil {
 			t.Fatal("tool testgame.take_screenshot not found in tools/list")
 		}
@@ -139,6 +150,43 @@ func TestStripOutputSchema(t *testing.T) {
 		}
 		if _, ok := props["fileName"]; !ok {
 			t.Error("inputSchema.properties.fileName should be preserved")
+		}
+	})
+
+	t.Run("StripOutputSchema_true_does_not_mutate_original", func(t *testing.T) {
+		// Use a single server: call handleToolsList with strip=true, then
+		// disable stripping and call again. The second response must still
+		// have outputSchema, proving the original tool was not mutated.
+		server := setupServer(true)
+
+		listMsg := &Message{
+			JSONRPC: "2.0",
+			Method:  "tools/list",
+			ID:      json.RawMessage(`"strip-call"`),
+		}
+		resp1 := server.HandleMessage(listMsg)
+		tool1 := findTool(t, resp1, "testgame.take_screenshot")
+		if tool1 == nil {
+			t.Fatal("tool not found in first call")
+		}
+		if _, ok := tool1["outputSchema"]; ok {
+			t.Fatal("outputSchema should be stripped in first call")
+		}
+
+		// Disable stripping and call again on the same server
+		server.stripOutputSchema = false
+		listMsg2 := &Message{
+			JSONRPC: "2.0",
+			Method:  "tools/list",
+			ID:      json.RawMessage(`"no-strip-call"`),
+		}
+		resp2 := server.HandleMessage(listMsg2)
+		tool2 := findTool(t, resp2, "testgame.take_screenshot")
+		if tool2 == nil {
+			t.Fatal("tool not found in second call")
+		}
+		if _, ok := tool2["outputSchema"]; !ok {
+			t.Error("original tool's outputSchema was mutated by the strip call")
 		}
 	})
 }

@@ -37,8 +37,8 @@ type Server struct {
 	gabpClients     map[string]*gabp.Client // Track GABP connections per game
 	gabpAttention   map[string]*gameAttentionState
 	gabpDisconnects map[string]gabpDisconnectRecord
-	starter           *process.SerializedStarter // Serialized process starter
-	instanceID        string
+	starter         *process.SerializedStarter // Serialized process starter
+	instanceID      string
 	stripOutputSchema bool // Strip outputSchema from tools/list responses
 }
 
