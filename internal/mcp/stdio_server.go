@@ -2265,14 +2265,11 @@ func (s *Server) HandleUnexpectedGABPDisconnect(gameID string, client *gabp.Clie
 	s.cleanupGameResourcesInternal(gameID)
 	s.mu.Unlock()
 
-	if toolsChanged {
-		s.SendToolsListChangedNotification()
-	}
-	if resourcesChanged {
-		s.SendResourcesListChangedNotification()
-	}
+	// Game tools are excluded from tools/list, so no list_changed notification
+	// is needed. Sending one would cause MCP clients to restart the transport.
 
-	s.log.Warnw("unexpected GABP disconnect", "gameId", gameID, "error", err)
+	s.log.Warnw("unexpected GABP disconnect", "gameId", gameID, "error", err,
+		"toolsRemoved", toolsChanged, "resourcesRemoved", resourcesChanged)
 }
 
 func (s *Server) resolveSharedRuntimeStatus(gameID string) string {
@@ -2668,11 +2665,9 @@ func (s *Server) syncGABPToolsWithTimeout(client *gabp.Client, gameID string, ti
 
 	s.log.Infow("synced GABP tools to MCP with game namespacing", "gameId", gameID, "count", len(gabpTools))
 
-	// Send tools/list_changed notification to AI agents. This alerts clients
-	// that new mirrored tools are available without polling, so they can refresh
-	// direct tool access or use games.tool_names -> games.tool_detail for the
-	// stable discovery flow.
-	s.SendToolsListChangedNotification()
+	// Game tools are excluded from tools/list to prevent MCP clients from
+	// restarting the transport when the tool surface changes. Clients discover
+	// game tools via games.tool_names / games.tool_detail instead.
 
 	return nil
 }
@@ -2909,13 +2904,8 @@ func (s *Server) CleanupGameResources(gameId string) {
 	if toolsRemoved > 0 || resourcesRemoved > 0 {
 		s.log.Infow("cleaned up game resources", "gameId", gameId, "toolsRemoved", toolsRemoved, "resourcesRemoved", resourcesRemoved)
 
-		// Notify clients about changes
-		if toolsRemoved > 0 {
-			s.SendToolsListChangedNotification()
-		}
-		if resourcesRemoved > 0 {
-			s.SendResourcesListChangedNotification()
-		}
+		// Game tools are excluded from tools/list, so no list_changed
+		// notification is needed on cleanup either.
 	}
 }
 
@@ -3140,8 +3130,23 @@ func (s *Server) handleToolsList(msg *Message) *Message {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	// Build a set of game-specific tool names so we can exclude them from
+	// tools/list. Game tools are still callable via tools/call and discoverable
+	// through games.tool_names / games.tool_detail, but keeping them out of the
+	// advertised list prevents MCP clients from restarting the transport when
+	// the tool surface changes dramatically after games.connect.
+	gameToolSet := make(map[string]struct{})
+	for _, names := range s.gameTools {
+		for _, name := range names {
+			gameToolSet[name] = struct{}{}
+		}
+	}
+
 	tools := make([]Tool, 0, len(s.tools))
 	for _, handler := range s.tools {
+		if _, isGameTool := gameToolSet[handler.Tool.Name]; isGameTool {
+			continue
+		}
 		tools = append(tools, handler.Tool)
 	}
 

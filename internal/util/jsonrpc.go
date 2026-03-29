@@ -7,6 +7,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 )
@@ -314,7 +315,11 @@ func (r *AutoFrameReader) detectMode() (FramingMode, error) {
 }
 
 // AutoFrameWriter writes responses using the chosen framing mode.
+// It is safe for concurrent use; a mutex serializes all writes so that
+// notifications sent from background goroutines (e.g. GABP disconnect
+// handlers) cannot interleave with responses written by the Serve loop.
 type AutoFrameWriter struct {
+	mu     sync.Mutex
 	writer io.Writer
 	mode   FramingMode
 }
@@ -327,11 +332,15 @@ func NewAutoFrameWriter(w io.Writer) *AutoFrameWriter {
 
 // SetMode selects the framing mode used by WriteJSON.
 func (w *AutoFrameWriter) SetMode(mode FramingMode) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	w.mode = mode
 }
 
 // WriteJSON marshals and writes a JSON message using the configured framing.
 func (w *AutoFrameWriter) WriteJSON(obj interface{}) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	switch w.mode {
 	case FramingLSP:
 		return NewLSPFrameWriter(w.writer).WriteJSON(obj)
