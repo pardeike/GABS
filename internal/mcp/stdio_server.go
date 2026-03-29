@@ -39,6 +39,7 @@ type Server struct {
 	gabpDisconnects map[string]gabpDisconnectRecord
 	starter         *process.SerializedStarter // Serialized process starter
 	instanceID      string
+	stripOutputSchema bool // Strip outputSchema from tools/list responses
 }
 
 type gabpDisconnectRecord struct {
@@ -273,6 +274,7 @@ func (s *Server) SetAPIKey(apiKey string) {
 
 // RegisterGameManagementTools registers the game management tools for the new architecture
 func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration) {
+	s.stripOutputSchema = gamesConfig.StripOutputSchema
 	normalizationConfig := gamesConfig.GetToolNormalization()
 
 	// games.list tool
@@ -3142,7 +3144,11 @@ func (s *Server) handleToolsList(msg *Message) *Message {
 
 	tools := make([]Tool, 0, len(s.tools))
 	for _, handler := range s.tools {
-		tools = append(tools, handler.Tool)
+		tool := handler.Tool
+		if s.stripOutputSchema {
+			tool.OutputSchema = nil
+		}
+		tools = append(tools, tool)
 	}
 
 	result := ToolsListResult{Tools: tools}
