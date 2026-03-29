@@ -266,6 +266,36 @@ func (s *Server) SetConfigDir(configDir string) {
 	s.configDir = configDir
 }
 
+// AutoConnectRunningGames checks each configured game for an existing bridge.json
+// with a reachable GABP port and connects before the MCP client calls tools/list.
+// This makes game tools available as direct MCP tools from the first tools/list
+// response, avoiding the need for a tools/list_changed notification that can cause
+// MCP clients to restart the transport.
+func (s *Server) AutoConnectRunningGames(gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration) {
+	for _, game := range gamesConfig.ListGames() {
+		_, port, token, err := config.ReadBridgeJSON(game.ID, s.configDir)
+		if err != nil {
+			s.log.Debugw("no bridge.json for game, skipping auto-connect", "gameId", game.ID)
+			continue
+		}
+
+		connector := NewServerGABPConnector(s, backoffMin, backoffMax)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err = connector.AttemptConnection(ctx, game.ID, port, token)
+		cancel()
+
+		if err != nil {
+			s.log.Debugw("auto-connect failed for game, bridge not reachable", "gameId", game.ID, "port", port, "error", err)
+			// Clean up any partial state from the failed attempt
+			s.CleanupGameResources(game.ID)
+			s.CleanupGABPConnection(game.ID)
+			continue
+		}
+
+		s.log.Infow("auto-connected to running game", "gameId", game.ID, "port", port)
+	}
+}
+
 // SetAPIKey sets the API key for HTTP authentication
 func (s *Server) SetAPIKey(apiKey string) {
 	s.apiKey = apiKey
@@ -3130,23 +3160,8 @@ func (s *Server) handleToolsList(msg *Message) *Message {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// Build a set of game-specific tool names so we can exclude them from
-	// tools/list. Game tools are still callable via tools/call and discoverable
-	// through games.tool_names / games.tool_detail, but keeping them out of the
-	// advertised list prevents MCP clients from restarting the transport when
-	// the tool surface changes dramatically after games.connect.
-	gameToolSet := make(map[string]struct{})
-	for _, names := range s.gameTools {
-		for _, name := range names {
-			gameToolSet[name] = struct{}{}
-		}
-	}
-
 	tools := make([]Tool, 0, len(s.tools))
 	for _, handler := range s.tools {
-		if _, isGameTool := gameToolSet[handler.Tool.Name]; isGameTool {
-			continue
-		}
 		tools = append(tools, handler.Tool)
 	}
 

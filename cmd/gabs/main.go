@@ -248,6 +248,11 @@ func runServer(ctx context.Context, log util.Logger, opts options) int {
 	// Register game management tools
 	server.RegisterGameManagementTools(gamesConfig, opts.backoffMin, opts.backoffMax)
 
+	// Auto-connect to any running games that have a reachable bridge.
+	// This populates tools/list with game tools before the MCP client connects,
+	// so all game tools are available as direct MCP tools from the start.
+	server.AutoConnectRunningGames(gamesConfig, opts.backoffMin, opts.backoffMax)
+
 	// Start serving MCP according to transport
 	errCh := make(chan error, 1)
 	go func() {
