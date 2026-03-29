@@ -49,8 +49,9 @@ type GamesConfig struct {
 	Version            string                   `json:"version"`
 	Games              map[string]GameConfig    `json:"games"`
 	ToolNormalization  *ToolNormalizationConfig `json:"toolNormalization,omitempty"`
-	APIKey             string                   `json:"apiKey,omitempty"` // API key for HTTP server authentication
-	PortRanges         *PortRangeConfig         `json:"portRanges,omitempty"` // Custom port ranges for bridge connections
+	APIKey             string                   `json:"apiKey,omitempty"`             // API key for HTTP server authentication
+	PortRanges         *PortRangeConfig         `json:"portRanges,omitempty"`         // Custom port ranges for bridge connections
+	StripOutputSchema  bool                     `json:"stripOutputSchema,omitempty"`  // Strip outputSchema from tools/list for MCP clients that reject non-standard fields (e.g. Claude Code)
 }
 
 // LoadGamesConfig loads the games configuration from the standard location
