@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGamesConfig(t *testing.T) {
@@ -26,6 +27,14 @@ func TestGamesConfig(t *testing.T) {
 		if len(config.Games) != 0 {
 			t.Errorf("Expected empty games map, got %d games", len(config.Games))
 		}
+
+		processStartTimeout, gabpConnectTimeout := config.GetStartupTimeouts()
+		if processStartTimeout != 10*time.Second {
+			t.Errorf("Expected default process start timeout 10s, got %v", processStartTimeout)
+		}
+		if gabpConnectTimeout != 60*time.Second {
+			t.Errorf("Expected default GABP connect timeout 60s, got %v", gabpConnectTimeout)
+		}
 	})
 
 	t.Run("AddAndRetrieveGame", func(t *testing.T) {
@@ -38,11 +47,11 @@ func TestGamesConfig(t *testing.T) {
 			Target:      "/path/to/minecraft",
 			Description: "A test game",
 		}
-		
+
 		if err := config.AddGame(game); err != nil {
 			t.Fatalf("Failed to add valid game: %v", err)
 		}
-		
+
 		retrieved, exists := config.GetGame("minecraft")
 		if !exists {
 			t.Error("Expected game to exist after adding")
@@ -60,6 +69,12 @@ func TestGamesConfig(t *testing.T) {
 	t.Run("SaveAndLoadConfig", func(t *testing.T) {
 		config := &GamesConfig{
 			Version: "1.0",
+			Timeouts: &TimeoutsConfig{
+				Startup: &StartupTimeoutsConfig{
+					ProcessStartSeconds: 25,
+					GABPConnectSeconds:  90,
+				},
+			},
 			Games: map[string]GameConfig{
 				"rimworld": {
 					ID:         "rimworld",
@@ -96,6 +111,14 @@ func TestGamesConfig(t *testing.T) {
 		if game.Target != "294100" {
 			t.Errorf("Expected target '294100', got '%s'", game.Target)
 		}
+
+		processStartTimeout, gabpConnectTimeout := loadedConfig.GetStartupTimeouts()
+		if processStartTimeout != 25*time.Second {
+			t.Errorf("Expected process start timeout 25s, got %v", processStartTimeout)
+		}
+		if gabpConnectTimeout != 90*time.Second {
+			t.Errorf("Expected GABP connect timeout 90s, got %v", gabpConnectTimeout)
+		}
 	})
 
 	t.Run("RemoveGame", func(t *testing.T) {
@@ -106,7 +129,7 @@ func TestGamesConfig(t *testing.T) {
 		if err := config.AddGame(game); err != nil {
 			t.Fatalf("Failed to add valid game: %v", err)
 		}
-		
+
 		// Verify it exists
 		_, exists := config.GetGame("testgame")
 		if !exists {
@@ -161,13 +184,43 @@ func TestGamesConfig(t *testing.T) {
 	})
 }
 
+func TestGamesConfigStartupTimeoutDefaults(t *testing.T) {
+	t.Run("MissingTimeoutConfigUsesDefaults", func(t *testing.T) {
+		cfg := &GamesConfig{}
+
+		processStartTimeout, gabpConnectTimeout := cfg.GetStartupTimeouts()
+		if processStartTimeout != 10*time.Second {
+			t.Fatalf("expected default process start timeout 10s, got %v", processStartTimeout)
+		}
+		if gabpConnectTimeout != 60*time.Second {
+			t.Fatalf("expected default GABP connect timeout 60s, got %v", gabpConnectTimeout)
+		}
+	})
+
+	t.Run("ZeroTimeoutValuesFallbackToDefaults", func(t *testing.T) {
+		cfg := &GamesConfig{
+			Timeouts: &TimeoutsConfig{
+				Startup: &StartupTimeoutsConfig{},
+			},
+		}
+
+		processStartTimeout, gabpConnectTimeout := cfg.GetStartupTimeouts()
+		if processStartTimeout != 10*time.Second {
+			t.Fatalf("expected default process start timeout 10s, got %v", processStartTimeout)
+		}
+		if gabpConnectTimeout != 60*time.Second {
+			t.Fatalf("expected default GABP connect timeout 60s, got %v", gabpConnectTimeout)
+		}
+	})
+}
+
 func TestNewGabsDirectoryStructure(t *testing.T) {
 	t.Run("ConfigPathUsesHomeGabsDirectory", func(t *testing.T) {
 		cp, err := NewConfigPaths("")
 		if err != nil {
 			t.Fatalf("Failed to create config paths: %v", err)
 		}
-		
+
 		configPath := cp.GetMainConfigPath()
 
 		// Verify the path ends with .gabs/config.json
@@ -197,7 +250,7 @@ func TestNewGabsDirectoryStructure(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to create config paths with custom dir: %v", err)
 		}
-		
+
 		configPath := cp.GetMainConfigPath()
 
 		expectedPath := filepath.Join(customDir, "config.json")
@@ -263,7 +316,7 @@ func TestNewGabsDirectoryStructure(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to create config paths: %v", err)
 		}
-		
+
 		configDir := cp.GetGameDir(gameID)
 
 		// Verify the path contains .gabs
@@ -410,7 +463,7 @@ func TestGameConfigValidation(t *testing.T) {
 			LaunchMode: "DirectPath",
 			Target:     "/path/to/game",
 		}
-		
+
 		if err := game.Validate(); err != nil {
 			t.Errorf("Expected valid game to pass validation, got: %v", err)
 		}
@@ -424,7 +477,7 @@ func TestGameConfigValidation(t *testing.T) {
 			Target:          "294100",
 			StopProcessName: "RimWorldWin64.exe",
 		}
-		
+
 		if err := game.Validate(); err != nil {
 			t.Errorf("Expected valid Steam game to pass validation, got: %v", err)
 		}
@@ -438,7 +491,7 @@ func TestGameConfigValidation(t *testing.T) {
 			Target:     "294100",
 			// Missing StopProcessName
 		}
-		
+
 		err := game.Validate()
 		if err == nil {
 			t.Error("Expected Steam game without stopProcessName to fail validation")
@@ -456,7 +509,7 @@ func TestGameConfigValidation(t *testing.T) {
 			Target:     "epic-id",
 			// Missing StopProcessName
 		}
-		
+
 		err := game.Validate()
 		if err == nil {
 			t.Error("Expected Epic game without stopProcessName to fail validation")
@@ -514,7 +567,7 @@ func TestGameConfigValidation(t *testing.T) {
 			LaunchMode: "InvalidMode",
 			Target:     "/path",
 		}
-		
+
 		err := game.Validate()
 		if err == nil {
 			t.Error("Expected validation to fail for invalid launch mode")
@@ -531,7 +584,7 @@ func TestGameConfigValidation(t *testing.T) {
 			LaunchMode: "DirectPath",
 			Target:     "", // Empty target should be allowed for DirectPath
 		}
-		
+
 		err := game.Validate()
 		if err != nil {
 			t.Errorf("Expected validation to pass for DirectPath with empty target, got: %v", err)

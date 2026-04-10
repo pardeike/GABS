@@ -18,6 +18,12 @@
       }
     ]
   },
+  "timeouts": {
+    "startup": {
+      "processStartSeconds": 10,
+      "gabpConnectSeconds": 60
+    }
+  },
   "games": {
     "minecraft": {
       "id": "minecraft",

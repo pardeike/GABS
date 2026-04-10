@@ -23,22 +23,22 @@ import (
 
 // Server runs MCP over stdio.
 type Server struct {
-	log             util.Logger
-	tools           map[string]*ToolHandler
-	resources       map[string]*ResourceHandler
-	games           map[string]process.ControllerInterface // Track running games
-	configDir       string                                 // Config directory for bridge files
-	apiKey          string                                 // API key for HTTP authentication
-	mu              sync.RWMutex
-	writers         []util.FrameWriter      // Track client connections for notifications
-	writersMu       sync.RWMutex            // Protect writers slice
-	gameTools       map[string][]string     // Track which tools belong to which games
-	gameResources   map[string][]string     // Track which resources belong to which games
-	gabpClients     map[string]*gabp.Client // Track GABP connections per game
-	gabpAttention   map[string]*gameAttentionState
-	gabpDisconnects map[string]gabpDisconnectRecord
-	starter         *process.SerializedStarter // Serialized process starter
-	instanceID      string
+	log               util.Logger
+	tools             map[string]*ToolHandler
+	resources         map[string]*ResourceHandler
+	games             map[string]process.ControllerInterface // Track running games
+	configDir         string                                 // Config directory for bridge files
+	apiKey            string                                 // API key for HTTP authentication
+	mu                sync.RWMutex
+	writers           []util.FrameWriter      // Track client connections for notifications
+	writersMu         sync.RWMutex            // Protect writers slice
+	gameTools         map[string][]string     // Track which tools belong to which games
+	gameResources     map[string][]string     // Track which resources belong to which games
+	gabpClients       map[string]*gabp.Client // Track GABP connections per game
+	gabpAttention     map[string]*gameAttentionState
+	gabpDisconnects   map[string]gabpDisconnectRecord
+	starter           *process.SerializedStarter // Serialized process starter
+	instanceID        string
 	stripOutputSchema bool // Strip outputSchema from tools/list responses
 }
 
@@ -276,6 +276,10 @@ func (s *Server) SetAPIKey(apiKey string) {
 func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration) {
 	s.stripOutputSchema = gamesConfig.StripOutputSchema
 	normalizationConfig := gamesConfig.GetToolNormalization()
+	if gamesConfig.Timeouts != nil && gamesConfig.Timeouts.Startup != nil {
+		processStartTimeout, gabpConnectTimeout := gamesConfig.GetStartupTimeouts()
+		s.starter.SetTimeouts(processStartTimeout, gabpConnectTimeout)
+	}
 
 	// games.list tool
 	s.RegisterToolWithConfig(Tool{
