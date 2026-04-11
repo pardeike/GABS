@@ -30,7 +30,7 @@ type SerializedStarter struct {
 func NewSerializedStarter() *SerializedStarter {
 	return &SerializedStarter{
 		processStartTimeout: 10 * time.Second, // Time to wait for process to appear in system
-		gabpConnectTimeout:  10 * time.Second, // Short startup window; use games.connect later if the mod loads slowly
+		gabpConnectTimeout:  60 * time.Second, // Startup window for mod bridge availability
 	}
 }
 
@@ -167,6 +167,11 @@ func (s *SerializedStarter) attemptGABPConnection(
 func (s *SerializedStarter) SetTimeouts(processStart, gabpConnect time.Duration) {
 	s.processStartTimeout = processStart
 	s.gabpConnectTimeout = gabpConnect
+}
+
+// GetTimeouts returns the current timeout values.
+func (s *SerializedStarter) GetTimeouts() (time.Duration, time.Duration) {
+	return s.processStartTimeout, s.gabpConnectTimeout
 }
 
 // GABPConnector interface for testing and abstraction

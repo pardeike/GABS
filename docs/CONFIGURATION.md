@@ -121,6 +121,12 @@ the GABP wire version.
     "maxToolNameLength": 64,
     "preserveOriginalName": true
   },
+  "timeouts": {
+    "startup": {
+      "processStartSeconds": 10,
+      "gabpConnectSeconds": 60
+    }
+  },
   "games": {
     "minecraft": {
       "id": "minecraft",
@@ -251,6 +257,39 @@ The `toolNormalization` section supports these options:
     "enableOpenAINormalization": true,
     "maxToolNameLength": 64,
     "preserveOriginalName": true
+  },
+  "games": {
+    // ... your game configurations
+  }
+}
+```
+
+## Startup Timeout Configuration
+
+If your game takes longer to appear in the process list or longer for its GABP
+mod bridge to start listening, you can override the startup waits in
+`~/.gabs/config.json`.
+
+### Startup Timeout Options
+
+The `timeouts.startup` section supports these options:
+
+- **`processStartSeconds`** (integer): How long GABS waits for the launched game
+  process to become detectable in the OS process list (default: `10`)
+- **`gabpConnectSeconds`** (integer): How long `games.start` waits for the
+  game's GABP server to become available before returning control to you
+  (default: `60`)
+
+### Example Configuration
+
+```json
+{
+  "version": "1.0",
+  "timeouts": {
+    "startup": {
+      "processStartSeconds": 20,
+      "gabpConnectSeconds": 120
+    }
   },
   "games": {
     // ... your game configurations

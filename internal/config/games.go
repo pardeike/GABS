@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // GameConfig represents a single game configuration
@@ -44,15 +45,32 @@ type PortRangeConfig struct {
 	CustomRanges []PortRange `json:"customRanges,omitempty"`
 }
 
+// StartupTimeoutsConfig configures startup-related wait windows in seconds.
+type StartupTimeoutsConfig struct {
+	ProcessStartSeconds int `json:"processStartSeconds,omitempty"`
+	GABPConnectSeconds  int `json:"gabpConnectSeconds,omitempty"`
+}
+
+// TimeoutsConfig groups configurable timeout settings.
+type TimeoutsConfig struct {
+	Startup *StartupTimeoutsConfig `json:"startup,omitempty"`
+}
+
 // GamesConfig represents the main GABS configuration
 type GamesConfig struct {
-	Version            string                   `json:"version"`
-	Games              map[string]GameConfig    `json:"games"`
-	ToolNormalization  *ToolNormalizationConfig `json:"toolNormalization,omitempty"`
-	APIKey             string                   `json:"apiKey,omitempty"` // API key for HTTP server authentication
-	PortRanges         *PortRangeConfig         `json:"portRanges,omitempty"` // Custom port ranges for bridge connections
-	StripOutputSchema  bool                     `json:"stripOutputSchema,omitempty"` // Strip outputSchema from tools/list for MCP clients that reject non-standard fields (e.g. Claude Code)
+	Version           string                   `json:"version"`
+	Games             map[string]GameConfig    `json:"games"`
+	ToolNormalization *ToolNormalizationConfig `json:"toolNormalization,omitempty"`
+	APIKey            string                   `json:"apiKey,omitempty"`            // API key for HTTP server authentication
+	PortRanges        *PortRangeConfig         `json:"portRanges,omitempty"`        // Custom port ranges for bridge connections
+	Timeouts          *TimeoutsConfig          `json:"timeouts,omitempty"`          // Configurable timeout settings
+	StripOutputSchema bool                     `json:"stripOutputSchema,omitempty"` // Strip outputSchema from tools/list for MCP clients that reject non-standard fields (e.g. Claude Code)
 }
+
+const (
+	defaultProcessStartTimeoutSeconds = 10
+	defaultGABPConnectTimeoutSeconds  = 60
+)
 
 // LoadGamesConfig loads the games configuration from the standard location
 func LoadGamesConfig() (*GamesConfig, error) {
@@ -114,6 +132,18 @@ func LoadGamesConfigFromPath(configPath string) (*GamesConfig, error) {
 		config.PortRanges = &PortRangeConfig{}
 	}
 
+	// Initialize timeout defaults for explicitly configured timeout sections.
+	if config.Timeouts != nil && config.Timeouts.Startup != nil {
+		if config.Timeouts.Startup.ProcessStartSeconds <= 0 {
+			config.Timeouts.Startup.ProcessStartSeconds = defaultProcessStartTimeoutSeconds
+		}
+		if config.Timeouts.Startup.GABPConnectSeconds <= 0 {
+			config.Timeouts.Startup.GABPConnectSeconds = defaultGABPConnectTimeoutSeconds
+		}
+	} else {
+		config.Timeouts = nil
+	}
+
 	return &config, nil
 }
 
@@ -123,7 +153,7 @@ func SaveGamesConfig(config *GamesConfig) error {
 }
 
 // SaveGamesConfigToDir saves games configuration to the specified config directory
-// If configDir is empty, uses the default location  
+// If configDir is empty, uses the default location
 func SaveGamesConfigToDir(config *GamesConfig, configDir string) error {
 	cp, err := NewConfigPaths(configDir)
 	if err != nil {
@@ -254,4 +284,25 @@ func (c *GamesConfig) GetToolNormalization() *ToolNormalizationConfig {
 	return c.ToolNormalization
 }
 
+func defaultStartupTimeoutsConfig() *StartupTimeoutsConfig {
+	return &StartupTimeoutsConfig{
+		ProcessStartSeconds: defaultProcessStartTimeoutSeconds,
+		GABPConnectSeconds:  defaultGABPConnectTimeoutSeconds,
+	}
+}
 
+// GetStartupTimeouts returns startup timeout settings with defaults applied.
+func (c *GamesConfig) GetStartupTimeouts() (time.Duration, time.Duration) {
+	startup := defaultStartupTimeoutsConfig()
+	if c != nil && c.Timeouts != nil && c.Timeouts.Startup != nil {
+		if c.Timeouts.Startup.ProcessStartSeconds > 0 {
+			startup.ProcessStartSeconds = c.Timeouts.Startup.ProcessStartSeconds
+		}
+		if c.Timeouts.Startup.GABPConnectSeconds > 0 {
+			startup.GABPConnectSeconds = c.Timeouts.Startup.GABPConnectSeconds
+		}
+	}
+
+	return time.Duration(startup.ProcessStartSeconds) * time.Second,
+		time.Duration(startup.GABPConnectSeconds) * time.Second
+}

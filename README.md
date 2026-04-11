@@ -112,6 +112,9 @@ args = ["server"]
 If your client uses strict OpenAI-style tool naming, enable
 `toolNormalization` in `~/.gabs/config.json`. See
 [OpenAI Tool Normalization](docs/OPENAI_TOOL_NORMALIZATION.md).
+If a game or mod starts slowly, you can also tune startup waits with the
+`timeouts.startup` section described in the
+[Configuration Guide](docs/CONFIGURATION.md).
 
 ### 4. Try these prompts
 

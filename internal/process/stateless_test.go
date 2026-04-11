@@ -167,3 +167,15 @@ func TestSerializedStarterStopsWaitingWhenProcessExitsDuringGABPConnect(t *testi
 		t.Fatalf("expected fast failure after process exit, took %v", duration)
 	}
 }
+
+func TestSerializedStarterDefaultTimeouts(t *testing.T) {
+	starter := NewSerializedStarter()
+
+	processStartTimeout, gabpConnectTimeout := starter.GetTimeouts()
+	if processStartTimeout != 10*time.Second {
+		t.Fatalf("expected default process start timeout 10s, got %v", processStartTimeout)
+	}
+	if gabpConnectTimeout != 60*time.Second {
+		t.Fatalf("expected default GABP connect timeout 60s, got %v", gabpConnectTimeout)
+	}
+}
