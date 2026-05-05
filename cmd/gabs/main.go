@@ -25,7 +25,7 @@ import (
 	"github.com/pardeike/gabs/internal/version"
 )
 
-const defaultBackoff = "100ms..5s"
+const defaultBackoff = "100ms..1s"
 
 type options struct {
 	subcmd string

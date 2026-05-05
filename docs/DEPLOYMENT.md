@@ -277,7 +277,7 @@ Potential improvements being considered:
 |------|-------------|---------|
 | `--addr` | HTTP server address used by `gabs server http` | `localhost:8080` |
 | `--http` | HTTP server address (e.g., :8080, localhost:8080) | stdio only |
-| `--reconnectBackoff` | GABP reconnect retry window (for example `100ms..5s`) | `100ms..5s` |
+| `--reconnectBackoff` | GABP reconnect retry window (for example `100ms..1s`) | `100ms..1s` |
 | `--configDir` | Override config directory | Platform-specific |
 | `--log-level` | Log level: trace\|debug\|info\|warn\|error | info |
 | `--grace` | Graceful stop timeout before kill | 3s |
