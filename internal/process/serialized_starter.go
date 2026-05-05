@@ -147,6 +147,7 @@ func (s *SerializedStarter) attemptGABPConnection(
 	}()
 
 	err := connector.AttemptConnection(timeoutCtx, gameID, port, token)
+	timeoutCancel()
 	<-monitorDone
 
 	gameStillRunning := controllerLooksAlive(controller)

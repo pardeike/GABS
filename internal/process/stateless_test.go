@@ -17,6 +17,12 @@ func (blockingTestConnector) AttemptConnection(ctx context.Context, gameID strin
 	return ctx.Err()
 }
 
+type successfulTestConnector struct{}
+
+func (successfulTestConnector) AttemptConnection(ctx context.Context, gameID string, port int, token string) error {
+	return nil
+}
+
 // TestControllerStateless verifies the controller is truly stateless
 func TestControllerStateless(t *testing.T) {
 	t.Run("DirectProcessStatelessCheck", func(t *testing.T) {
@@ -123,6 +129,41 @@ func TestStatelessApproach(t *testing.T) {
 
 	t.Logf("Stateless queries: Call 1: %v, Call 2: %v", running1, running2)
 	t.Log("✅ Each call queries actual system state - no internal state maintained")
+}
+
+func TestSerializedStarterReturnsPromptlyAfterGABPConnects(t *testing.T) {
+	starter := NewSerializedStarter()
+	starter.SetTimeouts(2*time.Second, 5*time.Second)
+
+	controller := NewController()
+	spec := LaunchSpec{
+		GameId:   "test-successful-gabp",
+		Mode:     "DirectPath",
+		PathOrId: "/bin/sleep",
+		Args:     []string{"3"},
+	}
+
+	if err := controller.Configure(spec); err != nil {
+		t.Fatalf("Configure error: %v", err)
+	}
+	defer controller.Stop(time.Second)
+
+	start := time.Now()
+	result := starter.StartWithVerification(controller, successfulTestConnector{}, spec.GameId, 0, "")
+	duration := time.Since(start)
+
+	if result.Error != nil {
+		t.Fatalf("unexpected start error: %v", result.Error)
+	}
+	if !result.GABPConnected {
+		t.Fatal("expected GABP connection success")
+	}
+	if !result.GameStillRunning {
+		t.Fatal("expected game process to still be running")
+	}
+	if duration > 2*time.Second {
+		t.Fatalf("expected successful GABP connection to return promptly, took %v", duration)
+	}
 }
 
 func TestSerializedStarterStopsWaitingWhenProcessExitsDuringGABPConnect(t *testing.T) {
