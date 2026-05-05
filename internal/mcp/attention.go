@@ -141,9 +141,9 @@ func (s *Server) setupGABPAttention(gameID string, client *gabp.Client, timeout 
 		return
 	}
 
-	if err := client.SubscribeEvents(channels, func(channel string, seq int, payload interface{}) {
+	if err := client.SubscribeEventsWithTimeout(channels, func(channel string, seq int, payload interface{}) {
 		s.handleGABPAttentionEvent(gameID, channel, seq, payload)
-	}); err != nil {
+	}, timeout); err != nil {
 		s.log.Warnw("failed to subscribe to GABP attention events", "gameId", gameID, "error", err)
 	}
 }

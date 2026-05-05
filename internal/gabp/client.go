@@ -491,6 +491,11 @@ func (c *Client) CallToolWithTimeout(name string, args map[string]any, timeout t
 
 // SubscribeEvents subscribes to event channels
 func (c *Client) SubscribeEvents(channels []string, handler EventHandler) error {
+	return c.SubscribeEventsWithTimeout(channels, handler, defaultRequestTimeout)
+}
+
+// SubscribeEventsWithTimeout subscribes to event channels with an explicit request timeout.
+func (c *Client) SubscribeEventsWithTimeout(channels []string, handler EventHandler, timeout time.Duration) error {
 	// Register handler
 	c.mu.Lock()
 	for _, ch := range channels {
@@ -502,7 +507,7 @@ func (c *Client) SubscribeEvents(channels []string, handler EventHandler) error 
 	params := map[string]interface{}{
 		"channels": channels,
 	}
-	_, err := c.sendRequest("events/subscribe", params)
+	_, err := c.sendRequestWithTimeout("events/subscribe", params, timeout)
 	return err
 }
 
