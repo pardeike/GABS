@@ -17,6 +17,7 @@ import (
 var (
 	steamLaunchCommandFactory = defaultSteamLaunchCommandFactory
 	epicLaunchCommandFactory  = defaultEpicLaunchCommandFactory
+	findProcessesByNameFunc   = findProcessesByName
 )
 
 type LaunchSpec struct {
@@ -168,7 +169,7 @@ func (c *Controller) IsRunning() bool {
 	// For Steam/Epic launchers, check for the actual game process by name if configured
 	if c.spec.Mode == "SteamAppId" || c.spec.Mode == "EpicAppId" {
 		if c.spec.StopProcessName != "" {
-			pids, err := findProcessesByName(c.spec.StopProcessName)
+			pids, err := findProcessesByNameFunc(c.spec.StopProcessName)
 			if err != nil {
 				return false
 			}
@@ -214,7 +215,7 @@ func (c *Controller) isRunningByName() bool {
 	if c.spec.StopProcessName == "" {
 		return false
 	}
-	pids, err := findProcessesByName(c.spec.StopProcessName)
+	pids, err := findProcessesByNameFunc(c.spec.StopProcessName)
 	if err != nil {
 		return false
 	}
@@ -223,6 +224,10 @@ func (c *Controller) isRunningByName() bool {
 
 // WaitForProcessStart waits for the process to be detectable in the system
 func (c *Controller) WaitForProcessStart(timeout time.Duration) error {
+	if c.usesLauncherProcessNameTracking() {
+		return c.waitForProcessNameStart(timeout)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -247,6 +252,33 @@ func (c *Controller) WaitForProcessStart(timeout time.Duration) error {
 			default:
 			}
 			if c.IsRunning() {
+				return nil
+			}
+		}
+	}
+}
+
+func (c *Controller) usesLauncherProcessNameTracking() bool {
+	return (c.spec.Mode == "SteamAppId" || c.spec.Mode == "EpicAppId") && c.spec.StopProcessName != ""
+}
+
+func (c *Controller) waitForProcessNameStart(timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return &ProcessError{
+				Type:    ProcessErrorTypeStart,
+				Context: fmt.Sprintf("timed out waiting for %s to start", c.spec.GameId),
+				Err:     fmt.Errorf("process %q not found in system after %v", c.spec.StopProcessName, timeout),
+			}
+		case <-ticker.C:
+			if c.isRunningByName() {
 				return nil
 			}
 		}
@@ -457,7 +489,7 @@ func (c *Controller) getBridgePath() string {
 }
 
 func (c *Controller) stopByProcessName(processName string, force bool, grace time.Duration) error {
-	pids, err := findProcessesByName(processName)
+	pids, err := findProcessesByNameFunc(processName)
 	if err != nil {
 		return fmt.Errorf("failed to find processes named '%s': %w", processName, err)
 	}

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBridgePathGeneration(t *testing.T) {
@@ -103,4 +104,41 @@ func TestEnvironmentVariables(t *testing.T) {
 	t.Logf("GABS_BRIDGE_PATH would be set to: %s", bridgePath)
 	t.Logf("GABP_SERVER_PORT would be set to: %d", controller.bridgeInfo.Port)
 	t.Logf("GABP_TOKEN would be set to: %s", controller.bridgeInfo.Token)
+}
+
+func TestLauncherWaitForProcessStartUsesStopProcessName(t *testing.T) {
+	controller := &Controller{}
+	spec := LaunchSpec{
+		GameId:          "steam-test",
+		Mode:            "SteamAppId",
+		PathOrId:        "12345",
+		StopProcessName: "Real Game Process",
+	}
+
+	if err := controller.Configure(spec); err != nil {
+		t.Fatalf("Configure failed: %v", err)
+	}
+
+	controller.waitDone = make(chan struct{})
+	close(controller.waitDone)
+
+	originalFinder := findProcessesByNameFunc
+	findCalls := 0
+	findProcessesByNameFunc = func(name string) ([]int, error) {
+		findCalls++
+		if name != spec.StopProcessName {
+			t.Fatalf("expected lookup for %q, got %q", spec.StopProcessName, name)
+		}
+		return []int{1234}, nil
+	}
+	t.Cleanup(func() {
+		findProcessesByNameFunc = originalFinder
+	})
+
+	if err := controller.WaitForProcessStart(2 * time.Second); err != nil {
+		t.Fatalf("WaitForProcessStart failed: %v", err)
+	}
+	if findCalls == 0 {
+		t.Fatal("expected launcher startup wait to inspect the configured game process name")
+	}
 }

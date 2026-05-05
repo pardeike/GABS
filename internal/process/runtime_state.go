@@ -148,7 +148,7 @@ func ResolveRuntimeStateStatus(state *RuntimeState) string {
 	}
 
 	if state.StopProcessName != "" {
-		pids, err := findProcessesByName(state.StopProcessName)
+		pids, err := findProcessesByNameFunc(state.StopProcessName)
 		if err == nil && len(pids) > 0 {
 			return RuntimeStateStatusRunning
 		}
