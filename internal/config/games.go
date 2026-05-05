@@ -23,8 +23,8 @@ type GameConfig struct {
 
 // ToolNormalizationConfig configures how MCP tool names are normalized for different clients
 type ToolNormalizationConfig struct {
-	// EnableOpenAINormalization converts tool names to be OpenAI API compatible
-	// Replaces dots with underscores and enforces 64-character limit
+	// EnableOpenAINormalization converts public MCP tool names to the strict-safe
+	// subset accepted by clients that reject dotted tool names.
 	EnableOpenAINormalization bool `json:"enableOpenAINormalization,omitempty"`
 	// MaxToolNameLength restricts tool names to this length (default: 64 for OpenAI compatibility)
 	MaxToolNameLength int `json:"maxToolNameLength,omitempty"`
@@ -95,9 +95,9 @@ func LoadGamesConfigFromPath(configPath string) (*GamesConfig, error) {
 			Version: "1.0",
 			Games:   make(map[string]GameConfig),
 			ToolNormalization: &ToolNormalizationConfig{
-				EnableOpenAINormalization: false, // Off by default
-				MaxToolNameLength:         64,    // OpenAI limit
-				PreserveOriginalName:      true,  // Always preserve original name
+				EnableOpenAINormalization: true, // Strict-safe by default
+				MaxToolNameLength:         64,   // OpenAI limit
+				PreserveOriginalName:      true, // Always preserve original name
 			},
 			PortRanges: &PortRangeConfig{}, // Empty - will use defaults
 		}, nil
@@ -116,9 +116,9 @@ func LoadGamesConfigFromPath(configPath string) (*GamesConfig, error) {
 	// Ensure tool normalization defaults are set if not present in config
 	if config.ToolNormalization == nil {
 		config.ToolNormalization = &ToolNormalizationConfig{
-			EnableOpenAINormalization: false, // Off by default
-			MaxToolNameLength:         64,    // OpenAI limit
-			PreserveOriginalName:      true,  // Always preserve original name
+			EnableOpenAINormalization: true, // Strict-safe by default
+			MaxToolNameLength:         64,   // OpenAI limit
+			PreserveOriginalName:      true, // Always preserve original name
 		}
 	} else {
 		// Set defaults for missing fields
@@ -276,7 +276,7 @@ func (c *GamesConfig) ListGames() []GameConfig {
 func (c *GamesConfig) GetToolNormalization() *ToolNormalizationConfig {
 	if c.ToolNormalization == nil {
 		return &ToolNormalizationConfig{
-			EnableOpenAINormalization: false,
+			EnableOpenAINormalization: true,
 			MaxToolNameLength:         64,
 			PreserveOriginalName:      true,
 		}

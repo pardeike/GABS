@@ -12,21 +12,22 @@ GABS works as an MCP (Model Context Protocol) server. This means AI assistants c
 
 ### Available MCP Tools
 
-Once GABS is running, AI can use these tools:
+Once GABS is running, AI can use these tools. Strict-safe names are advertised
+by default; older dotted names remain accepted as call aliases.
 
-- **`games.list`** - Show configured game IDs
-- **`games.show`** - Show configuration and validation details for one game
-- **`games.start`** - Start a game: `{"gameId": "minecraft"}`
-- **`games.stop`** - Stop a game gracefully: `{"gameId": "minecraft"}`
-- **`games.kill`** - Force quit a game: `{"gameId": "minecraft"}`
-- **`games.status`** - Check if games are running: `{"gameId": "minecraft"}` or all games
-- **`games.tool_names`** - Discover compact mirrored tool names
-- **`games.tool_detail`** - Inspect one mirrored tool's schema
-- **`games.tools`** - Fetch the richer compatibility listing of mirrored tools
-- **`games.connect`** - Attach to a running game's GABP server after the mod loads or after a GABS restart
-- **`games.get_attention`** - Inspect a game's current blocking attention item
-- **`games.ack_attention`** - Acknowledge the current blocking attention item and resume normal calls
-- **`games.call_tool`** - Call a mirrored game tool through the stable core surface
+- **`games_list`** - Show configured game IDs
+- **`games_show`** - Show configuration and validation details for one game
+- **`games_start`** - Start a game: `{"gameId": "minecraft"}`
+- **`games_stop`** - Stop a game gracefully: `{"gameId": "minecraft"}`
+- **`games_kill`** - Force quit a game: `{"gameId": "minecraft"}`
+- **`games_status`** - Check if games are running: `{"gameId": "minecraft"}` or all games
+- **`games_tool_names`** - Discover compact mirrored tool names
+- **`games_tool_detail`** - Inspect one mirrored tool's schema
+- **`games_tools`** - Fetch the richer compatibility listing of mirrored tools
+- **`games_connect`** - Attach to a running game's GABP server after the mod loads or after a GABS restart
+- **`games_get_attention`** - Inspect a game's current blocking attention item
+- **`games_ack_attention`** - Acknowledge the current blocking attention item and resume normal calls
+- **`games_call_tool`** - Call a mirrored game tool through the stable core surface
 
 **Pro tip**: You can use either the game ID (`"rimworld"`) or the launch target (`"294100"` for Steam) in any tool.
 
@@ -35,10 +36,10 @@ Once GABS is running, AI can use these tools:
 GABS coordinates live sessions per game. If one GABS session already owns a
 running or starting game:
 
-- `games.start` returns quickly instead of launching a duplicate copy
-- `games.connect` returns quickly instead of waiting on a competing bridge
+- `games_start` returns quickly instead of launching a duplicate copy
+- `games_connect` returns quickly instead of waiting on a competing bridge
   connection
-- `games.status` may report that another GABS session owns the process
+- `games_status` may report that another GABS session owns the process
 
 If you intentionally want the current GABS session to take ownership of a
 running game, call:
@@ -50,7 +51,7 @@ running game, call:
 }
 ```
 
-with `games.connect`. This defaults to `false`.
+with `games_connect`. This defaults to `false`.
 
 ## Attention-Aware Bridges
 
@@ -61,16 +62,17 @@ When a connected bridge advertises `attention/current` and `attention/ack`,
 GABS can gate normal game-bound tool calls until the current attention item is
 reviewed and acknowledged. The recovery flow is:
 
-1. Call `games.get_attention`
+1. Call `games_get_attention`
 2. Inspect the returned diagnostics or follow-up tooling
-3. Call `games.ack_attention` with the returned `attentionId`
+3. Call `games_ack_attention` with the returned `attentionId`
 4. Retry the original game call
 
 ## Setting Up AI Assistants
 
 ### OpenAI API Integration
 
-For OpenAI API compatibility, you may need to enable tool name normalization. Add this to your configuration:
+Strict-safe tool name normalization is enabled by default when
+`toolNormalization` is omitted. Keep it enabled for OpenAI and Claude variants:
 
 ```json
 {
@@ -82,7 +84,9 @@ For OpenAI API compatibility, you may need to enable tool name normalization. Ad
 }
 ```
 
-This converts tool names like `minecraft.inventory.get` to `minecraft_inventory_get` for OpenAI compatibility. See [OpenAI Tool Normalization Guide](OPENAI_TOOL_NORMALIZATION.md) for complete details.
+This converts tool names like `minecraft.inventory.get` to
+`minecraft_inventory_get` for client compatibility. See
+[Tool Normalization Guide](OPENAI_TOOL_NORMALIZATION.md) for complete details.
 
 ### Claude Desktop
 
@@ -129,15 +133,15 @@ import mcp_client
 client = mcp_client.connect_stdio(["/path/to/gabs", "server"])
 
 # List all games
-games = client.call_tool("games.list", {})
+games = client.call_tool("games_list", {})
 print("Available games:", games)
 
 # Start a specific game
-result = client.call_tool("games.start", {"gameId": "minecraft"})
+result = client.call_tool("games_start", {"gameId": "minecraft"})
 print("Start result:", result)
 
 # Check status
-status = client.call_tool("games.status", {"gameId": "minecraft"})
+status = client.call_tool("games_status", {"gameId": "minecraft"})
 print("Game status:", status)
 ```
 
@@ -225,7 +229,7 @@ curl -X POST http://localhost:8080/mcp \
     "id": 1, 
     "method": "tools/call", 
     "params": {
-      "name": "games.list", 
+      "name": "games_list",
       "arguments": {}
     }
   }'

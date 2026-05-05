@@ -30,14 +30,16 @@ type Server struct {
 	configDir         string                                 // Config directory for bridge files
 	apiKey            string                                 // API key for HTTP authentication
 	mu                sync.RWMutex
-	writers           []util.FrameWriter      // Track client connections for notifications
-	writersMu         sync.RWMutex            // Protect writers slice
-	gameTools         map[string][]string     // Track which tools belong to which games
-	gameResources     map[string][]string     // Track which resources belong to which games
-	gabpClients       map[string]*gabp.Client // Track GABP connections per game
+	writers           []util.FrameWriter       // Track client connections for notifications
+	writersMu         sync.RWMutex             // Protect writers slice
+	gameTools         map[string][]string      // Track which tools belong to which games
+	gameToolAliases   map[string]gameToolAlias // Resolve strict-safe and legacy names back to GABP names
+	gameResources     map[string][]string      // Track which resources belong to which games
+	gabpClients       map[string]*gabp.Client  // Track GABP connections per game
 	gabpAttention     map[string]*gameAttentionState
 	gabpDisconnects   map[string]gabpDisconnectRecord
 	starter           *process.SerializedStarter // Serialized process starter
+	gamesConfig       *config.GamesConfig
 	instanceID        string
 	stripOutputSchema bool // Strip outputSchema from tools/list responses
 }
@@ -65,9 +67,9 @@ func (e *gameAlreadyActiveError) Error() string {
 func (e *gameAlreadyActiveError) ToolMessage(game config.GameConfig) string {
 	switch e.status {
 	case process.RuntimeStateStatusStarting:
-		return fmt.Sprintf("Game '%s' (%s) is already starting. Wait for launch to finish, then use games.connect if you need to attach to the existing instance.", game.ID, game.Name)
+		return fmt.Sprintf("Game '%s' (%s) is already starting. Wait for launch to finish, then use games_connect if you need to attach to the existing instance.", game.ID, game.Name)
 	default:
-		return fmt.Sprintf("Game '%s' (%s) is already running. Use games.status or games.connect instead of starting it again.", game.ID, game.Name)
+		return fmt.Sprintf("Game '%s' (%s) is already running. Use games_status or games_connect instead of starting it again.", game.ID, game.Name)
 	}
 }
 
@@ -92,6 +94,7 @@ func NewServer(log util.Logger) *Server {
 		configDir:       "", // Will be set by SetConfigDir
 		writers:         make([]util.FrameWriter, 0),
 		gameTools:       make(map[string][]string),
+		gameToolAliases: make(map[string]gameToolAlias),
 		gameResources:   make(map[string][]string),
 		gabpClients:     make(map[string]*gabp.Client),
 		gabpAttention:   make(map[string]*gameAttentionState),
@@ -111,6 +114,7 @@ func NewServerForTesting(log util.Logger) *Server {
 		configDir:       "", // Will be set by SetConfigDir
 		writers:         make([]util.FrameWriter, 0),
 		gameTools:       make(map[string][]string),
+		gameToolAliases: make(map[string]gameToolAlias),
 		gameResources:   make(map[string][]string),
 		gabpClients:     make(map[string]*gabp.Client),
 		gabpAttention:   make(map[string]*gameAttentionState),
@@ -275,13 +279,14 @@ func (s *Server) SetAPIKey(apiKey string) {
 // RegisterGameManagementTools registers the game management tools for the new architecture
 func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration) {
 	s.stripOutputSchema = gamesConfig.StripOutputSchema
+	s.gamesConfig = gamesConfig
 	normalizationConfig := gamesConfig.GetToolNormalization()
 	if gamesConfig.Timeouts != nil && gamesConfig.Timeouts.Startup != nil {
 		processStartTimeout, gabpConnectTimeout := gamesConfig.GetStartupTimeouts()
 		s.starter.SetTimeouts(processStartTimeout, gabpConnectTimeout)
 	}
 
-	// games.list tool
+	// games_list tool
 	s.RegisterToolWithConfig(Tool{
 		Name:        "games.list",
 		Description: "List all configured game IDs",
@@ -335,7 +340,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		game, exists := s.resolveGameId(gamesConfig, gameIdOrTarget)
 		if !exists {
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games.list to see available games.", gameIdOrTarget)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIdOrTarget)}},
 				IsError: true,
 			}, nil
 		}
@@ -375,7 +380,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}, nil
 	}, normalizationConfig)
 
-	// games.status tool
+	// games_status tool
 	s.RegisterToolWithConfig(Tool{
 		Name:        "games.status",
 		Description: "Check the status of one or more games using game ID or launch target",
@@ -397,7 +402,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			game, exists := s.resolveGameId(gamesConfig, gameIdOrTarget)
 			if !exists {
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games.list to see available games.", gameIdOrTarget)}},
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIdOrTarget)}},
 					IsError: true,
 				}, nil
 			}
@@ -434,7 +439,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}, nil
 	}, normalizationConfig)
 
-	// games.start tool
+	// games_start tool
 	s.RegisterToolWithConfig(Tool{
 		Name:        "games.start",
 		Description: "Start a configured game using game ID or launch target (e.g., Steam App ID)",
@@ -460,7 +465,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		game, exists := s.resolveGameId(gamesConfig, gameIdOrTarget)
 		if !exists {
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games.list to see available games.", gameIdOrTarget)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIdOrTarget)}},
 				IsError: true,
 			}, nil
 		}
@@ -485,7 +490,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			if startResult.GABPConnectError != nil {
 				message = fmt.Sprintf("%s: %v", message, startResult.GABPConnectError)
 			}
-			message = fmt.Sprintf("%s. The game may still be loading or the mod may be missing. Use games.status, then games.connect once the mod is ready.", message)
+			message = fmt.Sprintf("%s. The game may still be loading or the mod may be missing. Use games_status, then games_connect once the mod is ready.", message)
 			return &ToolResult{
 				Content: []Content{{Type: "text", Text: message}},
 				StructuredContent: map[string]interface{}{
@@ -541,7 +546,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		game, exists := s.resolveGameId(gamesConfig, gameIdOrTarget)
 		if !exists {
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games.list to see available games.", gameIdOrTarget)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIdOrTarget)}},
 				IsError: true,
 			}, nil
 		}
@@ -593,7 +598,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		game, exists := s.resolveGameId(gamesConfig, gameIdOrTarget)
 		if !exists {
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games.list to see available games.", gameIdOrTarget)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIdOrTarget)}},
 				IsError: true,
 			}, nil
 		}
@@ -793,7 +798,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			game, exists := s.resolveGameId(gamesConfig, gameID)
 			if !exists {
 				return nil, nil, &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games.list to see available games.", gameID)}},
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameID)}},
 					IsError: true,
 				}
 			}
@@ -907,6 +912,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			if entry.CanonicalName != entry.Tool.Name {
 				item["originalName"] = entry.CanonicalName
 			}
+			if gabpName := toolMetaString(entry.Tool, toolMetaGABPName); gabpName != "" {
+				item["gabpName"] = gabpName
+			}
 			if brief {
 				if summary := toolBriefDescription(entry.Tool.Description); summary != "" {
 					item["summary"] = summary
@@ -931,6 +939,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			if entry.CanonicalName != entry.Tool.Name {
 				item["originalName"] = entry.CanonicalName
 			}
+			if gabpName := toolMetaString(entry.Tool, toolMetaGABPName); gabpName != "" {
+				item["gabpName"] = gabpName
+			}
 			items = append(items, item)
 		}
 		return items
@@ -954,7 +965,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			content.WriteString(fmt.Sprintf("No game-specific %s available for '%s'.\n", noun, game.ID))
 			status := s.checkGameStatus(game.ID)
 			if status != "running" && status != "connected" {
-				content.WriteString(fmt.Sprintf("Game is currently '%s'. Start it with games.start and connect with games.connect to enable GABP tools.\n", status))
+				content.WriteString(fmt.Sprintf("Game is currently '%s'. Start it with games_start and connect with games_connect to enable GABP tools.\n", status))
 			} else {
 				content.WriteString("The game is running, but no GABP tools are currently connected.\n")
 			}
@@ -985,7 +996,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		} else {
 			content.WriteString(", but none matched the requested filters.\n")
 		}
-		content.WriteString("Use games.tool_names without filters to browse compact names, then inspect one tool with games.tool_detail.\n")
+		content.WriteString("Use games_tool_names without filters to browse compact names, then inspect one tool with games_tool_detail.\n")
 		return content.String()
 	}
 
@@ -1016,7 +1027,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			entry, found := findListedTool(entries, game.ID, requested)
 			if !found {
 				return listedGameTool{}, &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("Tool '%s' not found for game '%s'. Use games.tool_names to discover available names first.", requested, game.ID)}},
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("Tool '%s' not found for game '%s'. Use games_tool_names to discover available names first.", requested, game.ID)}},
 					IsError: true,
 				}
 			}
@@ -1039,7 +1050,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		switch len(matches) {
 		case 0:
 			return listedGameTool{}, &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Tool '%s' was not found. Use games.tool_names to discover available names first, or include gameId if you are using a local tool name.", requested)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Tool '%s' was not found. Use games_tool_names to discover available names first, or include gameId if you are using a local tool name.", requested)}},
 				IsError: true,
 			}
 		case 1:
@@ -1062,10 +1073,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}
 	}
 
-	// games.tool_names tool - Compact game tool discovery for AI clients
+	// games_tool_names tool - Compact game tool discovery for AI clients
 	s.RegisterToolWithConfig(Tool{
 		Name:        "games.tool_names",
-		Description: "List compact game-specific tool names. Use this first for low-token discovery, then call games.tool_detail for one tool.",
+		Description: "List compact game-specific tool names. Use this first for low-token discovery, then call games_tool_detail for one tool.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -1167,7 +1178,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			content.WriteString(entry.Tool.Name)
 			content.WriteString("\n")
 		}
-		content.WriteString("\nUse games.tool_detail with one of these names to inspect parameters and output.")
+		content.WriteString("\nUse games_tool_detail with one of these names to inspect parameters and output. Legacy alias: games.tool_detail.")
 		if nextCursor != "" {
 			content.WriteString(fmt.Sprintf("\nNext cursor: %s", nextCursor))
 		}
@@ -1198,7 +1209,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}, nil
 	}, normalizationConfig)
 
-	// games.tool_detail tool - Detailed schema for one discovered tool
+	// games_tool_detail tool - Detailed schema for one discovered tool
 	s.RegisterToolWithConfig(Tool{
 		Name:        "games.tool_detail",
 		Description: "Show detailed metadata for one game-specific tool, including parameters and output schema.",
@@ -1211,7 +1222,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				},
 				"tool": map[string]interface{}{
 					"type":        "string",
-					"description": "Tool name as returned by games.tool_names or games.tools (required). Prefer the fully qualified mirrored name, e.g. 'bannerlord.core.ping'.",
+					"description": "Tool name as returned by games_tool_names or games_tools (required). Prefer the fully qualified mirrored name, e.g. 'bannerlord.core.ping'.",
 				},
 			},
 			"required": []string{"tool"},
@@ -1256,6 +1267,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		if entry.CanonicalName != entry.Tool.Name {
 			structured["originalName"] = entry.CanonicalName
 		}
+		if gabpName := toolMetaString(entry.Tool, toolMetaGABPName); gabpName != "" {
+			structured["gabpName"] = gabpName
+		}
 
 		return &ToolResult{
 			Content:           []Content{{Type: "text", Text: strings.TrimSpace(content.String())}},
@@ -1263,10 +1277,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}, nil
 	}, normalizationConfig)
 
-	// games.tools tool - Detailed tool listing, kept for compatibility
+	// games_tools tool - Detailed tool listing, kept for compatibility
 	s.RegisterToolWithConfig(Tool{
 		Name:        "games.tools",
-		Description: "List game-specific tools in detailed form for compatibility and human-readable inspection. Prefer games.tool_names for compact discovery and games.tool_detail for one tool.",
+		Description: "List game-specific tools in detailed form for compatibility and human-readable inspection. Prefer games_tool_names for compact discovery and games_tool_detail for one tool.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -1373,7 +1387,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			content.WriteString("\nNote: Tools are prefixed with game ID (e.g., 'minecraft.inventory.get') to avoid conflicts between games.\n")
 		}
 
-		content.WriteString("\nUse games.tool_names for a smaller list and games.tool_detail for one tool.")
+		content.WriteString("\nUse games_tool_names for a smaller list and games_tool_detail for one tool.")
 		if nextCursor != "" {
 			content.WriteString(fmt.Sprintf("\nNext cursor: %s", nextCursor))
 		}
@@ -1401,7 +1415,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}, nil
 	}, normalizationConfig)
 
-	// games.connect tool - Manually connect to a game's GABP server
+	// games_connect tool - Manually connect to a game's GABP server
 	s.RegisterToolWithConfig(Tool{
 		Name:        "games.connect",
 		Description: "Connect to a running game's GABP server to discover and sync tools. Use this after the game has fully loaded.",
@@ -1435,7 +1449,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		game, exists := s.resolveGameId(gamesConfig, gameIdArg)
 		if !exists {
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games.list to see available games.", gameIdArg)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIdArg)}},
 				IsError: true,
 			}, nil
 		}
@@ -1478,7 +1492,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		hadForeignOwner := process.RuntimeStateOwnedByAnotherLiveOwner(runtimeState, os.Getpid(), s.instanceID)
 		if hadForeignOwner && !forceTakeover {
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' is already owned by another live GABS session (pid %d). Skipping games.connect here to avoid competing bridge clients.", game.ID, runtimeState.OwnerPID)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' is already owned by another live GABS session (pid %d). Skipping games_connect here to avoid competing bridge clients.", game.ID, runtimeState.OwnerPID)}},
 			}, nil
 		}
 
@@ -1558,7 +1572,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}, nil
 	}, normalizationConfig)
 
-	// games.get_attention - Inspect the current attention state for a connected game
+	// games_get_attention - Inspect the current attention state for a connected game
 	s.RegisterToolWithConfig(Tool{
 		Name:        "games.get_attention",
 		Description: "Inspect the current attention item for a connected game. Use this when GABS blocks further game calls due to important async game information.",
@@ -1634,7 +1648,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}, nil
 	}, normalizationConfig)
 
-	// games.ack_attention - Acknowledge the current blocking attention item for a connected game
+	// games_ack_attention - Acknowledge the current blocking attention item for a connected game
 	s.RegisterToolWithConfig(Tool{
 		Name:        "games.ack_attention",
 		Description: "Acknowledge a current attention item for a connected game so blocked game calls can resume once the game has no remaining blocking attention.",
@@ -1647,7 +1661,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				},
 				"attentionId": map[string]interface{}{
 					"type":        "string",
-					"description": "Attention item identifier returned by games.get_attention or a blocked tool result",
+					"description": "Attention item identifier returned by games_get_attention or a blocked tool result",
 				},
 				"timeout": map[string]interface{}{
 					"type":        "integer",
@@ -1724,10 +1738,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}, nil
 	}, normalizationConfig)
 
-	// games.call_tool - Proxy tool calls to a game's GABP server
+	// games_call_tool - Proxy tool calls to a game's GABP server
 	s.RegisterToolWithConfig(Tool{
 		Name:        "games.call_tool",
-		Description: "Call a game-specific tool on a running game via its GABP connection. Prefer games.tool_names for discovery and games.tool_detail for schema inspection before calling.",
+		Description: "Call a game-specific tool on a running game via its GABP connection. Prefer games_tool_names for discovery and games_tool_detail for schema inspection before calling.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -1737,7 +1751,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				},
 				"tool": map[string]interface{}{
 					"type":        "string",
-					"description": "Tool name as returned by games.tool_names or games.tools (required). Prefer the full mirrored name, e.g. 'bannerlord.core.ping'.",
+					"description": "Tool name as returned by games_tool_names or games_tools (required). Prefer the full mirrored name, e.g. 'bannerlord.core.ping'.",
 				},
 				"arguments": map[string]interface{}{
 					"type":        "object",
@@ -1768,11 +1782,6 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			toolArgs = map[string]interface{}{}
 		}
 
-		entry, resolveErr := resolveListedTool(gameIdArg, hasGameID, toolName)
-		if resolveErr != nil {
-			return resolveErr, nil
-		}
-
 		timeout, invalidTimeout := parseOptionalTimeoutSecondsArg(args, "timeout", 30*time.Second)
 		if invalidTimeout != nil {
 			return invalidTimeout, nil
@@ -1781,6 +1790,14 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		proxyTimeout, invalidProxyTimeout := deriveMirroredToolCallTimeout(toolArgs, timeout)
 		if invalidProxyTimeout != nil {
 			return invalidProxyTimeout, nil
+		}
+
+		entry, resolveErr := resolveListedTool(gameIdArg, hasGameID, toolName)
+		if resolveErr != nil {
+			if directResult, handled := s.callDirectGABPTool(gamesConfig, gameIdArg, hasGameID, toolName, toolArgs, proxyTimeout); handled {
+				return directResult, nil
+			}
+			return resolveErr, nil
 		}
 
 		// Get the GABP client for this game
@@ -1794,14 +1811,14 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				disconnectNote = " " + disconnectNote
 			}
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' is not connected via GABP. Use games.status to verify whether it is still running, then use games.connect or games.start as appropriate.%s", entry.GameID, disconnectNote)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' is not connected via GABP. Use games_status to verify whether it is still running, then use games_connect or games_start as appropriate.%s", entry.GameID, disconnectNote)}},
 				IsError: true,
 			}, nil
 		}
 
 		// Resolve the requested name against the mirrored tools for this game.
 		// This accepts the registered MCP name, the original dotted name, or the
-		// local tool name, so games.call_tool keeps working under OpenAI tool name
+		// local tool name, so games_call_tool keeps working under OpenAI tool name
 		// normalization as well.
 		gabpToolName := gabpToolNameFromTool(entry.GameID, entry.Tool)
 
@@ -1905,26 +1922,47 @@ func toolCanonicalName(tool Tool) string {
 		if originalName, ok := tool.Meta["originalName"].(string); ok && originalName != "" {
 			return originalName
 		}
+		if legacyName, ok := tool.Meta[toolMetaLegacyName].(string); ok && legacyName != "" {
+			return legacyName
+		}
+		if gabpName, ok := tool.Meta[toolMetaGABPName].(string); ok && gabpName != "" {
+			return gabpName
+		}
 	}
 	return tool.Name
 }
 
 func toolLocalName(gameID string, tool Tool) string {
-	prefix := gameID + "."
-
-	if canonical := toolCanonicalName(tool); strings.HasPrefix(canonical, prefix) {
-		return strings.TrimPrefix(canonical, prefix)
+	if gabpName := toolMetaString(tool, toolMetaGABPName); gabpName != "" {
+		return gabpName
 	}
-	if strings.HasPrefix(tool.Name, prefix) {
-		return strings.TrimPrefix(tool.Name, prefix)
+
+	dotPrefix := gameID + "."
+	slashPrefix := gameID + "/"
+
+	if canonical := toolCanonicalName(tool); strings.HasPrefix(canonical, dotPrefix) {
+		return strings.TrimPrefix(canonical, dotPrefix)
+	} else if strings.HasPrefix(canonical, slashPrefix) {
+		return strings.TrimPrefix(canonical, slashPrefix)
+	}
+	if strings.HasPrefix(tool.Name, dotPrefix) {
+		return strings.TrimPrefix(tool.Name, dotPrefix)
+	} else if strings.HasPrefix(tool.Name, slashPrefix) {
+		return strings.TrimPrefix(tool.Name, slashPrefix)
 	}
 
 	return toolCanonicalName(tool)
 }
 
 func toolBelongsToGame(tool Tool, gameID string) bool {
-	prefix := gameID + "."
-	return strings.HasPrefix(tool.Name, prefix) || strings.HasPrefix(toolCanonicalName(tool), prefix)
+	dotPrefix := gameID + "."
+	slashPrefix := gameID + "/"
+	return strings.HasPrefix(tool.Name, dotPrefix) ||
+		strings.HasPrefix(tool.Name, slashPrefix) ||
+		strings.HasPrefix(toolCanonicalName(tool), dotPrefix) ||
+		strings.HasPrefix(toolCanonicalName(tool), slashPrefix) ||
+		strings.HasPrefix(toolMetaString(tool, toolMetaQualifiedGABPName), slashPrefix) ||
+		strings.HasPrefix(toolMetaString(tool, toolMetaLegacyName), dotPrefix)
 }
 
 func toolMatchesRequestedName(gameID string, tool Tool, requested string) bool {
@@ -1933,20 +1971,20 @@ func toolMatchesRequestedName(gameID string, tool Tool, requested string) bool {
 		return false
 	}
 
-	gamePrefix := gameID + "."
-	canonical := toolCanonicalName(tool)
-	registeredLocal := strings.TrimPrefix(tool.Name, gamePrefix)
-	canonicalLocal := strings.TrimPrefix(canonical, gamePrefix)
-	local := toolLocalName(gameID, tool)
+	for _, alias := range toolNameAliases(gameID, tool) {
+		if requested == alias {
+			return true
+		}
+	}
 
-	return requested == tool.Name ||
-		requested == canonical ||
-		requested == local ||
-		requested == registeredLocal ||
-		requested == canonicalLocal
+	return false
 }
 
 func gabpToolNameFromTool(gameID string, tool Tool) string {
+	if gabpName := toolMetaString(tool, toolMetaGABPName); gabpName != "" {
+		return gabpName
+	}
+
 	mirroredName := toolCanonicalName(tool)
 	gamePrefix := gameID + "."
 
@@ -1957,6 +1995,290 @@ func gabpToolNameFromTool(gameID string, tool Tool) string {
 	}
 
 	return strings.ReplaceAll(mirroredName, ".", "/")
+}
+
+func (s *Server) registerGameToolAliasesLocked(gameID, gabpName, exposedName string) {
+	if s.gameToolAliases == nil {
+		s.gameToolAliases = make(map[string]gameToolAlias)
+	}
+
+	alias := gameToolAlias{
+		GameID:  gameID,
+		GABP:    gabpName,
+		Exposed: exposedName,
+	}
+	for _, name := range []string{
+		exposedName,
+		gabpName,
+		localLegacyMCPToolName(gabpName),
+		legacyMCPToolName(gameID, gabpName),
+		qualifiedGABPToolName(gameID, gabpName),
+	} {
+		if strings.TrimSpace(name) != "" {
+			s.gameToolAliases[name] = alias
+		}
+	}
+}
+
+func (s *Server) deleteGameToolAliasesLocked(gameID string) {
+	for name, alias := range s.gameToolAliases {
+		if alias.GameID == gameID {
+			delete(s.gameToolAliases, name)
+		}
+	}
+}
+
+func (s *Server) resolveKnownGABPToolAlias(gameID, requested string) (string, bool) {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return "", false
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if alias, ok := s.gameToolAliases[requested]; ok && alias.GameID == gameID {
+		return alias.GABP, true
+	}
+
+	for _, toolName := range s.gameTools[gameID] {
+		handler, exists := s.tools[toolName]
+		if !exists {
+			continue
+		}
+		if toolMatchesRequestedName(gameID, handler.Tool, requested) {
+			if gabpName := gabpToolNameFromTool(gameID, handler.Tool); gabpName != "" {
+				return gabpName, true
+			}
+		}
+	}
+
+	return "", false
+}
+
+func (s *Server) safeMCPToolNameForGABPTool(gameID, gabpName string) string {
+	candidate := safeMCPToolName(gameID, gabpName, 64)
+
+	s.mu.RLock()
+	handler, toolExists := s.tools[candidate]
+	alias, aliasExists := s.gameToolAliases[candidate]
+	s.mu.RUnlock()
+
+	if !toolExists && !aliasExists {
+		return candidate
+	}
+	if toolExists && gabpToolNameFromTool(gameID, handler.Tool) == gabpName {
+		return candidate
+	}
+	if aliasExists && alias.GameID == gameID && alias.GABP == gabpName {
+		return candidate
+	}
+
+	return safeMCPToolNameWithCollisionSuffix(gameID, gabpName, 64)
+}
+
+func (s *Server) cacheGABPToolAliases(gameID string, tools []gabp.ToolDescriptor) {
+	for _, tool := range tools {
+		gabpName := canonicalGABPToolName(tool.Name)
+		if gabpName == "" {
+			continue
+		}
+		exposedName := s.safeMCPToolNameForGABPTool(gameID, gabpName)
+		s.mu.Lock()
+		s.registerGameToolAliasesLocked(gameID, gabpName, exposedName)
+		s.mu.Unlock()
+	}
+}
+
+func (s *Server) refreshGABPToolAliases(client *gabp.Client, gameID string, timeout time.Duration) error {
+	tools, err := client.ListToolsWithTimeout(timeout)
+	if err != nil {
+		return err
+	}
+	s.cacheGABPToolAliases(gameID, tools)
+	return nil
+}
+
+func (s *Server) callDirectGABPTool(gamesConfig *config.GamesConfig, gameIDArg string, hasGameID bool, requested string, args map[string]interface{}, timeout time.Duration) (*ToolResult, bool) {
+	gameID, result, handled := s.resolveDirectGABPToolGame(gamesConfig, gameIDArg, hasGameID, requested)
+	if handled {
+		return result, true
+	}
+	if gameID == "" {
+		return nil, false
+	}
+
+	s.mu.RLock()
+	client, connected := s.gabpClients[gameID]
+	s.mu.RUnlock()
+
+	if !connected || !client.IsConnected() {
+		return nil, false
+	}
+
+	candidates := make([]string, 0, 2)
+	addCandidate := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		for _, existing := range candidates {
+			if existing == value {
+				return
+			}
+		}
+		candidates = append(candidates, value)
+	}
+
+	if resolved, ok := s.resolveKnownGABPToolAlias(gameID, requested); ok {
+		addCandidate(resolved)
+	} else if !strings.ContainsAny(strings.TrimSpace(requested), "./") {
+		if err := s.refreshGABPToolAliases(client, gameID, timeout); err != nil {
+			s.log.Debugw("failed to refresh GABP tool aliases for direct call", "gameId", gameID, "tool", requested, "error", err)
+		} else if resolved, ok := s.resolveKnownGABPToolAlias(gameID, requested); ok {
+			addCandidate(resolved)
+		}
+	}
+
+	for _, candidate := range gabpToolNameFromDelimitedRequest(gameID, requested) {
+		addCandidate(candidate)
+	}
+	if len(candidates) == 0 {
+		return nil, false
+	}
+
+	attentionToolNames := append([]string{requested}, candidates...)
+	if !shouldBypassAttentionGate(attentionToolNames...) {
+		if blocked := s.enforceAttentionGate(gameID, requested, client); blocked != nil {
+			return blocked, true
+		}
+	}
+
+	var firstErr error
+	var lastErr error
+	for _, candidate := range candidates {
+		callResult, isError, err := client.CallToolWithTimeout(candidate, args, timeout)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			lastErr = err
+			if isGABPToolNotFoundError(err) {
+				continue
+			}
+			return s.gabpCallErrorResult(gameID, err), true
+		}
+
+		if isError {
+			return &ToolResult{
+				Content:           []Content{{Type: "text", Text: fmt.Sprintf("Tool error: %v", callResult)}},
+				StructuredContent: callResult,
+				IsError:           true,
+			}, true
+		}
+
+		return gabpCallSuccessResult(callResult), true
+	}
+
+	if firstErr == nil {
+		return nil, false
+	}
+	if lastErr != nil && !isGABPToolNotFoundError(lastErr) {
+		return s.gabpCallErrorResult(gameID, lastErr), true
+	}
+	return s.gabpCallErrorResult(gameID, firstErr), true
+}
+
+func (s *Server) resolveDirectGABPToolGame(gamesConfig *config.GamesConfig, gameIDArg string, hasGameID bool, requested string) (string, *ToolResult, bool) {
+	if hasGameID {
+		game, exists := s.resolveGameId(gamesConfig, gameIDArg)
+		if !exists {
+			return "", &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIDArg)}},
+				IsError: true,
+			}, true
+		}
+		return game.ID, nil, false
+	}
+
+	s.mu.RLock()
+	if alias, ok := s.gameToolAliases[strings.TrimSpace(requested)]; ok {
+		s.mu.RUnlock()
+		return alias.GameID, nil, false
+	}
+	s.mu.RUnlock()
+
+	connectedGameIDs := make([]string, 0)
+	for _, game := range gamesConfig.ListGames() {
+		s.mu.RLock()
+		client, connected := s.gabpClients[game.ID]
+		s.mu.RUnlock()
+		if connected && client.IsConnected() {
+			connectedGameIDs = append(connectedGameIDs, game.ID)
+		}
+	}
+
+	matches := make([]string, 0, 1)
+	for _, gameID := range connectedGameIDs {
+		if strings.HasPrefix(requested, gameID+".") || strings.HasPrefix(requested, gameID+"/") || strings.HasPrefix(requested, gameID+"_") {
+			matches = append(matches, gameID)
+		}
+	}
+
+	if len(matches) == 1 {
+		return matches[0], nil, false
+	}
+	if len(matches) > 1 {
+		sort.Strings(matches)
+		return "", &ToolResult{
+			Content: []Content{{Type: "text", Text: fmt.Sprintf("Tool '%s' matched multiple connected games (%s). Include gameId.", requested, strings.Join(matches, ", "))}},
+			IsError: true,
+		}, true
+	}
+
+	if len(connectedGameIDs) == 1 {
+		return connectedGameIDs[0], nil, false
+	}
+
+	return "", nil, false
+}
+
+func (s *Server) gabpCallErrorResult(gameID string, err error) *ToolResult {
+	disconnectNote := s.describeLastGABPDisconnect(gameID)
+	if disconnectNote != "" {
+		disconnectNote = " " + disconnectNote
+	}
+	return &ToolResult{
+		Content: []Content{{Type: "text", Text: fmt.Sprintf("GABP tool call failed: %v.%s", err, disconnectNote)}},
+		IsError: true,
+	}
+}
+
+func gabpCallSuccessResult(result map[string]interface{}) *ToolResult {
+	content := []Content{}
+	if resultText, ok := result["text"].(string); ok {
+		content = append(content, Content{Type: "text", Text: resultText})
+	} else {
+		if jsonData, err := json.Marshal(result); err != nil {
+			content = append(content, Content{Type: "text", Text: fmt.Sprintf("%v", result)})
+		} else {
+			content = append(content, Content{Type: "text", Text: string(jsonData)})
+		}
+	}
+
+	return &ToolResult{
+		Content:           content,
+		StructuredContent: result,
+		IsError:           false,
+	}
+}
+
+func isGABPToolNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "tool") && strings.Contains(message, "not found")
 }
 
 func toolBriefDescription(description string) string {
@@ -2198,7 +2520,7 @@ func (s *Server) getStatusDescriptionFromStatus(status string, gameConfig *confi
 	case process.RuntimeStateStatusStarting:
 		return "starting (another GABS session is launching the game)"
 	case "shared-running":
-		return "running (another GABS session owns the process; use games.connect to attach)"
+		return "running (another GABS session owns the process; use games_connect to attach)"
 	case "running-disconnected":
 		return "running, but the GABP bridge disconnected"
 	case "running":
@@ -2482,7 +2804,7 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 
 	// Use serialized starter with verification
 	// This implements the asynchronous handling requested by @pardeike
-	gabpConnector := NewServerGABPConnector(s, backoffMin, backoffMax)
+	gabpConnector := NewAsyncServerGABPConnector(s, backoffMin, backoffMax)
 	result := s.starter.StartWithVerification(controller, gabpConnector, game.ID, port, token)
 
 	if result.Error != nil {
@@ -2537,8 +2859,8 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 //  1. Game starts with bridge config (already done in startGame)
 //  2. GABP client connects to game mod's server (implemented here)
 //  3. Mirror system syncs tools and sends tools/list_changed notification (implemented here)
-//  4. AI agents automatically discover new capabilities via games.tool_names,
-//     then inspect a few candidates with games.tool_detail (enabled by notification)
+//  4. AI agents automatically discover new capabilities via games_tool_names,
+//     then inspect a few candidates with games_tool_detail (enabled by notification)
 func (s *Server) establishGABPConnection(gameID string, port int, token string, backoffMin, backoffMax time.Duration) {
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	s.log.Debugw("attempting GABP connection for game", "gameId", gameID, "addr", addr)
@@ -2599,29 +2921,38 @@ func (s *Server) syncGABPToolsWithTimeout(client *gabp.Client, gameID string, ti
 
 	// Register each GABP tool as an MCP tool with game-specific naming
 	for _, tool := range gabpTools {
-		// Create game-prefixed tool name for multi-game clarity
-		// Apply basic normalization first (convert slashes to dots)
-		sanitizedToolName := util.NormalizeToolNameBasic(tool.Name)
-		gameSpecificName := fmt.Sprintf("%s.%s", gameID, sanitizedToolName)
+		rawGABPToolName := strings.TrimSpace(tool.Name)
+		gabpToolName := canonicalGABPToolName(rawGABPToolName)
+		if gabpToolName == "" {
+			continue
+		}
+		exposedToolName := s.safeMCPToolNameForGABPTool(gameID, gabpToolName)
+		legacyToolName := legacyMCPToolName(gameID, gabpToolName)
+		qualifiedToolName := qualifiedGABPToolName(gameID, gabpToolName)
 
 		mcpTool := Tool{
-			Name:         gameSpecificName,
+			Name:         exposedToolName,
 			Description:  fmt.Sprintf("%s (Game: %s)", tool.Description, gameID),
 			InputSchema:  tool.InputSchema,
 			OutputSchema: tool.OutputSchema,
+			Meta: map[string]interface{}{
+				toolMetaGABPName:          gabpToolName,
+				toolMetaQualifiedGABPName: qualifiedToolName,
+				toolMetaLegacyName:        legacyToolName,
+				toolMetaAliases:           []string{legacyToolName, qualifiedToolName, localLegacyMCPToolName(gabpToolName), gabpToolName, rawGABPToolName},
+				"originalName":            legacyToolName,
+			},
 		}
 
-		// Create handler that forwards to GABP with original tool name
-		originalToolName := tool.Name // Capture original name for GABP call
-		handler := func(toolName string) func(args map[string]interface{}) (*ToolResult, error) {
+		handler := func(toolName, exposedName string) func(args map[string]interface{}) (*ToolResult, error) {
 			return func(args map[string]interface{}) (*ToolResult, error) {
 				proxyTimeout, invalidTimeout := deriveMirroredToolCallTimeout(args, 30*time.Second)
 				if invalidTimeout != nil {
 					return invalidTimeout, nil
 				}
 
-				if !shouldBypassAttentionGate(gameSpecificName, toolName) {
-					if blocked := s.enforceAttentionGate(gameID, gameSpecificName, client); blocked != nil {
+				if !shouldBypassAttentionGate(exposedName, toolName) {
+					if blocked := s.enforceAttentionGate(gameID, exposedName, client); blocked != nil {
 						return blocked, nil
 					}
 				}
@@ -2663,20 +2994,18 @@ func (s *Server) syncGABPToolsWithTimeout(client *gabp.Client, gameID string, ti
 					IsError:           false,
 				}, nil
 			}
-		}(originalToolName)
+		}(gabpToolName, exposedToolName)
 
-		// Register the tool using the existing game tool registration method
-		// Use empty normalization config for now
 		normalizationConfig := &config.ToolNormalizationConfig{}
 		s.RegisterGameTool(gameID, mcpTool, handler, normalizationConfig)
-		s.log.Debugw("registered GABP tool as game-specific MCP tool", "gameId", gameID, "originalName", tool.Name, "mcpName", gameSpecificName)
+		s.log.Debugw("registered GABP tool as game-specific MCP tool", "gameId", gameID, "gabpName", gabpToolName, "mcpName", exposedToolName, "legacyName", legacyToolName)
 	}
 
 	s.log.Infow("synced GABP tools to MCP with game namespacing", "gameId", gameID, "count", len(gabpTools))
 
 	// Send tools/list_changed notification to AI agents. This alerts clients
 	// that new mirrored tools are available without polling, so they can refresh
-	// direct tool access or use games.tool_names -> games.tool_detail for the
+	// direct tool access or use games_tool_names -> games_tool_detail for the
 	// stable discovery flow.
 	s.SendToolsListChangedNotification()
 
@@ -2858,11 +3187,17 @@ func (s *Server) RegisterGameTool(gameId string, tool Tool, handler func(args ma
 	s.mu.Lock()
 	for _, existing := range s.gameTools[gameId] {
 		if existing == trackedToolName {
+			if gabpName := toolMetaString(tool, toolMetaGABPName); gabpName != "" {
+				s.registerGameToolAliasesLocked(gameId, gabpName, trackedToolName)
+			}
 			s.mu.Unlock()
 			return
 		}
 	}
 	s.gameTools[gameId] = append(s.gameTools[gameId], trackedToolName)
+	if gabpName := toolMetaString(tool, toolMetaGABPName); gabpName != "" {
+		s.registerGameToolAliasesLocked(gameId, gabpName, trackedToolName)
+	}
 	s.mu.Unlock()
 }
 
@@ -2899,6 +3234,7 @@ func (s *Server) CleanupGameResources(gameId string) {
 			}
 		}
 		delete(s.gameTools, gameId)
+		s.deleteGameToolAliasesLocked(gameId)
 	}
 
 	// Remove game-specific resources
@@ -2911,6 +3247,7 @@ func (s *Server) CleanupGameResources(gameId string) {
 		}
 		delete(s.gameResources, gameId)
 	}
+	s.deleteGameToolAliasesLocked(gameId)
 
 	if toolsRemoved > 0 || resourcesRemoved > 0 {
 		s.log.Infow("cleaned up game resources", "gameId", gameId, "toolsRemoved", toolsRemoved, "resourcesRemoved", resourcesRemoved)
@@ -2940,6 +3277,7 @@ func (s *Server) CleanupGABPConnection(gameId string) {
 	}
 	s.clearGameAttentionStateLocked(gameId)
 	delete(s.gabpDisconnects, gameId)
+	s.deleteGameToolAliasesLocked(gameId)
 }
 
 // CleanupBridgeConfig removes the bridge configuration file for a game
@@ -2976,6 +3314,7 @@ func (s *Server) cleanupGameResourcesInternal(gameId string) {
 			}
 		}
 		delete(s.gameTools, gameId)
+		s.deleteGameToolAliasesLocked(gameId)
 	}
 
 	// Remove game-specific resources
@@ -2988,6 +3327,7 @@ func (s *Server) cleanupGameResourcesInternal(gameId string) {
 		}
 		delete(s.gameResources, gameId)
 	}
+	s.deleteGameToolAliasesLocked(gameId)
 
 	if toolsRemoved > 0 || resourcesRemoved > 0 {
 		s.log.Infow("cleaned up game resources", "gameId", gameId, "toolsRemoved", toolsRemoved, "resourcesRemoved", resourcesRemoved)
@@ -3159,6 +3499,22 @@ func (s *Server) handleToolsList(msg *Message) *Message {
 	return NewResponse(msg.ID, result)
 }
 
+func (s *Server) findToolHandlerLocked(name string) (*ToolHandler, bool) {
+	if handler, exists := s.tools[name]; exists {
+		return handler, true
+	}
+
+	for _, handler := range s.tools {
+		for _, alias := range toolNameAliases("", handler.Tool) {
+			if alias == name {
+				return handler, true
+			}
+		}
+	}
+
+	return nil, false
+}
+
 func (s *Server) handleToolsCall(msg *Message) *Message {
 	var params ToolCallParams
 	paramsBytes, err := json.Marshal(msg.Params)
@@ -3171,10 +3527,13 @@ func (s *Server) handleToolsCall(msg *Message) *Message {
 	}
 
 	s.mu.RLock()
-	handler, exists := s.tools[params.Name]
+	handler, exists := s.findToolHandlerLocked(params.Name)
 	s.mu.RUnlock()
 
 	if !exists {
+		if result, handled := s.callUnmirroredGABPTool(params.Name, params.Arguments); handled {
+			return NewResponse(msg.ID, result)
+		}
 		return NewError(msg.ID, -32601, "Tool not found", params.Name)
 	}
 
@@ -3184,6 +3543,19 @@ func (s *Server) handleToolsCall(msg *Message) *Message {
 	}
 
 	return NewResponse(msg.ID, result)
+}
+
+func (s *Server) callUnmirroredGABPTool(name string, args map[string]interface{}) (*ToolResult, bool) {
+	if args == nil {
+		args = map[string]interface{}{}
+	}
+
+	gamesConfig := s.gamesConfig
+	if gamesConfig == nil {
+		return nil, false
+	}
+
+	return s.callDirectGABPTool(gamesConfig, "", false, name, args, 30*time.Second)
 }
 
 func (s *Server) handleResourcesList(msg *Message) *Message {

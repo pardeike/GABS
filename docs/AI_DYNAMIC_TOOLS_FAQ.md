@@ -18,30 +18,30 @@ GABS provides a compact two-step discovery flow specifically for this purpose:
 
 ```javascript
 // AI discovers compact names for a specific game
-const minecraftToolNames = await mcp.callTool("games.tool_names", {"gameId": "minecraft", "brief": true});
+const minecraftToolNames = await mcp.callTool("games_tool_names", {"gameId": "minecraft", "brief": true});
 
 // AI inspects one candidate in detail
-const inventoryDetail = await mcp.callTool("games.tool_detail", {
-  "tool": "minecraft.inventory.get"
+const inventoryDetail = await mcp.callTool("games_tool_detail", {
+  "tool": "minecraft_inventory_get"
 });
 
 // The richer compatibility listing still exists when needed
-const allGameTools = await mcp.callTool("games.tools", {});
+const allGameTools = await mcp.callTool("games_tools", {});
 ```
 
-This gives AI agents a predictable "discover names first, inspect details second" workflow, which is much more context-efficient than always dumping every schema up front. `games.tool_names` defaults to 50 names per page and can add one-line summaries in structured output with `brief: true`.
+This gives AI agents a predictable "discover names first, inspect details second" workflow, which is much more context-efficient than always dumping every schema up front. `games_tool_names` defaults to 50 names per page and can add one-line summaries in structured output with `brief: true`.
 
 ### 2. **Clear Namespacing Prevents Chaos**
 Even with many tools from multiple games, AI agents can stay oriented because:
 
 ```
 ✅ Clear and Unambiguous:
-- minecraft.inventory.get 
-- minecraft.world.place_block
-- rimworld.inventory.get
-- rimworld.crafting.build
-- valheim.inventory.get
-- valheim.building.construct
+- minecraft_inventory_get
+- minecraft_world_place_block
+- rimworld_inventory_get
+- rimworld_crafting_build
+- valheim_inventory_get
+- valheim_building_construct
 
 ❌ Confusing (what GABS avoids):
 - inventory.get  (which game?)
@@ -68,7 +68,7 @@ up front.
 User: "Help me with my Minecraft server"
 
 AI: Let me see what I can do with Minecraft...
-    → games.tool_names {"gameId": "minecraft", "brief": true}
+    -> games_tool_names {"gameId": "minecraft", "brief": true}
 
 AI: I can help you with:
     - Managing player inventories
@@ -81,7 +81,7 @@ AI: I can help you with:
 User: "Give me a diamond sword"
 
 AI: I'll add that to your inventory...
-    → minecraft.inventory.set {"playerId": "steve", "item": "diamond_sword", "count": 1}
+    -> minecraft_inventory_set {"playerId": "steve", "item": "diamond_sword", "count": 1}
 ```
 
 ### Example 2: Multi-Game Awareness  
@@ -89,7 +89,7 @@ AI: I'll add that to your inventory...
 User: "I'm running both Minecraft and RimWorld, help me manage both"
 
 AI: Let me check what I can do with both games...
-    → games.tool_names {"brief": true}
+    -> games_tool_names {"brief": true}
 
 AI: Perfect! I can help you with:
     
@@ -109,11 +109,11 @@ AI: Perfect! I can help you with:
 class GABSClient {
   async refreshToolsWhenNeeded() {
     // Check if games have changed state
-    const currentGames = await this.mcp.callTool("games.status", {});
+    const currentGames = await this.mcp.callTool("games_status", {});
     
     if (this.gameStateChanged(currentGames)) {
       // Refresh compact tool names
-      this.availableTools = await this.mcp.callTool("games.tool_names", {"brief": true});
+      this.availableTools = await this.mcp.callTool("games_tool_names", {"brief": true});
       this.lastRefresh = Date.now();
     }
   }
@@ -128,13 +128,13 @@ The test suite covers the important discovery behaviors:
 ```
 ✅ AI starts with the stable core management surface
 ✅ AI discovers mirrored tools after a game connects
-✅ AI uses games.tool_names and games.tool_detail to understand capabilities
+✅ AI uses games_tool_names and games_tool_detail to understand capabilities
 ✅ AI manages multiple connected games without tool-name collisions
 ✅ AI can recover after reconnects and session ownership changes
 ```
 
 ### AI Discovery Patterns That Work:
-1. **Discovery-First**: Always check `games.tool_names` before attempting game actions
+1. **Discovery-First**: Always check `games_tool_names` before attempting game actions
 2. **Caching with Refresh**: Cache tools but refresh after game state changes
 3. **Intent-Based Filtering**: Filter large tool sets by user intent
 4. **Lazy Loading**: Only load tools for games the user is actually using
@@ -145,7 +145,7 @@ The test suite covers the important discovery behaviors:
 ```javascript
 // Pattern 1: Always discover before acting
 async handleGameRequest(gameId, action) {
-  const gameTools = await mcp.callTool("games.tool_names", {gameId, brief: true});
+  const gameTools = await mcp.callTool("games_tool_names", {gameId, brief: true});
   const availableActions = parseToolsForCapabilities(gameTools);
   
   if (availableActions.includes(action)) {
@@ -170,10 +170,10 @@ function organizeToolsForUser(allTools) {
 ### ❌ Anti-Patterns to Avoid:
 ```javascript
 // Don't cache tools indefinitely
-const toolsCache = await mcp.callTool("games.tool_names", {}); // DON'T cache forever
+const toolsCache = await mcp.callTool("games_tool_names", {}); // DON'T cache forever
 
 // Don't assume tools exist without checking
-await mcp.callTool("minecraft.inventory.get", {...}); // Check games.tool_names first!
+await mcp.callTool("minecraft_inventory_get", {...}); // Check games_tool_names first!
 
 // Don't overwhelm users with massive tool lists
 console.log("Here are all available tools..."); // Group by game instead!
@@ -184,10 +184,10 @@ console.log("Here are all available tools..."); // Group by game instead!
 ### GABS Architecture Supports This:
 1. **MCP Compliance**: Standard JSON-RPC with proper tool metadata
 2. **Game Prefixing**: Automatic namespacing prevents conflicts
-3. **Discovery APIs**: `games.tool_names` and `games.tool_detail` provide structured exploration
+3. **Discovery APIs**: `games_tool_names` and `games_tool_detail` provide structured exploration
 4. **Status Awareness**: AI can check game state before tool usage
 5. **Mirror System**: Automatic GABP→MCP tool conversion
-6. **Session Ownership Guardrails**: Duplicate `games.start` and `games.connect`
+6. **Session Ownership Guardrails**: Duplicate `games_start` and `games_connect`
    requests return quickly instead of racing a second live GABS session
 
 ## What About Multiple GABS Sessions?
@@ -196,11 +196,11 @@ This matters in the real world because developers often have more than one AI
 session open.
 
 - If one live GABS session already owns a running or starting game,
-  `games.start` returns quickly instead of launching a duplicate process
-- `games.connect` also returns quickly instead of hanging on a competing bridge
+  `games_start` returns quickly instead of launching a duplicate process
+- `games_connect` also returns quickly instead of hanging on a competing bridge
   connection
-- `games.status` can report that another GABS session owns the process
-- If takeover is intentional, `games.connect {"gameId": "rimworld",
+- `games_status` can report that another GABS session owns the process
+- If takeover is intentional, `games_connect {"gameId": "rimworld",
   "forceTakeover": true}` moves ownership to the current session
 
 ### Current State
@@ -226,7 +226,7 @@ The concern is valid: dynamic tool expansion can be confusing if the system does
 not provide structure. GABS provides that structure.
 
 ### Why It Works:
-1. **Predictable Discovery**: `games.tool_names` makes tool exploration systematic
+1. **Predictable Discovery**: `games_tool_names` makes tool exploration systematic
 2. **Clear Namespacing**: Game prefixes eliminate all ambiguity
 3. **Progressive Disclosure**: Tools appear as capabilities are needed, not all at once
 4. **Standard MCP**: AI agents already know how to handle MCP tool expansion
@@ -235,8 +235,8 @@ not provide structure. GABS provides that structure.
 ### Real-World Outcome:
 AI agents working with GABS will naturally develop patterns like:
 
-1. **Start with basics**: Use core `games.*` tools to manage games
-2. **Discover capabilities**: Use `games.tool_names`, then `games.tool_detail` for the few tools you want to inspect; fully qualified tool names let you omit `gameId` in the detail and call steps
+1. **Start with basics**: Use core `games_*` tools to manage games
+2. **Discover capabilities**: Use `games_tool_names`, then `games_tool_detail` for the few tools you want to inspect; fully qualified tool names let you omit `gameId` in the detail and call steps
 3. **Use clear names**: Always use game-prefixed tool names for clarity
 4. **Cache intelligently**: Refresh tool knowledge after game state changes
 

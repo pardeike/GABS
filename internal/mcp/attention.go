@@ -252,7 +252,7 @@ func buildAttentionBlockedToolResult(gameID string, toolName string, attention *
 	return &ToolResult{
 		Content: []Content{{
 			Type: "text",
-			Text: fmt.Sprintf("Tool call '%s' for game '%s' was not executed because important game information requires acknowledgement.%s Review it with games.get_attention, acknowledge it with games.ack_attention, then retry the original call.", toolName, gameID, summary),
+			Text: fmt.Sprintf("Tool call '%s' for game '%s' was not executed because important game information requires acknowledgement.%s Review it with games_get_attention, acknowledge it with games_ack_attention, then retry the original call.", toolName, gameID, summary),
 		}},
 		StructuredContent: map[string]interface{}{
 			"executed":  false,
@@ -270,7 +270,7 @@ func (s *Server) resolveAttentionClient(gamesConfig *config.GamesConfig, request
 		game, exists := s.resolveGameId(gamesConfig, requestedGame)
 		if !exists {
 			return nil, nil, &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games.list to see available games.", requestedGame)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", requestedGame)}},
 				IsError: true,
 			}
 		}
@@ -284,7 +284,7 @@ func (s *Server) resolveAttentionClient(gamesConfig *config.GamesConfig, request
 				disconnectNote = " " + disconnectNote
 			}
 			return nil, nil, &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' is not connected via GABP. Use games.status to verify whether it is still running, then use games.connect or games.start as appropriate.%s", game.ID, disconnectNote)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' is not connected via GABP. Use games_status to verify whether it is still running, then use games_connect or games_start as appropriate.%s", game.ID, disconnectNote)}},
 				IsError: true,
 			}
 		}
@@ -305,7 +305,7 @@ func (s *Server) resolveAttentionClient(gamesConfig *config.GamesConfig, request
 	switch len(connectedGameIDs) {
 	case 0:
 		return nil, nil, &ToolResult{
-			Content: []Content{{Type: "text", Text: "No games are currently connected via GABP. Use games.status, games.start, or games.connect first."}},
+			Content: []Content{{Type: "text", Text: "No games are currently connected via GABP. Use games_status, games_start, or games_connect first."}},
 			IsError: true,
 		}
 	case 1:

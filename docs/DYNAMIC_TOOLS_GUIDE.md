@@ -13,20 +13,23 @@ When GABS starts, AI agents see only core game management tools:
 
 ```
 Stable core tools:
-- games.list         - List configured game IDs
-- games.show         - Inspect one configured game
-- games.start        - Start a game
-- games.stop         - Stop a game gracefully
-- games.kill         - Force terminate a game
-- games.status       - Check game status
-- games.tool_names   - Compact mirrored-tool discovery
-- games.tool_detail  - Detailed schema for one tool
-- games.tools        - Rich compatibility listing
-- games.connect      - Reattach to a running game's GABP server
-- games.get_attention - Inspect the current blocking attention item
-- games.ack_attention - Acknowledge attention and resume normal calls
-- games.call_tool    - Call a mirrored tool through the stable core surface
+- games_list          - List configured game IDs
+- games_show          - Inspect one configured game
+- games_start         - Start a game
+- games_stop          - Stop a game gracefully
+- games_kill          - Force terminate a game
+- games_status        - Check game status
+- games_tool_names    - Compact mirrored-tool discovery
+- games_tool_detail   - Detailed schema for one tool
+- games_tools         - Rich compatibility listing
+- games_connect       - Reattach to a running game's GABP server
+- games_get_attention - Inspect the current blocking attention item
+- games_ack_attention - Acknowledge attention and resume normal calls
+- games_call_tool     - Call a mirrored tool through the stable core surface
 ```
+
+Legacy dotted names such as `games.list` are accepted as call aliases, but
+strict-safe names are what `tools/list` advertises by default.
 
 ### Phase 2: Game Connection (Dynamic Expansion)
 After starting a game with GABP mods, tools expand dramatically:
@@ -36,20 +39,20 @@ Available tools expand with mirrored game tools. The exact set depends on the
 connected game and mod:
 
 Minecraft-Specific Examples:
-- minecraft.inventory.get     - Get player inventory
-- minecraft.inventory.set     - Modify player inventory  
-- minecraft.world.get_block   - Check block at position
-- minecraft.world.place_block - Place block in world
-- minecraft.player.teleport   - Teleport player
-- minecraft.chat.send         - Send chat message
-- minecraft.time.set          - Set world time
-- minecraft.weather.set       - Control weather
+- minecraft_inventory_get     - Get player inventory
+- minecraft_inventory_set     - Modify player inventory
+- minecraft_world_get_block   - Check block at position
+- minecraft_world_place_block - Place block in world
+- minecraft_player_teleport   - Teleport player
+- minecraft_chat_send         - Send chat message
+- minecraft_time_set          - Set world time
+- minecraft_weather_set       - Control weather
 
 RimWorld-Specific Tools (if rimworld also starts):
-- rimworld.inventory.get      - Get colonist inventory
-- rimworld.crafting.build     - Build items/structures
-- rimworld.colonist.command   - Give colonist orders
-- rimworld.research.progress  - Check research status
+- rimworld_inventory_get      - Get colonist inventory
+- rimworld_crafting_build     - Build items/structures
+- rimworld_colonist_command   - Give colonist orders
+- rimworld_research_progress  - Check research status
 ```
 
 GABS can also have multiple live sessions. If another session already owns a
@@ -57,30 +60,36 @@ running game, `games.start` and `games.connect` return quickly instead of
 hanging, and `games.connect {"forceTakeover": true}` can intentionally move
 ownership to the current session.
 
+For low-latency startup loops, `games_start` returns after the GABP handshake
+instead of waiting for full tool mirroring. The mirror refresh runs in the
+background, and `games_call_tool` can still dispatch a fully qualified slash or
+dotted connected game tool immediately. Use `games_tool_names` when you need
+discovery; skip it when the next command name is already known.
+
 ## AI Discovery Strategies
 
-### 1. The `games.tool_names` -> `games.tool_detail` Discovery Pattern (Recommended)
+### 1. The `games_tool_names` -> `games_tool_detail` Discovery Pattern (Recommended)
 
-**Best Practice**: Use `games.tool_names` for low-token discovery, then call `games.tool_detail` only for the few tools you might actually use. Keep `games.tools` for compatibility or when you intentionally want the richer one-shot listing.
+**Best Practice**: Use `games_tool_names` for low-token discovery, then call `games_tool_detail` only for the few tools you might actually use. Keep `games_tools` for compatibility or when you intentionally want the richer one-shot listing.
 
 ```javascript
 // AI Discovery Workflow
 async function discoverGameCapabilities() {
   // 1. See what games are available
-  const games = await mcp.callTool("games.list", {});
+  const games = await mcp.callTool("games_list", {});
   
   // 2. Check what games are running  
-  const status = await mcp.callTool("games.status", {});
+  const status = await mcp.callTool("games_status", {});
   
   // 3. Discover compact tool names for each running game
-  const allToolNames = await mcp.callTool("games.tool_names", {"brief": true});
+  const allToolNames = await mcp.callTool("games_tool_names", {"brief": true});
   
   // 4. Get specific names for the game of interest
-  const minecraftToolNames = await mcp.callTool("games.tool_names", {"gameId": "minecraft", "brief": true});
+  const minecraftToolNames = await mcp.callTool("games_tool_names", {"gameId": "minecraft", "brief": true});
 
   // 5. Inspect one candidate in detail only when needed
-  const inventoryDetail = await mcp.callTool("games.tool_detail", {
-    "tool": "minecraft.inventory.get"
+  const inventoryDetail = await mcp.callTool("games_tool_detail", {
+    "tool": "minecraft_inventory_get"
   });
   
   return { games, status, allToolNames, minecraftToolNames, inventoryDetail };
@@ -93,16 +102,16 @@ AI agents should treat tool discovery as a progressive enhancement:
 
 ```
 Phase 1: Use core tools to start games
-"Start the Minecraft server" → games.start {"gameId": "minecraft"}
+"Start the Minecraft server" -> games_start {"gameId": "minecraft"}
 
 Phase 2: Discover what's now possible  
-"What can I do with Minecraft now?" → games.tool_names {"gameId": "minecraft", "brief": true}
+"What can I do with Minecraft now?" -> games_tool_names {"gameId": "minecraft", "brief": true}
 
 Phase 2b: Inspect one candidate when needed
-"What does minecraft.inventory.get accept?" → games.tool_detail {"tool": "minecraft.inventory.get"}
+"What does minecraft_inventory_get accept?" -> games_tool_detail {"tool": "minecraft_inventory_get"}
 
 Phase 3: Use discovered tools
-"Get Steve's inventory" → minecraft.inventory.get {"playerId": "steve"}
+"Get Steve's inventory" -> minecraft_inventory_get {"playerId": "steve"}
 ```
 
 ### 3. Context-Aware Tool Usage
@@ -111,11 +120,11 @@ Tools are namespaced by game ID to prevent conflicts:
 
 ```
 ✅ Clear Intent:
-- minecraft.inventory.get {"playerId": "steve"}      # Steve's Minecraft inventory
-- rimworld.inventory.get {"colonistId": "alice"}     # Alice's RimWorld inventory
+- minecraft_inventory_get {"playerId": "steve"}      # Steve's Minecraft inventory
+- rimworld_inventory_get {"colonistId": "alice"}     # Alice's RimWorld inventory
 
 ❌ Ambiguous (avoided by design):  
-- inventory.get {"playerId": "steve"}                # Which game?
+- inventory_get {"playerId": "steve"}                # Which game?
 ```
 
 ## Real-World AI Interaction Examples
@@ -124,22 +133,22 @@ Tools are namespaced by game ID to prevent conflicts:
 ```
 User: "Help me manage my games"
 AI: Let me see what games you have configured...
-    → games.list
+    -> games_list
     
 AI: I see you have minecraft and rimworld configured. Neither is running.
     Would you like me to start one of them?
 
 User: "Start Minecraft"  
 AI: Starting Minecraft...
-    → games.start {"gameId": "minecraft"}
+    -> games_start {"gameId": "minecraft"}
     
 AI: Minecraft started! Let me see what I can help you with...
-    → games.tool_names {"gameId": "minecraft", "brief": true}
+    -> games_tool_names {"gameId": "minecraft", "brief": true}
     
 AI: Great! Now I can help you with:
-    - Managing your inventory (minecraft.inventory.get/set)
-    - Building in your world (minecraft.world.place_block) 
-    - Teleporting around (minecraft.player.teleport)
+    - Managing your inventory (minecraft_inventory_get/set)
+    - Building in your world (minecraft_world_place_block)
+    - Teleporting around (minecraft_player_teleport)
     - Controlling time and weather
     What would you like to do?
 ```
@@ -148,9 +157,9 @@ AI: Great! Now I can help you with:
 ```
 User: "I want to run both games and manage them"
 AI: I'll start both games and show you the expanded capabilities...
-    → games.start {"gameId": "minecraft"}
-    → games.start {"gameId": "rimworld"}  
-    → games.tool_names {"brief": true}
+    -> games_start {"gameId": "minecraft"}
+    -> games_start {"gameId": "rimworld"}
+    -> games_tool_names {"brief": true}
     
 AI: Perfect! Now I can help you with:
     
@@ -172,8 +181,8 @@ AI: Perfect! Now I can help you with:
 ```
 User: "What's possible with my Minecraft server?"
 AI: Let me check what your Minecraft mod exposes...
-    → games.tool_names {"gameId": "minecraft", "brief": true}
-    → games.tool_detail {"tool": "minecraft.inventory.get"}
+    -> games_tool_names {"gameId": "minecraft", "brief": true}
+    -> games_tool_detail {"tool": "minecraft_inventory_get"}
     
 AI: Your Minecraft setup provides these capabilities:
     - Inventory System: Get/modify player inventories
@@ -185,7 +194,7 @@ AI: Your Minecraft setup provides these capabilities:
 
 User: "Give me a diamond sword"
 AI: I'll add a diamond sword to your inventory...
-    → minecraft.inventory.set {"playerId": "steve", "item": "diamond_sword", "count": 1}
+    -> minecraft_inventory_set {"playerId": "steve", "item": "diamond_sword", "count": 1}
 ```
 
 ## Technical Implementation for AI Developers
@@ -213,7 +222,7 @@ class GABSToolManager {
   }
   
   async refreshToolCache() {
-    const tools = await this.mcp.callTool("games.tool_names", {"brief": true});
+    const tools = await this.mcp.callTool("games_tool_names", {"brief": true});
     // Parse and cache by game...
     this.lastRefresh = Date.now();
   }
@@ -230,10 +239,8 @@ async function intelligentGameManagement(request) {
   if (intent.requiresGame && !await isGameRunning(intent.gameId)) {
     await startGame(intent.gameId);
     
-    // 3. Wait a moment for GABP connection
-    await sleep(2000);
-    
-    // 4. Refresh tool knowledge
+    // 3. If the next tool name is known, call it via games_call_tool immediately.
+    // Refresh tool knowledge only when discovery is needed.
     await refreshAvailableTools();
   }
   
@@ -245,28 +252,28 @@ async function intelligentGameManagement(request) {
 ## Best Practices for AI Agents
 
 ### ✅ Do:
-1. **Use `games.tool_names` for discovery** before attempting game-specific actions; add `brief: true` when a one-line structured summary helps ranking
+1. **Use `games_tool_names` for discovery** before attempting game-specific actions; add `brief: true` when a one-line structured summary helps ranking
 2. **Cache tool lists** but refresh periodically or after game state changes  
-3. **Use `games.tool_detail`** only for the few tools you might actually call; omit `gameId` when the tool name is already fully qualified
+3. **Use `games_tool_detail`** only for the few tools you might actually call; omit `gameId` when the tool name is already fully qualified
 4. **Handle tool expansion gracefully** - treat new tools as opportunities
 5. **Use game-prefixed tool names** explicitly to avoid ambiguity
 6. **Group tools by game** in user interfaces for clarity
 
 ### ❌ Don't:
-1. **Don't assume tools exist** without checking via `games.tool_names`
+1. **Don't assume tools exist** without checking via `games_tool_names`
 2. **Don't cache tools indefinitely** - they change as games start/stop
 3. **Don't try to use generic tool names** like `inventory.get` 
 4. **Don't overwhelm users** with massive detailed tool dumps - group and filter intelligently
 5. **Don't treat duplicate starts as success signals** - if another live GABS
-   session already owns the game, expect `games.start` or `games.connect` to
+   session already owns the game, expect `games_start` or `games_connect` to
    return a quick "already running/owned" style message
 
 ## GABS Design Advantages for AI
 
 The GABS architecture specifically helps AI agents handle dynamic tools:
 
-1. **Clear Namespacing**: `minecraft.inventory.get` vs `rimworld.inventory.get` eliminates ambiguity
-2. **Discovery Tools**: `games.tool_names` and `games.tool_detail` provide structured tool exploration
+1. **Clear Namespacing**: `minecraft_inventory_get` vs `rimworld_inventory_get` eliminates ambiguity
+2. **Discovery Tools**: `games_tool_names` and `games_tool_detail` provide structured tool exploration
 3. **Gradual Disclosure**: Tools appear as games connect, not all at once
 4. **Status Awareness**: AI can check game state before attempting tool use
 5. **Fallback Gracefully**: Core game management always available
@@ -275,7 +282,7 @@ The GABS architecture specifically helps AI agents handle dynamic tools:
 
 AI agents working with GABS will handle dynamic tool expansion effectively because:
 
-1. **The discovery pattern is predictable** - start with `games.tool_names`
+1. **The discovery pattern is predictable** - start with `games_tool_names`
 2. **Tool names are unambiguous** - game prefixes prevent conflicts  
 3. **Expansion is progressive** - tools appear as capabilities are needed
 4. **The core remains stable** - basic game management always works

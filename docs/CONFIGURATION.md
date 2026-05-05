@@ -234,19 +234,31 @@ use `games.connect` with `forceTakeover: true`.
 
 ## Tool Normalization Configuration
 
-Only use this if your AI platform has strict tool naming rules, such as the
-OpenAI API.
+GABS exposes strict-safe MCP tool names by default. This keeps `tools/list`
+accepted by clients that reject dotted names, including Claude variants seen in
+the field. The configuration key keeps its historical name for compatibility.
 
 ### Tool Normalization Options
 
 The `toolNormalization` section supports these options:
 
-- **`enableOpenAINormalization`** (boolean): Enable/disable OpenAI-compatible normalization (default: `false`)
-  - Replaces dots (.) with underscores (_) in tool names
+- **`enableOpenAINormalization`** (boolean): Enable/disable strict-safe MCP name normalization (default: `true` when `toolNormalization` is omitted)
+  - Replaces dots, slashes, and other unsafe separators with underscores
   - Enforces 64-character length limit
-  - Ensures tool names start with a letter
 - **`maxToolNameLength`** (integer): Maximum length for tool names (default: `64`)
 - **`preserveOriginalName`** (boolean): Store original name in tool description/metadata (default: `true`)
+
+Set `enableOpenAINormalization` to `false` only when you intentionally need the
+old dotted MCP names in `tools/list`.
+
+**Example transformations:**
+- `games.call_tool` -> `games_call_tool`
+- `minecraft.inventory.get` -> `minecraft_inventory_get`
+- GABP `rimbridge/ping` for game `rimworld` -> `rimworld_rimbridge_ping`
+
+Call aliases remain backward compatible: `games_call_tool`, `games.call_tool`,
+qualified slash names, qualified dotted names, and discovered strict-safe names
+all resolve without underscore guessing.
 
 ### Example Configuration
 
@@ -264,6 +276,8 @@ The `toolNormalization` section supports these options:
 }
 ```
 
+For complete details about tool normalization, see the [Tool Normalization Guide](OPENAI_TOOL_NORMALIZATION.md).
+
 ## Startup Timeout Configuration
 
 If your game takes longer to appear in the process list or longer for its GABP
@@ -279,6 +293,10 @@ The `timeouts.startup` section supports these options:
 - **`gabpConnectSeconds`** (integer): How long `games.start` waits for the
   game's GABP server to become available before returning control to you
   (default: `60`)
+
+`games_start` only waits for the GABP handshake. Mirroring the connected mod's
+full tool list can continue briefly in the background, so known startup commands
+can be sent immediately through `games_call_tool` while discovery tools refresh.
 
 ### Example Configuration
 
@@ -296,19 +314,6 @@ The `timeouts.startup` section supports these options:
   }
 }
 ```
-
-### When to Use OpenAI Normalization
-
-Enable this feature when:
-- Using GABS with OpenAI's API directly
-- Your game mods use dotted tool names (e.g., `minecraft.inventory.get`)
-- You need strict OpenAI API compliance
-
-**Example transformations:**
-- `minecraft.inventory.get` → `minecraft_inventory_get`
-- `rimworld.crafting.build` → `rimworld_crafting_build`
-
-For complete details about tool normalization, see the [OpenAI Tool Normalization Guide](OPENAI_TOOL_NORMALIZATION.md).
 
 ## Improved Game Stopping
 

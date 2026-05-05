@@ -158,34 +158,44 @@ In the GABP layer, your mod is the server and GABS is the client.
 
 ## Common MCP Tools
 
-Most users only need a few tools at first:
+Most users only need a few tools at first. Release builds expose strict-safe MCP
+tool names by default because some clients reject dots in tool names:
 
-- **`games.list`** - List configured game IDs
-- **`games.show`** - Show one saved game config
-- **`games.start`** - Start a game
-- **`games.stop`** - Stop a game gracefully
-- **`games.kill`** - Force stop a game
-- **`games.status`** - Check if a game is running
-- **`games.connect`** - Reconnect to a running game's mod bridge
-- **`games.tool_names`** - List mirrored game-specific tools after a mod connects
-- **`games.tool_detail`** - Show the schema for one mirrored tool
-- **`games.call_tool`** - Call a mirrored tool through the stable core surface
+- **`games_list`** - List configured game IDs
+- **`games_show`** - Show one saved game config
+- **`games_start`** - Start a game
+- **`games_stop`** - Stop a game gracefully
+- **`games_kill`** - Force stop a game
+- **`games_status`** - Check if a game is running
+- **`games_connect`** - Reconnect to a running game's mod bridge
+- **`games_tool_names`** - List mirrored game-specific tools after a mod connects
+- **`games_tool_detail`** - Show the schema for one mirrored tool
+- **`games_call_tool`** - Call a connected game tool through the stable core surface
+
+The older dotted names such as `games.list` and `games.call_tool` remain accepted
+as call aliases, but `tools/list` advertises strict-safe names unless you
+explicitly disable normalization in config.
 
 For the full MCP surface and advanced behavior, see the
 [AI Integration Guide](docs/INTEGRATION.md).
 
 ## Game-Specific Tools from Mods
 
-When a GABP-compatible mod connects, GABS mirrors the mod's canonical tool
-names into MCP-friendly names such as `minecraft.inventory.get` or
-`rimworld.crafting.build`.
+When a GABP-compatible mod connects, GABS mirrors the mod's canonical
+slash-delimited GABP tool names into strict-safe MCP names such as
+`minecraft_inventory_get` or `rimworld_crafting_build`.
+After `games_start`, tool mirroring can finish asynchronously so the first game
+command is not delayed by large `tools/list` responses. Use `games_call_tool`
+with a fully qualified slash or dotted alias when you want to issue the first
+command immediately; `games_tool_names` and direct mirrored MCP tools become
+available as soon as mirroring completes.
 
 The usual discovery flow is:
 ```
 AI: "Reconnect to RimWorld and show me its mod tools"
-GABS: games.connect {"gameId": "rimworld"}
-GABS: games.tool_names {"gameId": "rimworld", "brief": true}
-GABS: games.tool_detail {"tool": "rimworld.crafting.build"}
+GABS: games_connect {"gameId": "rimworld"}
+GABS: games_tool_names {"gameId": "rimworld", "brief": true}
+GABS: games_tool_detail {"tool": "rimworld_crafting_build"}
 ```
 
 Most users can ignore attention gating, resource mirroring, and protocol

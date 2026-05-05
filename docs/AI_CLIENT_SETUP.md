@@ -157,7 +157,8 @@ the `server` subcommand.
 
 ### OpenAI-Style Tool Calling Clients
 
-Only do this if your client has strict OpenAI-style tool naming rules.
+This is enabled by default in current releases. Keep it enabled if your client
+has strict OpenAI- or Claude-style tool naming rules.
 
 Enable tool normalization in `~/.gabs/config.json`:
 
@@ -171,8 +172,9 @@ Enable tool normalization in `~/.gabs/config.json`:
 }
 ```
 
-This turns tool names like `minecraft.inventory.get` into
-`minecraft_inventory_get`.
+This turns tool names like `games.call_tool` and `minecraft.inventory.get` into
+`games_call_tool` and `minecraft_inventory_get`. Older dotted names remain
+accepted as call aliases.
 
 See also:
 
@@ -197,7 +199,7 @@ curl -X POST http://localhost:8080/mcp \
     "id": 1,
     "method": "tools/call",
     "params": {
-      "name": "games.list",
+      "name": "games_list",
       "arguments": {}
     }
   }'
