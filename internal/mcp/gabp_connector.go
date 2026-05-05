@@ -97,7 +97,7 @@ func (c *ServerGABPConnector) setupToolMirroring(ctx context.Context, gameID str
 	if attentionTimeout > attentionRefreshTimeout {
 		attentionTimeout = attentionRefreshTimeout
 	}
-	c.server.setupGABPAttention(gameID, client, attentionTimeout)
+	go c.server.setupGABPAttention(gameID, client, attentionTimeout)
 
 	return nil
 }
