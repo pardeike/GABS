@@ -91,7 +91,7 @@ func main() {
 		httpAddrNew  = fs.String("addr", "localhost:8080", "HTTP server address (for 'gabs server http' command)")
 		configDir    = fs.String("configDir", "", "Override GABS config directory")
 		logLevel     = fs.String("log-level", "info", "Log level: trace|debug|info|warn|error")
-		backoff      = fs.String("reconnectBackoff", defaultBackoff, "Reconnect backoff window, e.g. '100ms..5s'")
+		backoff      = fs.String("reconnectBackoff", defaultBackoff, "Reconnect backoff window, e.g. '100ms..1s'")
 		grace        = fs.Duration("grace", 3*time.Second, "Graceful stop timeout before kill")
 	)
 
@@ -658,23 +658,23 @@ func resolveMacOSAppBundle(appPath string) (string, error) {
 
 func parseBackoff(s string) (time.Duration, time.Duration, error) {
 	// Parse "<min>..<max>" format
-	// Examples: "100ms..5s", "1s..30s", "250ms..inf"
+	// Examples: "100ms..1s", "1s..30s", "250ms..inf"
 	switch {
 	case s == "", s == defaultBackoff:
-		return 100 * time.Millisecond, 5 * time.Second, nil
+		return 100 * time.Millisecond, 1 * time.Second, nil
 	default:
 		// Split on ".."
 		parts := strings.Split(s, "..")
 		if len(parts) != 2 {
-			return 100 * time.Millisecond, 5 * time.Second, fmt.Errorf("invalid format, expected 'min..max'")
+			return 100 * time.Millisecond, 1 * time.Second, fmt.Errorf("invalid format, expected 'min..max'")
 		}
 
 		min, err := time.ParseDuration(parts[0])
 		if err != nil {
-			return 100 * time.Millisecond, 5 * time.Second, fmt.Errorf("invalid min duration: %w", err)
+			return 100 * time.Millisecond, 1 * time.Second, fmt.Errorf("invalid min duration: %w", err)
 		}
 		if min < 0 {
-			return 100 * time.Millisecond, 5 * time.Second, fmt.Errorf("min duration cannot be negative")
+			return 100 * time.Millisecond, 1 * time.Second, fmt.Errorf("min duration cannot be negative")
 		}
 
 		var max time.Duration
@@ -683,15 +683,15 @@ func parseBackoff(s string) (time.Duration, time.Duration, error) {
 		} else {
 			max, err = time.ParseDuration(parts[1])
 			if err != nil {
-				return 100 * time.Millisecond, 5 * time.Second, fmt.Errorf("invalid max duration: %w", err)
+				return 100 * time.Millisecond, 1 * time.Second, fmt.Errorf("invalid max duration: %w", err)
 			}
 			if max < 0 {
-				return 100 * time.Millisecond, 5 * time.Second, fmt.Errorf("max duration cannot be negative")
+				return 100 * time.Millisecond, 1 * time.Second, fmt.Errorf("max duration cannot be negative")
 			}
 		}
 
 		if min > max {
-			return 100 * time.Millisecond, 5 * time.Second, fmt.Errorf("min duration (%v) cannot be greater than max duration (%v)", min, max)
+			return 100 * time.Millisecond, 1 * time.Second, fmt.Errorf("min duration (%v) cannot be greater than max duration (%v)", min, max)
 		}
 
 		return min, max, nil
