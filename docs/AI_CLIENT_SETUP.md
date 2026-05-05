@@ -180,6 +180,24 @@ See also:
 
 - `docs/OPENAI_TOOL_NORMALIZATION.md`
 
+### Clients That Reject `outputSchema`
+
+Some MCP clients reject tool definitions that include `outputSchema` in
+`tools/list`. Claude Code has shown this behavior with game mods that expose
+non-object output schemas. If your client disconnects immediately after
+`games_connect` or a `tools/list_changed` refresh, enable this in
+`~/.gabs/config.json`:
+
+```json
+{
+  "stripOutputSchema": true
+}
+```
+
+This only removes `outputSchema` from the public `tools/list` response. Tool
+input schemas remain available, and detailed output metadata is still available
+through `games_tool_detail`.
+
 ## Optional HTTP Mode
 
 Most users do not need this. Use it only when your tooling wants HTTP instead

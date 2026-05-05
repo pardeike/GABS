@@ -6,6 +6,7 @@
     "maxToolNameLength": 64,
     "preserveOriginalName": true
   },
+  "stripOutputSchema": false,
   "portRanges": {
     "customRanges": [
       {

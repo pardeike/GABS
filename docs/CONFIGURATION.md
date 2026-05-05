@@ -121,6 +121,7 @@ the GABP wire version.
     "maxToolNameLength": 64,
     "preserveOriginalName": true
   },
+  "stripOutputSchema": false,
   "timeouts": {
     "startup": {
       "processStartSeconds": 10,
@@ -270,6 +271,7 @@ all resolve without underscore guessing.
     "maxToolNameLength": 64,
     "preserveOriginalName": true
   },
+  "stripOutputSchema": false,
   "games": {
     // ... your game configurations
   }
@@ -277,6 +279,28 @@ all resolve without underscore guessing.
 ```
 
 For complete details about tool normalization, see the [Tool Normalization Guide](OPENAI_TOOL_NORMALIZATION.md).
+
+## Output Schema Stripping
+
+Some MCP clients reject `tools/list` responses when a tool includes an
+`outputSchema` field, especially if a game mod advertises a non-object output
+schema. In that case, GABS can omit output schemas from the public tool list:
+
+```json
+{
+  "stripOutputSchema": true
+}
+```
+
+Default: `false`.
+
+Use this for clients such as Claude Code if they disconnect after
+`games_connect` or after a `tools/list_changed` refresh with an
+`outputSchema.type` validation error.
+
+This does not change tool execution and does not remove input schemas. Detailed
+tool metadata, including output schema information, remains available through
+`games_tool_detail`.
 
 ## Startup Timeout Configuration
 

@@ -88,6 +88,16 @@ This converts tool names like `minecraft.inventory.get` to
 `minecraft_inventory_get` for client compatibility. See
 [Tool Normalization Guide](OPENAI_TOOL_NORMALIZATION.md) for complete details.
 
+Some clients also reject `outputSchema` fields in `tools/list`. If Claude Code
+or another MCP client disconnects after `games_connect` with an
+`outputSchema.type` validation error, add this to `~/.gabs/config.json`:
+
+```json
+{
+  "stripOutputSchema": true
+}
+```
+
 ### Claude Desktop
 
 Add this to your Claude Desktop MCP settings:
