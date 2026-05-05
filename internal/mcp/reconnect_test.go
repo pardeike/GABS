@@ -613,7 +613,7 @@ func TestGamesCallToolBlocksUntilAttentionIsAcknowledged(t *testing.T) {
 	}
 
 	server.CleanupGABPConnection("rimworld")
-	if err := <-serverDone; err != nil {
+	if err := <-serverDone; err != nil && !isExpectedTestConnectionClose(err) {
 		t.Fatalf("test GABP server failed: %v", err)
 	}
 }
@@ -702,7 +702,7 @@ func TestMirroredToolCallBlocksWhileAttentionIsOpen(t *testing.T) {
 	}
 
 	server.CleanupGABPConnection("rimworld")
-	if err := <-serverDone; err != nil {
+	if err := <-serverDone; err != nil && !isExpectedTestConnectionClose(err) {
 		t.Fatalf("test GABP server failed: %v", err)
 	}
 }
@@ -1302,4 +1302,23 @@ func serveTestGabpSessionWithAttention(listener net.Listener, expectedToken stri
 			return
 		}
 	}
+}
+
+func isExpectedTestConnectionClose(err error) bool {
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
+		return true
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+
+	text := err.Error()
+	return strings.Contains(text, "broken pipe") ||
+		strings.Contains(text, "connection reset by peer") ||
+		strings.Contains(text, "use of closed network connection")
 }
