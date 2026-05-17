@@ -2,11 +2,13 @@ package util
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 )
@@ -171,6 +173,7 @@ func (r *LSPFrameReader) ReadMessage() ([]byte, error) {
 // LSPFrameWriter writes LSP-framed messages
 type LSPFrameWriter struct {
 	writer io.Writer
+	mu     sync.Mutex
 }
 
 // NewLSPFrameWriter creates a new LSP frame writer
@@ -180,13 +183,23 @@ func NewLSPFrameWriter(w io.Writer) *LSPFrameWriter {
 
 // WriteMessage writes a message with LSP framing
 func (w *LSPFrameWriter) WriteMessage(data []byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	header := fmt.Sprintf("Content-Length: %d\r\n\r\n", len(data))
-	_, err := w.writer.Write([]byte(header))
+	var frame bytes.Buffer
+	frame.Grow(len(header) + len(data))
+	frame.WriteString(header)
+	frame.Write(data)
+
+	n, err := w.writer.Write(frame.Bytes())
 	if err != nil {
 		return err
 	}
-	_, err = w.writer.Write(data)
-	return err
+	if n != frame.Len() {
+		return io.ErrShortWrite
+	}
+	return nil
 }
 
 // WriteJSON marshals object to JSON and writes with LSP framing
@@ -317,6 +330,7 @@ func (r *AutoFrameReader) detectMode() (FramingMode, error) {
 type AutoFrameWriter struct {
 	writer io.Writer
 	mode   FramingMode
+	mu     sync.Mutex
 }
 
 // NewAutoFrameWriter creates a writer whose framing mode is set once the first
@@ -327,11 +341,17 @@ func NewAutoFrameWriter(w io.Writer) *AutoFrameWriter {
 
 // SetMode selects the framing mode used by WriteJSON.
 func (w *AutoFrameWriter) SetMode(mode FramingMode) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	w.mode = mode
 }
 
 // WriteJSON marshals and writes a JSON message using the configured framing.
 func (w *AutoFrameWriter) WriteJSON(obj interface{}) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	switch w.mode {
 	case FramingLSP:
 		return NewLSPFrameWriter(w.writer).WriteJSON(obj)

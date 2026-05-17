@@ -183,10 +183,9 @@ See also:
 ### Clients That Reject `outputSchema`
 
 Some MCP clients reject tool definitions that include `outputSchema` in
-`tools/list`. Claude Code has shown this behavior with game mods that expose
-non-object output schemas. If your client disconnects immediately after
-`games_connect` or a `tools/list_changed` refresh, enable this in
-`~/.gabs/config.json`:
+`tools/list`. Mirrored game tools are discovered through `games_tool_names`, but
+this option remains useful if a public tool definition causes a client-side
+schema rejection. Enable this in `~/.gabs/config.json`:
 
 ```json
 {

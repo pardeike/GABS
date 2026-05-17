@@ -6,6 +6,9 @@
 *.dylib
 gabs
 gabs-*
+!skills/
+!skills/gabs-mcp/
+!skills/gabs-mcp/**
 
 # Test binary, built with `go test -c`
 *.test

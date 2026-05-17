@@ -29,6 +29,10 @@ by default; older dotted names remain accepted as call aliases.
 - **`games_ack_attention`** - Acknowledge the current blocking attention item and resume normal calls
 - **`games_call_tool`** - Call a mirrored game tool through the stable core surface
 
+Mirrored game tools are intentionally not advertised in the public `tools/list`
+response. Discover them with `games_tool_names`, inspect one with
+`games_tool_detail`, and call it through `games_call_tool`.
+
 **Pro tip**: You can use either the game ID (`"rimworld"`) or the launch target (`"294100"` for Steam) in any tool.
 
 ## Ownership and Reconnect Behavior
@@ -89,8 +93,8 @@ This converts tool names like `minecraft.inventory.get` to
 [Tool Normalization Guide](OPENAI_TOOL_NORMALIZATION.md) for complete details.
 
 Some clients also reject `outputSchema` fields in `tools/list`. If Claude Code
-or another MCP client disconnects after `games_connect` with an
-`outputSchema.type` validation error, add this to `~/.gabs/config.json`:
+or another MCP client disconnects with an `outputSchema.type` validation error,
+add this to `~/.gabs/config.json`:
 
 ```json
 {

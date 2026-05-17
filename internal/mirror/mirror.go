@@ -21,8 +21,8 @@ type GABPClient interface {
 // MCPServer interface for Mirror to work with both real and mock servers
 type MCPServer interface {
 	RegisterToolWithConfig(tool mcp.Tool, handler func(args map[string]interface{}) (*mcp.ToolResult, error), normalizationConfig *config.ToolNormalizationConfig)
+	RegisterGameTool(gameId string, tool mcp.Tool, handler func(args map[string]interface{}) (*mcp.ToolResult, error), normalizationConfig *config.ToolNormalizationConfig)
 	RegisterResource(resource mcp.Resource, handler func() ([]mcp.Content, error))
-	SendToolsListChangedNotification()
 	SendResourcesListChangedNotification()
 }
 
@@ -109,21 +109,13 @@ func (m *Mirror) SyncTools() error {
 			}
 		}(originalToolName)
 
-		// Register the tool with normalization config
-		m.server.RegisterToolWithConfig(mcpTool, handler, m.normalizationConfig)
+		// Register as a tracked game tool so the public tools/list response can
+		// stay stable while games_tool_names/games_call_tool expose the game surface.
+		m.server.RegisterGameTool(m.gameId, mcpTool, handler, m.normalizationConfig)
 		m.log.Debugw("registered GABP tool as game-specific MCP tool", "gameId", m.gameId, "originalName", tool.Name, "mcpName", gameSpecificName)
 	}
 
 	m.log.Infow("synced GABP tools to MCP with game namespacing", "gameId", m.gameId, "count", len(gabpTools))
-
-	// Send tools/list_changed notification to AI agents
-	// This automatically alerts AI agents that new tools are available without
-	// them needing to poll. AI agents can then use games.tool_names and
-	// games.tool_detail to discover the new capabilities efficiently.
-	//
-	// This follows MCP specification for server-initiated notifications and ensures
-	// AI agents are immediately aware of dynamic tool expansion.
-	m.server.SendToolsListChangedNotification()
 
 	return nil
 }
@@ -146,11 +138,11 @@ func (m *Mirror) ExposeResources() error {
 	logsHandler := func() ([]mcp.Content, error) {
 		// Enhanced content with structured event information
 		eventData := map[string]interface{}{
-			"gameId":     m.gameId,
-			"timestamp":  fmt.Sprintf("%d", time.Now().Unix()),
-			"eventType":  "system",
-			"message":    fmt.Sprintf("GABP bridge active for game %s", m.gameId),
-			"source":     "gabs-mirror",
+			"gameId":       m.gameId,
+			"timestamp":    fmt.Sprintf("%d", time.Now().Unix()),
+			"eventType":    "system",
+			"message":      fmt.Sprintf("GABP bridge active for game %s", m.gameId),
+			"source":       "gabs-mirror",
 			"capabilities": m.client.GetCapabilities(),
 		}
 
@@ -160,7 +152,7 @@ func (m *Mirror) ExposeResources() error {
 				{Type: "text", Text: fmt.Sprintf("Error marshaling event data: %v", err)},
 			}, err
 		}
-		
+
 		return []mcp.Content{
 			{Type: "text", Text: string(eventJson)},
 		}, nil
@@ -195,7 +187,7 @@ func (m *Mirror) ExposeResources() error {
 				}
 				return toolNames
 			}(),
-			"lastUpdate":   fmt.Sprintf("%d", time.Now().Unix()),
+			"lastUpdate": fmt.Sprintf("%d", time.Now().Unix()),
 		}
 
 		stateJson, err := json.Marshal(stateData)
@@ -204,7 +196,7 @@ func (m *Mirror) ExposeResources() error {
 				{Type: "text", Text: fmt.Sprintf("Error marshaling state data: %v", err)},
 			}, err
 		}
-		
+
 		return []mcp.Content{
 			{Type: "text", Text: string(stateJson)},
 		}, nil
@@ -237,7 +229,7 @@ func (m *Mirror) ExposeResources() error {
 				{Type: "text", Text: fmt.Sprintf("Error marshaling stream info: %v", err)},
 			}, err
 		}
-		
+
 		return []mcp.Content{
 			{Type: "text", Text: string(streamJson)},
 		}, nil
@@ -248,12 +240,12 @@ func (m *Mirror) ExposeResources() error {
 	m.server.RegisterResource(stateResource, stateHandler)
 	m.server.RegisterResource(streamResource, streamHandler)
 
-	m.log.Infow("exposed comprehensive GABP resources as game-specific MCP resources", 
-		"gameId", m.gameId, 
+	m.log.Infow("exposed comprehensive GABP resources as game-specific MCP resources",
+		"gameId", m.gameId,
 		"resources", []string{"logs", "state", "stream"})
 
 	// Send resources/list_changed notification to alert AI agents
 	m.server.SendResourcesListChangedNotification()
-	
+
 	return nil
 }

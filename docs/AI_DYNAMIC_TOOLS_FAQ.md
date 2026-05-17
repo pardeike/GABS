@@ -7,9 +7,9 @@
 
 ## The Answer: Yes, This Pattern Fits MCP Well
 
-**TL;DR**: AI agents can handle GABS's dynamic tool expansion well because the
-system uses clear namespacing, compact discovery tools, and a predictable
-refresh pattern.
+**TL;DR**: AI agents can handle GABS's dynamic game capabilities well because
+the public MCP tool list stays stable while mirrored game tools are exposed
+through clear namespacing, compact discovery tools, and predictable refreshes.
 
 ## Why AI Agents Will Handle This Well
 
@@ -50,12 +50,13 @@ Even with many tools from multiple games, AI agents can stay oriented because:
 ```
 
 ### 3. **Progressive Disclosure Pattern**
-AI agents don't see everything at once. Tools appear as they become relevant:
+AI agents don't need to see everything at once. Discovery results appear as game
+capabilities become relevant:
 
 ```
 Phase 1: Stable core game-management tools
-Phase 2: Mirrored tools appear after a game connects
-Phase 3: More mirrored tools appear as more games connect
+Phase 2: Mirrored tools appear in games_tool_names after a game connects
+Phase 3: More mirrored tools appear in discovery as more games connect
 ```
 
 This is usually easier for AI agents than having every possible tool available
@@ -204,8 +205,9 @@ session open.
   "forceTakeover": true}` moves ownership to the current session
 
 ### Current State
-- **Tool change notifications are live**: AI clients get MCP
-  `tools/list_changed` when mirrored tools appear or refresh.
+- **Stable public tool list is live**: mirrored game tools no longer require
+  MCP `tools/list_changed`; clients discover them with `games_tool_names` and
+  call them with `games_call_tool`.
 - **Basic game resource mirroring is live**: GABS exposes per-game MCP
   resources such as event logs and current game state, and sends
   `resources/list_changed` when that surface changes.

@@ -1,0 +1,4 @@
+interface:
+  display_name: "GABS MCP"
+  short_description: "Operate GABS game bridge workflows"
+  default_prompt: "Use $gabs-mcp to inspect the configured games, connect to a game bridge, and call the right game tool."

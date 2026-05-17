@@ -101,9 +101,6 @@ func (s *Server) syncGABPToolsWithInterface(client GABPClientInterface, gameID s
 		s.RegisterGameTool(gameID, mcpTool, handler, nil)
 	}
 
-	// Send tools/list_changed notification to AI agents
-	s.SendToolsListChangedNotification()
-
 	return nil
 }
 
@@ -124,7 +121,7 @@ func TestGABPMirroringFunctionality(t *testing.T) {
 					"type": "object",
 					"properties": map[string]interface{}{
 						"slot": map[string]interface{}{
-							"type": "integer",
+							"type":        "integer",
 							"description": "Inventory slot number",
 						},
 					},
@@ -136,9 +133,9 @@ func TestGABPMirroringFunctionality(t *testing.T) {
 				InputSchema: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"x": map[string]interface{}{"type": "integer"},
-						"y": map[string]interface{}{"type": "integer"},
-						"z": map[string]interface{}{"type": "integer"},
+						"x":     map[string]interface{}{"type": "integer"},
+						"y":     map[string]interface{}{"type": "integer"},
+						"z":     map[string]interface{}{"type": "integer"},
 						"block": map[string]interface{}{"type": "string"},
 					},
 					"required": []string{"x", "y", "z", "block"},
@@ -234,7 +231,7 @@ func TestGABPConnectionCleanup(t *testing.T) {
 	// Note: We can't directly store the mock client in gabpClients since it expects *gabp.Client
 	// Instead, we'll test the cleanup by registering tools and then cleaning them up
 
-	// Register some game tools 
+	// Register some game tools
 	err := server.syncGABPToolsWithInterface(mockClient, gameID)
 	if err != nil {
 		t.Fatalf("Failed to sync GABP tools: %v", err)
@@ -261,7 +258,7 @@ func TestGABPConnectionCleanup(t *testing.T) {
 		t.Error("Game tools were not cleaned up")
 	}
 
-	t.Logf("✓ Cleanup test passed: tools %d->%d", 
+	t.Logf("✓ Cleanup test passed: tools %d->%d",
 		initialToolCount, finalToolCount)
 }
 
@@ -282,7 +279,7 @@ func TestGABPConnectionBackoffLogic(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	err := client.Connect(ctx, "127.0.0.1:12345", "fake-token", backoffMin, backoffMax)
-	
+
 	// We expect this to fail - we're just testing that the interface works
 	if err == nil {
 		t.Error("Expected connection to fail to non-existent server")
@@ -318,7 +315,7 @@ func TestEstablishGABPConnectionWorkflow(t *testing.T) {
 					"type": "object",
 					"properties": map[string]interface{}{
 						"playerId": map[string]interface{}{
-							"type": "string",
+							"type":        "string",
 							"description": "Player ID",
 						},
 					},

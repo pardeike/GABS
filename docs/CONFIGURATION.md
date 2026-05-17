@@ -282,9 +282,10 @@ For complete details about tool normalization, see the [Tool Normalization Guide
 
 ## Output Schema Stripping
 
-Some MCP clients reject `tools/list` responses when a tool includes an
-`outputSchema` field, especially if a game mod advertises a non-object output
-schema. In that case, GABS can omit output schemas from the public tool list:
+Some MCP clients reject `tools/list` responses when a public tool includes an
+`outputSchema` field. Mirrored game tools are discovered through
+`games_tool_names`, but GABS can still omit output schemas from the public tool
+list:
 
 ```json
 {
@@ -294,9 +295,8 @@ schema. In that case, GABS can omit output schemas from the public tool list:
 
 Default: `false`.
 
-Use this for clients such as Claude Code if they disconnect after
-`games_connect` or after a `tools/list_changed` refresh with an
-`outputSchema.type` validation error.
+Use this for clients such as Claude Code if they disconnect with an
+`outputSchema.type` validation error while reading `tools/list`.
 
 This does not change tool execution and does not remove input schemas. Detailed
 tool metadata, including output schema information, remains available through
@@ -319,8 +319,9 @@ The `timeouts.startup` section supports these options:
   (default: `60`)
 
 `games_start` only waits for the GABP handshake. Mirroring the connected mod's
-full tool list can continue briefly in the background, so known startup commands
-can be sent immediately through `games_call_tool` while discovery tools refresh.
+full tool list can continue briefly in the background. The public `tools/list`
+response stays stable, and known startup commands can be sent immediately
+through `games_call_tool` while discovery tools refresh.
 
 ### Example Configuration
 

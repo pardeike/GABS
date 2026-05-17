@@ -12,7 +12,8 @@ import (
 func TestStripOutputSchema(t *testing.T) {
 	logger := util.NewLogger("warn")
 
-	// Helper to create a server with game tools (one with outputSchema, one without).
+	// Helper to create a server with public tools/list tools (one with
+	// outputSchema, one without).
 	setupServer := func(strip bool) *Server {
 		server := NewServerForTesting(logger)
 
@@ -30,8 +31,8 @@ func TestStripOutputSchema(t *testing.T) {
 
 		server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, 5*time.Second)
 
-		// Register a game tool that carries outputSchema (like RimBridgeServer does)
-		server.RegisterGameTool("testgame", Tool{
+		// Register a public MCP tool that carries outputSchema.
+		server.RegisterToolWithConfig(Tool{
 			Name:        "testgame.take_screenshot",
 			Description: "Take a screenshot",
 			InputSchema: map[string]interface{}{
@@ -52,7 +53,7 @@ func TestStripOutputSchema(t *testing.T) {
 		}, &config.ToolNormalizationConfig{})
 
 		// Also register one without outputSchema
-		server.RegisterGameTool("testgame", Tool{
+		server.RegisterToolWithConfig(Tool{
 			Name:        "testgame.ping",
 			Description: "Connectivity check",
 			InputSchema: map[string]interface{}{

@@ -2,7 +2,7 @@
 
 ## Understanding GABS Dynamic Tool System
 
-GABS uses a **progressive tool disclosure** system that helps AI agents handle the dynamic expansion of available tools as games connect. This guide explains how AI agents can effectively work with GABS's growing tool ecosystem.
+GABS uses a **progressive tool disclosure** system that helps AI agents handle the dynamic expansion of game capabilities as games connect. The public `tools/list` response stays stable and core-only; mirrored game tools are discovered through GABS tools instead of client-side tool-list churn.
 
 > **Related guides:** [AI Integration Guide](INTEGRATION.md) for connecting AI agents, [Configuration Guide](CONFIGURATION.md) for game setup, [AI Dynamic Tools FAQ](AI_DYNAMIC_TOOLS_FAQ.md) for common questions.
 
@@ -31,12 +31,12 @@ Stable core tools:
 Legacy dotted names such as `games.list` are accepted as call aliases, but
 strict-safe names are what `tools/list` advertises by default.
 
-### Phase 2: Game Connection (Dynamic Expansion)
-After starting a game with GABP mods, tools expand dramatically:
+### Phase 2: Game Connection (Dynamic Discovery)
+After starting a game with GABP mods, the discovery surface expands:
 
 ```
-Available tools expand with mirrored game tools. The exact set depends on the
-connected game and mod:
+games_tool_names and games_tool_detail expose mirrored game tools. The exact set
+depends on the connected game and mod:
 
 Minecraft-Specific Examples:
 - minecraft_inventory_get     - Get player inventory
@@ -62,9 +62,10 @@ ownership to the current session.
 
 For low-latency startup loops, `games_start` returns after the GABP handshake
 instead of waiting for full tool mirroring. The mirror refresh runs in the
-background, and `games_call_tool` can still dispatch a fully qualified slash or
-dotted connected game tool immediately. Use `games_tool_names` when you need
-discovery; skip it when the next command name is already known.
+background, the public `tools/list` response remains stable, and
+`games_call_tool` can still dispatch a fully qualified slash or dotted connected
+game tool immediately. Use `games_tool_names` when you need discovery; skip it
+when the next command name is already known.
 
 ## AI Discovery Strategies
 
@@ -253,9 +254,9 @@ async function intelligentGameManagement(request) {
 
 ### ✅ Do:
 1. **Use `games_tool_names` for discovery** before attempting game-specific actions; add `brief: true` when a one-line structured summary helps ranking
-2. **Cache tool lists** but refresh periodically or after game state changes  
+2. **Cache discovery results** but refresh periodically or after game state changes
 3. **Use `games_tool_detail`** only for the few tools you might actually call; omit `gameId` when the tool name is already fully qualified
-4. **Handle tool expansion gracefully** - treat new tools as opportunities
+4. **Handle discovery changes gracefully** - treat new game tools as opportunities
 5. **Use game-prefixed tool names** explicitly to avoid ambiguity
 6. **Group tools by game** in user interfaces for clarity
 
@@ -274,17 +275,17 @@ The GABS architecture specifically helps AI agents handle dynamic tools:
 
 1. **Clear Namespacing**: `minecraft_inventory_get` vs `rimworld_inventory_get` eliminates ambiguity
 2. **Discovery Tools**: `games_tool_names` and `games_tool_detail` provide structured tool exploration
-3. **Gradual Disclosure**: Tools appear as games connect, not all at once
+3. **Stable Core Surface**: `tools/list` stays small while game tools appear in discovery results
 4. **Status Awareness**: AI can check game state before attempting tool use
 5. **Fallback Gracefully**: Core game management always available
 
 ## Conclusion
 
-AI agents working with GABS will handle dynamic tool expansion effectively because:
+AI agents working with GABS will handle dynamic game capability expansion effectively because:
 
 1. **The discovery pattern is predictable** - start with `games_tool_names`
 2. **Tool names are unambiguous** - game prefixes prevent conflicts  
-3. **Expansion is progressive** - tools appear as capabilities are needed
+3. **Expansion is progressive** - discovery results update as capabilities are needed
 4. **The core remains stable** - basic game management always works
 
 The key insight is that AI agents should **embrace the discovery process** rather than trying to know all tools upfront. GABS's design makes this discovery natural and reliable.

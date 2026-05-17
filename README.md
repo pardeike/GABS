@@ -112,9 +112,11 @@ args = ["server"]
 If your client uses strict OpenAI-style tool naming, enable
 `toolNormalization` in `~/.gabs/config.json`. See
 [OpenAI Tool Normalization](docs/OPENAI_TOOL_NORMALIZATION.md).
-If your client disconnects after `tools/list` because it rejects tool
+If your client disconnects after `tools/list` because it rejects a public tool's
 `outputSchema` fields, set `stripOutputSchema` to `true`. See the
-[Configuration Guide](docs/CONFIGURATION.md).
+[Configuration Guide](docs/CONFIGURATION.md). Mirrored game tools are discovered
+through `games_tool_names` and are not advertised in the public `tools/list`
+response.
 If a game or mod starts slowly, you can also tune startup waits with the
 `timeouts.startup` section described in the
 [Configuration Guide](docs/CONFIGURATION.md).
@@ -185,13 +187,13 @@ For the full MCP surface and advanced behavior, see the
 ## Game-Specific Tools from Mods
 
 When a GABP-compatible mod connects, GABS mirrors the mod's canonical
-slash-delimited GABP tool names into strict-safe MCP names such as
-`minecraft_inventory_get` or `rimworld_crafting_build`.
-After `games_start`, tool mirroring can finish asynchronously so the first game
-command is not delayed by large `tools/list` responses. Use `games_call_tool`
-with a fully qualified slash or dotted alias when you want to issue the first
-command immediately; `games_tool_names` and direct mirrored MCP tools become
-available as soon as mirroring completes.
+slash-delimited GABP tool names into strict-safe names such as
+`minecraft_inventory_get` or `rimworld_crafting_build`. The public `tools/list`
+response stays core-only so clients do not churn on large game-specific tool
+sets. Use `games_tool_names` for discovery, `games_tool_detail` for one schema,
+and `games_call_tool` for the actual call. Direct mirrored MCP tools may still
+be callable when you already know the name, but agents should not depend on
+dynamic `tools/list` refreshes.
 
 The usual discovery flow is:
 ```

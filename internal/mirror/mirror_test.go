@@ -30,7 +30,7 @@ func (ms *MockServer) SendToolsListChangedNotification() {
 
 func (ms *MockServer) SendResourcesListChangedNotification() {
 	ms.notificationsSent = append(ms.notificationsSent, "resources/list_changed")
-	// Also call the base implementation if needed  
+	// Also call the base implementation if needed
 	ms.Server.SendResourcesListChangedNotification()
 }
 
@@ -54,7 +54,7 @@ func (mc *MockClient) CallTool(name string, args map[string]any) (map[string]any
 
 func TestMirrorNotifications(t *testing.T) {
 	log := util.NewLogger("error")
-	
+
 	// Create mock server that tracks notifications
 	baseServer := mcp.NewServer(log)
 	mockServer := NewMockServer(baseServer)
@@ -75,13 +75,12 @@ func TestMirrorNotifications(t *testing.T) {
 	// Create mirror
 	mirror := New(log, mockServer, mockClient, "test-game", &config.ToolNormalizationConfig{})
 
-	// Test SyncTools sends notification
+	// Test SyncTools keeps tools/list stable and does not notify
 	err := mirror.SyncTools()
 	if err != nil {
 		t.Fatalf("SyncTools failed: %v", err)
 	}
 
-	// Check tools/list_changed notification was sent
 	found := false
 	for _, notification := range mockServer.notificationsSent {
 		if notification == "tools/list_changed" {
@@ -89,8 +88,8 @@ func TestMirrorNotifications(t *testing.T) {
 			break
 		}
 	}
-	if !found {
-		t.Error("Expected tools/list_changed notification to be sent")
+	if found {
+		t.Error("did not expect tools/list_changed notification after SyncTools")
 	}
 
 	// Test ExposeResources sends notification

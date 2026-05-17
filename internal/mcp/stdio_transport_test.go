@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/pardeike/gabs/internal/util"
@@ -55,6 +56,51 @@ func TestServeUsesLSPFramingForLSPClients(t *testing.T) {
 	}
 	if response.Result == nil {
 		t.Fatalf("expected initialize result, got nil")
+	}
+}
+
+func TestInitializeIncludesServerInstructions(t *testing.T) {
+	log := util.NewLogger("error")
+	server := NewServerForTesting(log)
+
+	response := server.HandleMessage(&Message{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "initialize",
+		Params: map[string]interface{}{
+			"protocolVersion": "2025-06-18",
+			"capabilities":    map[string]interface{}{},
+			"clientInfo": map[string]interface{}{
+				"name":    "test-client",
+				"version": "1.0.0",
+			},
+		},
+	})
+	if response == nil || response.Result == nil {
+		t.Fatalf("expected initialize response, got %#v", response)
+	}
+
+	data, err := json.Marshal(response.Result)
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+
+	var result InitializeResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	if result.Instructions == "" {
+		t.Fatal("expected initialize instructions")
+	}
+	if !strings.Contains(result.Instructions, "games_tool_names") {
+		t.Fatalf("instructions should mention GABS discovery flow: %q", result.Instructions)
+	}
+	if result.Capabilities.Tools == nil {
+		t.Fatal("expected tools capability")
+	}
+	if result.Capabilities.Tools.ListChanged {
+		t.Fatal("tools/list should be advertised as stable")
 	}
 }
 

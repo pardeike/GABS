@@ -51,6 +51,10 @@ type gabpDisconnectRecord struct {
 
 var serverInstanceCounter uint64
 
+const ServerInstructions = `GABS controls configured local games and mirrors connected GABP mod tools into MCP. Start with games_list or games_status, then use games_start or games_connect with gameId.
+For game-specific actions, call games_tool_names with brief=true, inspect one tool with games_tool_detail, then invoke it through games_call_tool.
+Prefer strict-safe tool names such as games_start; dotted aliases remain accepted. Public tools/list is kept stable and core-only, so retry games_tool_names or connect before assuming a mod tool is missing.`
+
 type gameAlreadyActiveError struct {
 	status string
 }
@@ -309,8 +313,38 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}
 		}
 
+		gameItems := make([]map[string]interface{}, 0, len(games))
+		for _, game := range games {
+			item := map[string]interface{}{
+				"gameId": game.ID,
+				"name":   game.Name,
+			}
+			if game.Description != "" {
+				item["description"] = game.Description
+			}
+			gameItems = append(gameItems, item)
+		}
+
+		structured := map[string]interface{}{
+			"count": len(games),
+			"games": gameItems,
+		}
+		if len(games) == 0 {
+			structured["nextActions"] = []map[string]interface{}{
+				{
+					"command": "gabs games add <id>",
+					"reason":  "Configure a game before using MCP game-management tools.",
+				},
+			}
+		} else {
+			structured["nextActions"] = []map[string]interface{}{
+				mcpNextAction("games_status", map[string]interface{}{}, "Check which configured games are running or connected."),
+			}
+		}
+
 		return &ToolResult{
-			Content: []Content{{Type: "text", Text: content.String()}},
+			Content:           []Content{{Type: "text", Text: content.String()}},
+			StructuredContent: structured,
 		}, nil
 	}, normalizationConfig)
 
@@ -375,8 +409,19 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			content.WriteString(fmt.Sprintf("\nDescription: %s\n", game.Description))
 		}
 
+		status := s.checkGameStatus(game.ID)
+		validationWarnings := gameValidationWarnings(*game)
+		structured := map[string]interface{}{
+			"game":               gameConfigStructured(*game),
+			"status":             status,
+			"statusDescription":  s.getStatusDescriptionFromStatus(status, game),
+			"validationWarnings": validationWarnings,
+			"nextActions":        s.nextActionsForGameStatus(*game, status, len(s.getGameSpecificTools(game.ID))),
+		}
+
 		return &ToolResult{
-			Content: []Content{{Type: "text", Text: content.String()}},
+			Content:           []Content{{Type: "text", Text: content.String()}},
+			StructuredContent: structured,
 		}, nil
 	}, normalizationConfig)
 
@@ -424,19 +469,31 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 					}
 				}
 			}
+			statusItem := s.gameStatusStructured(*game, status)
+			return &ToolResult{
+				Content:           []Content{{Type: "text", Text: content.String()}},
+				StructuredContent: statusItem,
+			}, nil
 		} else {
 			// Check all games
 			games := gamesConfig.ListGames()
 			content.WriteString("Game Status Summary:\n\n")
+			statusItems := make([]map[string]interface{}, 0, len(games))
 			for _, game := range games {
-				statusDesc := s.getStatusDescription(game.ID, &game)
+				status := s.checkGameStatus(game.ID)
+				statusDesc := s.getStatusDescriptionFromStatus(status, &game)
 				content.WriteString(fmt.Sprintf("• **%s**: %s\n", game.ID, statusDesc))
+				statusItems = append(statusItems, s.gameStatusStructured(game, status))
 			}
-		}
 
-		return &ToolResult{
-			Content: []Content{{Type: "text", Text: content.String()}},
-		}, nil
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: content.String()}},
+				StructuredContent: map[string]interface{}{
+					"count": len(statusItems),
+					"games": statusItems,
+				},
+			}, nil
+		}
 	}, normalizationConfig)
 
 	// games_start tool
@@ -474,8 +531,19 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		if err != nil {
 			var activeErr *gameAlreadyActiveError
 			if errors.As(err, &activeErr) {
+				status := activeErr.status
+				if status == "" {
+					status = s.checkGameStatus(game.ID)
+				}
+				toolCount := len(s.getGameSpecificTools(game.ID))
 				return &ToolResult{
 					Content: []Content{{Type: "text", Text: activeErr.ToolMessage(*game)}},
+					StructuredContent: map[string]interface{}{
+						"gameId":      game.ID,
+						"status":      status,
+						"toolCount":   toolCount,
+						"nextActions": s.nextActionsForGameStatus(*game, status, toolCount),
+					},
 				}, nil
 			}
 
@@ -505,6 +573,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 						}
 						return startResult.GABPConnectError.Error()
 					}(),
+					"nextActions": []map[string]interface{}{
+						mcpNextAction("games_status", map[string]interface{}{"gameId": game.ID}, "Verify whether the game is still running."),
+						mcpNextAction("games_connect", map[string]interface{}{"gameId": game.ID}, "Connect after the mod finishes loading."),
+					},
 				},
 			}, nil
 		}
@@ -516,6 +588,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				"processStarted":   true,
 				"gabpConnected":    true,
 				"gameStillRunning": true,
+				"nextActions": []map[string]interface{}{
+					mcpNextAction("games_tool_names", map[string]interface{}{"gameId": game.ID, "brief": true}, "Discover connected game-specific tools."),
+				},
 			},
 		}, nil
 	}, normalizationConfig)
@@ -947,6 +1022,39 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		return items
 	}
 
+	buildToolNotFoundResult := func(game *config.GameConfig, requested, message string, entries []listedGameTool) *ToolResult {
+		candidates := filterListedTools(entries, requested, "")
+		if len(candidates) > 10 {
+			candidates = candidates[:10]
+		}
+
+		discoverArgs := map[string]interface{}{"brief": true}
+		if game != nil {
+			discoverArgs["gameId"] = game.ID
+		}
+		if strings.TrimSpace(requested) != "" {
+			discoverArgs["query"] = requested
+		}
+
+		structured := map[string]interface{}{
+			"requested":      requested,
+			"availableTotal": len(entries),
+			"candidates":     buildToolNameItemsWithOptions(candidates, true),
+			"nextActions": []map[string]interface{}{
+				mcpNextAction("games_tool_names", discoverArgs, "Discover available game tools before retrying."),
+			},
+		}
+		if game != nil {
+			structured["gameId"] = game.ID
+		}
+
+		return &ToolResult{
+			Content:           []Content{{Type: "text", Text: message}},
+			StructuredContent: structured,
+			IsError:           true,
+		}
+	}
+
 	describeDiscoveryFilters := func(query, prefix string) string {
 		parts := make([]string, 0, 2)
 		if strings.TrimSpace(query) != "" {
@@ -1026,10 +1134,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 
 			entry, found := findListedTool(entries, game.ID, requested)
 			if !found {
-				return listedGameTool{}, &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("Tool '%s' not found for game '%s'. Use games_tool_names to discover available names first.", requested, game.ID)}},
-					IsError: true,
-				}
+				message := fmt.Sprintf("Tool '%s' not found for game '%s'. Use games_tool_names to discover available names first.", requested, game.ID)
+				return listedGameTool{}, buildToolNotFoundResult(game, requested, message, entries)
 			}
 
 			return entry, nil
@@ -1049,10 +1155,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 
 		switch len(matches) {
 		case 0:
-			return listedGameTool{}, &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Tool '%s' was not found. Use games_tool_names to discover available names first, or include gameId if you are using a local tool name.", requested)}},
-				IsError: true,
-			}
+			message := fmt.Sprintf("Tool '%s' was not found. Use games_tool_names to discover available names first, or include gameId if you are using a local tool name.", requested)
+			return listedGameTool{}, buildToolNotFoundResult(nil, requested, message, entries)
 		case 1:
 			return matches[0], nil
 		default:
@@ -1478,6 +1582,14 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			toolCount := len(s.getGameSpecificTools(game.ID))
 			return &ToolResult{
 				Content: []Content{{Type: "text", Text: fmt.Sprintf("Already connected to '%s'. Re-synced %d tools.", game.ID, toolCount)}},
+				StructuredContent: map[string]interface{}{
+					"gameId":    game.ID,
+					"connected": true,
+					"toolCount": toolCount,
+					"nextActions": []map[string]interface{}{
+						mcpNextAction("games_tool_names", map[string]interface{}{"gameId": game.ID, "brief": true}, "Discover connected game-specific tools."),
+					},
+				},
 			}, nil
 		}
 
@@ -1493,6 +1605,16 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		if hadForeignOwner && !forceTakeover {
 			return &ToolResult{
 				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' is already owned by another live GABS session (pid %d). Skipping games_connect here to avoid competing bridge clients.", game.ID, runtimeState.OwnerPID)}},
+				StructuredContent: map[string]interface{}{
+					"gameId":        game.ID,
+					"foreignOwner":  true,
+					"ownerPID":      runtimeState.OwnerPID,
+					"ownerInstance": runtimeState.OwnerInstanceID,
+					"nextActions": []map[string]interface{}{
+						mcpNextAction("games_status", map[string]interface{}{"gameId": game.ID}, "Check current ownership and connection state."),
+						mcpNextAction("games_connect", map[string]interface{}{"gameId": game.ID, "forceTakeover": true}, "Use only when intentionally moving ownership to this GABS session."),
+					},
+				},
 			}, nil
 		}
 
@@ -1564,11 +1686,31 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		if hadForeignOwner && forceTakeover {
 			return &ToolResult{
 				Content: []Content{{Type: "text", Text: fmt.Sprintf("Force-took ownership of '%s' from GABS pid %d and connected to the GABP server on port %d. Discovered %d tools.", game.ID, runtimeState.OwnerPID, port, toolCount)}},
+				StructuredContent: map[string]interface{}{
+					"gameId":        game.ID,
+					"connected":     true,
+					"forceTakeover": true,
+					"previousPID":   runtimeState.OwnerPID,
+					"port":          port,
+					"toolCount":     toolCount,
+					"nextActions": []map[string]interface{}{
+						mcpNextAction("games_tool_names", map[string]interface{}{"gameId": game.ID, "brief": true}, "Discover connected game-specific tools."),
+					},
+				},
 			}, nil
 		}
 
 		return &ToolResult{
 			Content: []Content{{Type: "text", Text: fmt.Sprintf("Successfully connected to '%s' GABP server on port %d. Discovered %d tools.", game.ID, port, toolCount)}},
+			StructuredContent: map[string]interface{}{
+				"gameId":    game.ID,
+				"connected": true,
+				"port":      port,
+				"toolCount": toolCount,
+				"nextActions": []map[string]interface{}{
+					mcpNextAction("games_tool_names", map[string]interface{}{"gameId": game.ID, "brief": true}, "Discover connected game-specific tools."),
+				},
+			},
 		}, nil
 	}, normalizationConfig)
 
@@ -1905,6 +2047,109 @@ func (s *Server) resolveGameId(gamesConfig *config.GamesConfig, gameIdOrTarget s
 	}
 
 	return nil, false
+}
+
+func mcpNextAction(tool string, arguments map[string]interface{}, reason string) map[string]interface{} {
+	action := map[string]interface{}{
+		"tool":      tool,
+		"arguments": arguments,
+	}
+	if reason != "" {
+		action["reason"] = reason
+	}
+	return action
+}
+
+func gameConfigStructured(game config.GameConfig) map[string]interface{} {
+	item := map[string]interface{}{
+		"gameId":             game.ID,
+		"name":               game.Name,
+		"launchMode":         game.LaunchMode,
+		"target":             game.Target,
+		"hasStopProcessName": game.StopProcessName != "",
+	}
+	if game.Description != "" {
+		item["description"] = game.Description
+	}
+	if game.WorkingDir != "" {
+		item["workingDir"] = game.WorkingDir
+	}
+	if len(game.Args) > 0 {
+		item["args"] = game.Args
+	}
+	if game.StopProcessName != "" {
+		item["stopProcessName"] = game.StopProcessName
+	}
+	return item
+}
+
+func gameValidationWarnings(game config.GameConfig) []string {
+	warnings := make([]string, 0, 1)
+	if (game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId") && game.StopProcessName == "" {
+		warnings = append(warnings, fmt.Sprintf("%s games need stopProcessName for reliable games_stop and games_kill.", game.LaunchMode))
+	}
+	return warnings
+}
+
+func (s *Server) gameStatusStructured(game config.GameConfig, status string) map[string]interface{} {
+	toolCount := len(s.getGameSpecificTools(game.ID))
+	item := map[string]interface{}{
+		"gameId":            game.ID,
+		"name":              game.Name,
+		"status":            status,
+		"statusDescription": s.getStatusDescriptionFromStatus(status, &game),
+		"toolCount":         toolCount,
+		"nextActions":       s.nextActionsForGameStatus(game, status, toolCount),
+	}
+	if disconnectNote := s.describeLastGABPDisconnect(game.ID); disconnectNote != "" {
+		item["lastDisconnect"] = disconnectNote
+	}
+	if warnings := gameValidationWarnings(game); len(warnings) > 0 {
+		item["validationWarnings"] = warnings
+	}
+	return item
+}
+
+func (s *Server) nextActionsForGameStatus(game config.GameConfig, status string, toolCount int) []map[string]interface{} {
+	gameArg := map[string]interface{}{"gameId": game.ID}
+	discoverArgs := map[string]interface{}{"gameId": game.ID, "brief": true}
+
+	switch status {
+	case process.RuntimeStateStatusStarting:
+		return []map[string]interface{}{
+			mcpNextAction("games_status", gameArg, "Wait for startup to finish before issuing more game commands."),
+		}
+	case "stopped":
+		return []map[string]interface{}{
+			mcpNextAction("games_start", gameArg, "Start the game before connecting to GABP tools."),
+		}
+	case "shared-running":
+		return []map[string]interface{}{
+			mcpNextAction("games_connect", gameArg, "Attach this GABS session to the already running game bridge."),
+		}
+	case "running", "connected":
+		if toolCount > 0 {
+			return []map[string]interface{}{
+				mcpNextAction("games_tool_names", discoverArgs, "Discover connected game-specific tools."),
+			}
+		}
+		return []map[string]interface{}{
+			mcpNextAction("games_connect", gameArg, "Connect or re-sync GABP tools for the running game."),
+		}
+	case "running-disconnected", "disconnected":
+		return []map[string]interface{}{
+			mcpNextAction("games_connect", gameArg, "Reconnect after the GABP bridge disconnected or the mod finished loading."),
+		}
+	case "launcher-running", "launcher-triggered":
+		return []map[string]interface{}{
+			mcpNextAction("games_status", gameArg, "Poll until the real game process or GABP bridge becomes visible."),
+			mcpNextAction("games_show", gameArg, "Check whether stopProcessName is configured for launcher-based lifecycle control."),
+		}
+	default:
+		return []map[string]interface{}{
+			mcpNextAction("games_status", gameArg, "Refresh the game status before deciding the next action."),
+		}
+	}
 }
 
 type toolSchemaProperty struct {
@@ -2587,15 +2832,11 @@ func (s *Server) HandleUnexpectedGABPDisconnect(gameID string, client *gabp.Clie
 	}
 
 	s.recordGABPDisconnectLocked(gameID, err)
-	toolsChanged := len(s.gameTools[gameID]) > 0
 	resourcesChanged := len(s.gameResources[gameID]) > 0
 	s.clearGameAttentionStateLocked(gameID)
 	s.cleanupGameResourcesInternal(gameID)
 	s.mu.Unlock()
 
-	if toolsChanged {
-		s.SendToolsListChangedNotification()
-	}
 	if resourcesChanged {
 		s.SendResourcesListChangedNotification()
 	}
@@ -2854,13 +3095,13 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	return result, nil
 }
 
-// establishGABPConnection attempts to connect to the game's GABP server with retry logic
-// This runs in the background and implements the Future Enhancement workflow:
+// establishGABPConnection attempts to connect to the game's GABP server with retry logic.
+// This runs in the background and implements the game-development workflow:
 //  1. Game starts with bridge config (already done in startGame)
 //  2. GABP client connects to game mod's server (implemented here)
-//  3. Mirror system syncs tools and sends tools/list_changed notification (implemented here)
-//  4. AI agents automatically discover new capabilities via games_tool_names,
-//     then inspect a few candidates with games_tool_detail (enabled by notification)
+//  3. Mirror system syncs tools into the stable games_tool_names discovery path
+//  4. AI agents discover capabilities via games_tool_names, then inspect a few
+//     candidates with games_tool_detail before calling games_call_tool
 func (s *Server) establishGABPConnection(gameID string, port int, token string, backoffMin, backoffMax time.Duration) {
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	s.log.Debugw("attempting GABP connection for game", "gameId", gameID, "addr", addr)
@@ -3002,12 +3243,6 @@ func (s *Server) syncGABPToolsWithTimeout(client *gabp.Client, gameID string, ti
 	}
 
 	s.log.Infow("synced GABP tools to MCP with game namespacing", "gameId", gameID, "count", len(gabpTools))
-
-	// Send tools/list_changed notification to AI agents. This alerts clients
-	// that new mirrored tools are available without polling, so they can refresh
-	// direct tool access or use games_tool_names -> games_tool_detail for the
-	// stable discovery flow.
-	s.SendToolsListChangedNotification()
 
 	return nil
 }
@@ -3252,10 +3487,6 @@ func (s *Server) CleanupGameResources(gameId string) {
 	if toolsRemoved > 0 || resourcesRemoved > 0 {
 		s.log.Infow("cleaned up game resources", "gameId", gameId, "toolsRemoved", toolsRemoved, "resourcesRemoved", resourcesRemoved)
 
-		// Notify clients about changes
-		if toolsRemoved > 0 {
-			s.SendToolsListChangedNotification()
-		}
 		if resourcesRemoved > 0 {
 			s.SendResourcesListChangedNotification()
 		}
@@ -3467,7 +3698,7 @@ func (s *Server) handleInitialize(msg *Message) *Message {
 		ProtocolVersion: "2024-11-05",
 		Capabilities: ServerCapabilities{
 			Tools: &ToolsCapability{
-				ListChanged: true,
+				ListChanged: false,
 			},
 			Resources: &ResourcesCapability{
 				Subscribe:   false,
@@ -3478,6 +3709,7 @@ func (s *Server) handleInitialize(msg *Message) *Message {
 			Name:    "gabs",
 			Version: version.Get(),
 		},
+		Instructions: ServerInstructions,
 	}
 	return NewResponse(msg.ID, result)
 }
@@ -3487,13 +3719,27 @@ func (s *Server) handleToolsList(msg *Message) *Message {
 	defer s.mu.RUnlock()
 
 	tools := make([]Tool, 0, len(s.tools))
-	for _, handler := range s.tools {
+	gameToolNames := make(map[string]struct{})
+	for _, toolNames := range s.gameTools {
+		for _, toolName := range toolNames {
+			gameToolNames[toolName] = struct{}{}
+		}
+	}
+
+	for name, handler := range s.tools {
+		if _, isGameTool := gameToolNames[name]; isGameTool {
+			continue
+		}
+
 		tool := handler.Tool
 		if s.stripOutputSchema {
 			tool.OutputSchema = nil
 		}
 		tools = append(tools, tool)
 	}
+	sort.Slice(tools, func(i, j int) bool {
+		return tools[i].Name < tools[j].Name
+	})
 
 	result := ToolsListResult{Tools: tools}
 	return NewResponse(msg.ID, result)
