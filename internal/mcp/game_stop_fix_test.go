@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -392,11 +393,11 @@ func TestStopUntrackedGameUsesStopProcessName(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		if out, err := exec.Command("pgrep", "-x", processName).Output(); err == nil && strings.TrimSpace(string(out)) != "" {
+		if err := cmd.Process.Signal(syscall.Signal(0)); err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("test process %q never became visible to pgrep", processName)
+			t.Fatalf("test process %q never became alive", processName)
 		}
 		time.Sleep(25 * time.Millisecond)
 	}

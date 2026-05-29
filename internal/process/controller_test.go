@@ -2,7 +2,9 @@ package process
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -140,5 +142,49 @@ func TestLauncherWaitForProcessStartUsesStopProcessName(t *testing.T) {
 	}
 	if findCalls == 0 {
 		t.Fatal("expected launcher startup wait to inspect the configured game process name")
+	}
+}
+
+func TestFindProcessesByNameMatchesLinuxLongExecutableBasename(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("test covers Linux /proc process-name lookup")
+	}
+
+	tempDir, err := os.MkdirTemp("", "gabs_process_name_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	processName := "gabs-stop-fallback"
+	processPath := filepath.Join(tempDir, processName)
+	if err := os.Symlink("/bin/sleep", processPath); err != nil {
+		t.Fatalf("failed to create process-name symlink: %v", err)
+	}
+
+	cmd := exec.Command(processPath, "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to start test process: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		pids, err := findProcessesByName(processName)
+		if err != nil {
+			t.Fatalf("findProcessesByName failed: %v", err)
+		}
+		for _, pid := range pids {
+			if pid == cmd.Process.Pid {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("process %q with pid %d was not found by executable basename; got pids %v", processName, cmd.Process.Pid, pids)
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 }

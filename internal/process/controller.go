@@ -667,27 +667,76 @@ func findProcessesByName(name string) ([]int, error) {
 				}
 			}
 		}
+	case "linux":
+		return findLinuxProcessesByName(name)
 	default:
-		// Use pgrep command on Unix-like systems
-		cmd := exec.Command("pgrep", "-x", name)
-		output, err := cmd.Output()
-		if err != nil {
-			// pgrep returns exit code 1 if no processes found, which is not an error for us
-			if exitError, ok := err.(*exec.ExitError); ok && exitError.ExitCode() == 1 {
-				return pids, nil // Return empty slice, no error
-			}
-			return nil, err
-		}
+		return findProcessesByNameWithPgrep(name)
+	}
 
-		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-		for _, line := range lines {
-			if line != "" {
-				if pid, err := strconv.Atoi(line); err == nil {
-					pids = append(pids, pid)
-				}
+	return pids, nil
+}
+
+func findProcessesByNameWithPgrep(name string) ([]int, error) {
+	var pids []int
+	cmd := exec.Command("pgrep", "-x", name)
+	output, err := cmd.Output()
+	if err != nil {
+		// pgrep returns exit code 1 if no processes found, which is not an error for us
+		if exitError, ok := err.(*exec.ExitError); ok && exitError.ExitCode() == 1 {
+			return pids, nil
+		}
+		return nil, err
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	for _, line := range lines {
+		if line != "" {
+			if pid, err := strconv.Atoi(line); err == nil {
+				pids = append(pids, pid)
 			}
+		}
+	}
+	return pids, nil
+}
+
+func findLinuxProcessesByName(name string) ([]int, error) {
+	var pids []int
+
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, err
+	}
+
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		if linuxProcessMatchesName(pid, name) {
+			pids = append(pids, pid)
 		}
 	}
 
 	return pids, nil
+}
+
+func linuxProcessMatchesName(pid int, name string) bool {
+	procDir := filepath.Join("/proc", strconv.Itoa(pid))
+
+	if comm, err := os.ReadFile(filepath.Join(procDir, "comm")); err == nil && strings.TrimSpace(string(comm)) == name {
+		return true
+	}
+
+	cmdline, err := os.ReadFile(filepath.Join(procDir, "cmdline"))
+	if err != nil || len(cmdline) == 0 {
+		return false
+	}
+
+	argv0End := strings.IndexByte(string(cmdline), 0)
+	if argv0End < 0 {
+		argv0End = len(cmdline)
+	}
+	argv0 := string(cmdline[:argv0End])
+
+	return argv0 == name || filepath.Base(argv0) == name
 }
