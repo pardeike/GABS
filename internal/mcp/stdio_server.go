@@ -2948,7 +2948,7 @@ func (s *Server) checkGameStatus(gameID string) string {
 			game := s.getGameFromController(controller)
 			if game != nil && game.StopProcessName != "" {
 				// We have tracking capability but game is not running
-				s.cleanupStoppedGame(gameID)
+				s.cleanupStoppedGameLocked(gameID)
 				return "stopped"
 			} else {
 				// We don't have tracking capability, so we can't know the real status
@@ -2966,12 +2966,12 @@ func (s *Server) checkGameStatus(gameID string) string {
 	}
 
 	// Process is dead, clean up
-	s.cleanupStoppedGame(gameID)
+	s.cleanupStoppedGameLocked(gameID)
 	return "stopped"
 }
 
-// cleanupStoppedGame centralizes the cleanup logic for stopped games
-func (s *Server) cleanupStoppedGame(gameID string) {
+// cleanupStoppedGameLocked centralizes cleanup when s.mu is already held.
+func (s *Server) cleanupStoppedGameLocked(gameID string) {
 	// Remove from games map - no need for complex cleanup in stateless approach
 	delete(s.games, gameID)
 
@@ -2984,18 +2984,16 @@ func (s *Server) cleanupStoppedGame(gameID string) {
 	s.log.Debugw("cleaned up dead game process and resources", "gameId", gameID)
 }
 
+func (s *Server) cleanupStoppedGame(gameID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cleanupStoppedGameLocked(gameID)
+}
+
 // startGame starts a game process using the serialized starter approach
 // This implements @pardeike's requirements for serialized, verified process starting
 func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration) (*process.ProcessStartResult, error) {
-	// Convert GameConfig to LaunchSpec
-	launchSpec := process.LaunchSpec{
-		GameId:          game.ID,
-		Mode:            game.LaunchMode,
-		PathOrId:        game.Target,
-		Args:            game.Args,
-		WorkingDir:      game.WorkingDir,
-		StopProcessName: game.StopProcessName,
-	}
+	launchSpec := launchSpecFromGame(game)
 
 	// Create and configure controller
 	controller := process.NewController()
@@ -3304,13 +3302,24 @@ func (s *Server) exposeGABPResources(client *gabp.Client, gameID string) error {
 	return nil
 }
 
+func launchSpecFromGame(game config.GameConfig) process.LaunchSpec {
+	return process.LaunchSpec{
+		GameId:          game.ID,
+		Mode:            game.LaunchMode,
+		PathOrId:        game.Target,
+		Args:            game.Args,
+		WorkingDir:      game.WorkingDir,
+		StopProcessName: game.StopProcessName,
+	}
+}
+
 // stopGame stops a game process gracefully or by force
 func (s *Server) stopGame(game config.GameConfig, force bool) error {
 	s.mu.Lock()
 	controller, exists := s.games[game.ID]
 	if !exists {
 		s.mu.Unlock()
-		return fmt.Errorf("game %s is not running (no process tracked)", game.ID)
+		return s.stopUntrackedGame(game, force)
 	}
 
 	launchMode := controller.GetLaunchMode()
@@ -3318,6 +3327,8 @@ func (s *Server) stopGame(game config.GameConfig, force bool) error {
 	// Remove from tracking immediately to prevent double-stops
 	delete(s.games, game.ID)
 	s.mu.Unlock()
+
+	defer s.cleanupStoppedGame(game.ID)
 
 	// Handle different launch modes differently
 	if launchMode == "SteamAppId" || launchMode == "EpicAppId" {
@@ -3364,16 +3375,36 @@ func (s *Server) stopGame(game config.GameConfig, force bool) error {
 		s.log.Infow("game stopped", "gameId", game.ID, "pid", controller.GetPID())
 	}
 
-	// Cleanup GABP connections and mirrored tools when game stops
-	// This involves:
-	// 1. Disconnecting any active GABP client for this game
-	// 2. Unregistering all game-specific tools (gameId.* tools)
-	// 3. Cleaning up bridge configuration files
-	s.CleanupGABPConnection(game.ID)
-	s.CleanupGameResources(game.ID)
-	s.CleanupBridgeConfig(game.ID)
-
 	return err
+}
+
+func (s *Server) stopUntrackedGame(game config.GameConfig, force bool) error {
+	if game.StopProcessName == "" {
+		return fmt.Errorf("game %s is not running (no process tracked)", game.ID)
+	}
+
+	controller := process.NewController()
+	if err := controller.Configure(launchSpecFromGame(game)); err != nil {
+		return fmt.Errorf("failed to configure fallback stop controller for %s: %w", game.ID, err)
+	}
+
+	if !controller.IsRunning() {
+		return fmt.Errorf("game %s is not running (no process tracked; no process named %q found)", game.ID, game.StopProcessName)
+	}
+
+	var err error
+	if force {
+		err = controller.Kill()
+	} else {
+		err = controller.Stop(3 * time.Second)
+	}
+	if err != nil {
+		return err
+	}
+
+	s.log.Infow("untracked game stopped via configured process name", "gameId", game.ID, "processName", game.StopProcessName, "force", force)
+	s.cleanupStoppedGame(game.ID)
+	return nil
 }
 
 func (s *Server) ServeStdio(ctx context.Context) error {

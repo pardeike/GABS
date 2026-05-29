@@ -3,9 +3,12 @@ package mcp
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pardeike/gabs/internal/config"
 	"github.com/pardeike/gabs/internal/util"
@@ -359,6 +362,69 @@ func TestGameStopFix(t *testing.T) {
 
 		t.Log("✓ Steam games with stopProcessName can be properly tracked")
 	})
+}
+
+func TestStopUntrackedGameUsesStopProcessName(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix process-name lookup")
+	}
+
+	tempDir, err := os.MkdirTemp("", "gabs_untracked_stop_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	processName := "gabs-stop-fallback"
+	processPath := filepath.Join(tempDir, processName)
+	if err := os.Symlink("/bin/sleep", processPath); err != nil {
+		t.Fatalf("failed to create process-name symlink: %v", err)
+	}
+
+	cmd := exec.Command(processPath, "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to start test process: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if out, err := exec.Command("pgrep", "-x", processName).Output(); err == nil && strings.TrimSpace(string(out)) != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("test process %q never became visible to pgrep", processName)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	logger := util.NewLogger("info")
+	server := NewServerForTesting(logger)
+	game := config.GameConfig{
+		ID:              "untracked-steam-game",
+		Name:            "Untracked Steam Game",
+		LaunchMode:      "SteamAppId",
+		Target:          "123456",
+		StopProcessName: processName,
+	}
+
+	if err := server.stopGame(game, false); err != nil {
+		t.Fatalf("expected untracked game stop to use stopProcessName, got: %v", err)
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		if out, err := exec.Command("pgrep", "-x", processName).Output(); err != nil || strings.TrimSpace(string(out)) == "" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("test process %q was still running after stopGame fallback", processName)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
 }
 
 // TestImprovedStatusReporting verifies the enhanced status descriptions
