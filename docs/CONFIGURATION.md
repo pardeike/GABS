@@ -173,6 +173,11 @@ Best for games installed through Steam.
 You can find the App ID in the game's Steam store URL. `stopProcessName` is
 required for Steam games.
 
+GABS starts Steam games through the platform launcher URL. Configured `args` are
+not passed to the game in this mode. Put launch options such as
+`-savedatafolder=...` in Steam's own launch options, or use `DirectPath` /
+`CustomCommand` when GABS must control the process arguments directly.
+
 ### EpicAppId
 Best for games installed through Epic Games Store.
 ```json
@@ -183,6 +188,10 @@ Best for games installed through Epic Games Store.
 }
 ```
 `stopProcessName` is required for Epic games.
+
+As with Steam, configured `args` are not passed to the game in this mode. Use
+the game launcher's own launch options, `DirectPath`, or `CustomCommand` for
+process arguments.
 
 ### CustomCommand
 Best for complex launch setups or special requirements.

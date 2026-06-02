@@ -98,17 +98,17 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 				},
 			},
 		}
-		
+
 		response := server.HandleMessage(showMsg)
 		if response == nil {
 			t.Fatal("Expected response from games.show")
 		}
-		
+
 		// Check that response contains detailed game information with validation indicators
 		respBytes, _ := json.Marshal(response)
 		responseStr := string(respBytes)
 		t.Logf("games.show output: %s", responseStr)
-		
+
 		// The output should contain the game ID and all configuration details
 		if !strings.Contains(responseStr, "rimworld") {
 			t.Error("Expected to see game ID 'rimworld' in output")
@@ -126,7 +126,7 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 			t.Error("Expected Steam App ID '294100' to be shown in detailed view")
 		}
 	})
-	
+
 	// Test games.start with correct ID (should work)
 	t.Run("GamesStartWithCorrectId", func(t *testing.T) {
 		startCorrectMsg := &Message{
@@ -191,6 +191,35 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 			t.Log("Steam App ID successfully resolved - this is the fix!")
 		}
 	})
+}
+
+func TestGameValidationWarningsForLauncherArgs(t *testing.T) {
+	steamGame := config.GameConfig{
+		ID:              "rimworld",
+		Name:            "RimWorld",
+		LaunchMode:      "SteamAppId",
+		Target:          "294100",
+		Args:            []string{"-savedatafolder=/tmp/rimworld-test"},
+		StopProcessName: "RimWorldWin64.exe",
+	}
+
+	warnings := gameValidationWarnings(steamGame)
+	if len(warnings) != 1 {
+		t.Fatalf("expected one launcher-args warning, got %d: %#v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "does not pass configured args") {
+		t.Fatalf("expected ignored args warning, got %q", warnings[0])
+	}
+	if !strings.Contains(warnings[0], "-savedatafolder") {
+		t.Fatalf("expected savedatafolder hint, got %q", warnings[0])
+	}
+
+	directGame := steamGame
+	directGame.LaunchMode = "DirectPath"
+	directGame.Target = "/games/RimWorld/RimWorldWin64.exe"
+	if warnings := gameValidationWarnings(directGame); len(warnings) != 0 {
+		t.Fatalf("direct launch args should not warn, got %#v", warnings)
+	}
 }
 
 // TestGameIdResolution tests the new forgiving resolution logic

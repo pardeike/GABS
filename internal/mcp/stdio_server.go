@@ -411,6 +411,12 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 
 		status := s.checkGameStatus(game.ID)
 		validationWarnings := gameValidationWarnings(*game)
+		if len(validationWarnings) > 0 {
+			content.WriteString("\nConfiguration Warnings:\n")
+			for _, warning := range validationWarnings {
+				content.WriteString(fmt.Sprintf("  - %s\n", warning))
+			}
+		}
 		structured := map[string]interface{}{
 			"game":               gameConfigStructured(*game),
 			"status":             status,
@@ -527,6 +533,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
+		validationWarnings := gameValidationWarnings(*game)
 		startResult, err := s.startGame(*game, gamesConfig, backoffMin, backoffMax)
 		if err != nil {
 			var activeErr *gameAlreadyActiveError
@@ -536,14 +543,16 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 					status = s.checkGameStatus(game.ID)
 				}
 				toolCount := len(s.getGameSpecificTools(game.ID))
+				structured := map[string]interface{}{
+					"gameId":      game.ID,
+					"status":      status,
+					"toolCount":   toolCount,
+					"nextActions": s.nextActionsForGameStatus(*game, status, toolCount),
+				}
+				addValidationWarnings(structured, validationWarnings)
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: activeErr.ToolMessage(*game)}},
-					StructuredContent: map[string]interface{}{
-						"gameId":      game.ID,
-						"status":      status,
-						"toolCount":   toolCount,
-						"nextActions": s.nextActionsForGameStatus(*game, status, toolCount),
-					},
+					Content:           []Content{{Type: "text", Text: activeErr.ToolMessage(*game)}},
+					StructuredContent: structured,
 				}, nil
 			}
 
@@ -559,39 +568,46 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				message = fmt.Sprintf("%s: %v", message, startResult.GABPConnectError)
 			}
 			message = fmt.Sprintf("%s. The game may still be loading or the mod may be missing. Use games_status, then games_connect once the mod is ready.", message)
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: message}},
-				StructuredContent: map[string]interface{}{
-					"gameId":           game.ID,
-					"processStarted":   startResult.ProcessStarted,
-					"gabpConnected":    startResult.GABPConnected,
-					"gameStillRunning": startResult.GameStillRunning,
-					"gabpWaitMs":       startResult.GABPConnectWait.Milliseconds(),
-					"gabpError": func() interface{} {
-						if startResult.GABPConnectError == nil {
-							return nil
-						}
-						return startResult.GABPConnectError.Error()
-					}(),
-					"nextActions": []map[string]interface{}{
-						mcpNextAction("games_status", map[string]interface{}{"gameId": game.ID}, "Verify whether the game is still running."),
-						mcpNextAction("games_connect", map[string]interface{}{"gameId": game.ID}, "Connect after the mod finishes loading."),
-					},
+			message = appendValidationWarningText(message, validationWarnings)
+			structured := map[string]interface{}{
+				"gameId":           game.ID,
+				"processStarted":   startResult.ProcessStarted,
+				"gabpConnected":    startResult.GABPConnected,
+				"gameStillRunning": startResult.GameStillRunning,
+				"gabpWaitMs":       startResult.GABPConnectWait.Milliseconds(),
+				"gabpError": func() interface{} {
+					if startResult.GABPConnectError == nil {
+						return nil
+					}
+					return startResult.GABPConnectError.Error()
+				}(),
+				"nextActions": []map[string]interface{}{
+					mcpNextAction("games_status", map[string]interface{}{"gameId": game.ID}, "Verify whether the game is still running."),
+					mcpNextAction("games_connect", map[string]interface{}{"gameId": game.ID}, "Connect after the mod finishes loading."),
 				},
+			}
+			addValidationWarnings(structured, validationWarnings)
+			return &ToolResult{
+				Content:           []Content{{Type: "text", Text: message}},
+				StructuredContent: structured,
 			}, nil
 		}
 
-		return &ToolResult{
-			Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' (%s) started successfully and connected via GABP.", game.ID, game.Name)}},
-			StructuredContent: map[string]interface{}{
-				"gameId":           game.ID,
-				"processStarted":   true,
-				"gabpConnected":    true,
-				"gameStillRunning": true,
-				"nextActions": []map[string]interface{}{
-					mcpNextAction("games_tool_names", map[string]interface{}{"gameId": game.ID, "brief": true}, "Discover connected game-specific tools."),
-				},
+		message := fmt.Sprintf("Game '%s' (%s) started successfully and connected via GABP.", game.ID, game.Name)
+		message = appendValidationWarningText(message, validationWarnings)
+		structured := map[string]interface{}{
+			"gameId":           game.ID,
+			"processStarted":   true,
+			"gabpConnected":    true,
+			"gameStillRunning": true,
+			"nextActions": []map[string]interface{}{
+				mcpNextAction("games_tool_names", map[string]interface{}{"gameId": game.ID, "brief": true}, "Discover connected game-specific tools."),
 			},
+		}
+		addValidationWarnings(structured, validationWarnings)
+		return &ToolResult{
+			Content:           []Content{{Type: "text", Text: message}},
+			StructuredContent: structured,
 		}, nil
 	}, normalizationConfig)
 
@@ -2084,11 +2100,31 @@ func gameConfigStructured(game config.GameConfig) map[string]interface{} {
 }
 
 func gameValidationWarnings(game config.GameConfig) []string {
-	warnings := make([]string, 0, 1)
+	warnings := make([]string, 0, 2)
 	if (game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId") && game.StopProcessName == "" {
 		warnings = append(warnings, fmt.Sprintf("%s games need stopProcessName for reliable games_stop and games_kill.", game.LaunchMode))
 	}
+	if launcherModeIgnoresConfiguredArgs(game) {
+		warnings = append(warnings, fmt.Sprintf("%s launch mode does not pass configured args to the game; use DirectPath, CustomCommand, or the game launcher's own launch options for arguments such as -savedatafolder=...", game.LaunchMode))
+	}
 	return warnings
+}
+
+func launcherModeIgnoresConfiguredArgs(game config.GameConfig) bool {
+	return (game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId") && len(game.Args) > 0
+}
+
+func addValidationWarnings(structured map[string]interface{}, warnings []string) {
+	if len(warnings) > 0 {
+		structured["validationWarnings"] = warnings
+	}
+}
+
+func appendValidationWarningText(message string, warnings []string) string {
+	if len(warnings) == 0 {
+		return message
+	}
+	return fmt.Sprintf("%s Configuration warning: %s", message, strings.Join(warnings, " "))
 }
 
 func (s *Server) gameStatusStructured(game config.GameConfig, status string) map[string]interface{} {
