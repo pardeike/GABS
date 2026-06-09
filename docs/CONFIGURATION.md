@@ -325,7 +325,9 @@ The `timeouts.startup` section supports these options:
   process to become detectable in the OS process list (default: `10`)
 - **`gabpConnectSeconds`** (integer): How long `games.start` waits for the
   game's GABP server to become available before returning control to you
-  (default: `60`)
+  (default: `60`). You can also pass a one-off `timeout` argument to
+  `games_start` for unusually slow mod-heavy launches without changing the
+  saved configuration.
 
 `games_start` only waits for the GABP handshake. Mirroring the connected mod's
 full tool list can continue briefly in the background. The public `tools/list`

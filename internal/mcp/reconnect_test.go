@@ -789,26 +789,46 @@ func TestDiagnosticsToolCanBypassAttentionGate(t *testing.T) {
 		t.Fatalf("expected diagnostics tool to be mirrored after connect, got: %s", toolsText)
 	}
 
-	diagnosticsText := marshalMessage(t, server.HandleMessage(&Message{
-		JSONRPC: "2.0",
-		Method:  "tools/call",
-		ID:      json.RawMessage(`"diagnostics-bypass"`),
-		Params: map[string]interface{}{
-			"name": "games.call_tool",
-			"arguments": map[string]interface{}{
-				"gameId": "rimworld",
-				"tool":   "rimbridge.list_logs",
-			},
+	cases := []struct {
+		id       string
+		tool     string
+		wantText string
+	}{
+		{
+			id:       "diagnostics-bypass",
+			tool:     "rimbridge.list_logs",
+			wantText: `"logs":[]`,
 		},
-	}))
-	if strings.Contains(diagnosticsText, `"status":"blocked_by_attention"`) || strings.Contains(diagnosticsText, `"isError":true`) {
-		t.Fatalf("expected rimbridge/list_logs to bypass the attention gate, got: %s", diagnosticsText)
+		{
+			id:       "long-event-wait-bypass",
+			tool:     "rimbridge.wait_for_long_event_idle",
+			wantText: `"message":"RimWorld is idle."`,
+		},
 	}
-	if !strings.Contains(diagnosticsText, `"logs":[]`) {
-		t.Fatalf("expected diagnostics call result, got: %s", diagnosticsText)
+
+	for _, tc := range cases {
+		diagnosticsText := marshalMessage(t, server.HandleMessage(&Message{
+			JSONRPC: "2.0",
+			Method:  "tools/call",
+			ID:      json.RawMessage(fmt.Sprintf("%q", tc.id)),
+			Params: map[string]interface{}{
+				"name": "games.call_tool",
+				"arguments": map[string]interface{}{
+					"gameId": "rimworld",
+					"tool":   tc.tool,
+				},
+			},
+		}))
+		if strings.Contains(diagnosticsText, `"status":"blocked_by_attention"`) || strings.Contains(diagnosticsText, `"isError":true`) {
+			t.Fatalf("expected %s to bypass the attention gate, got: %s", tc.tool, diagnosticsText)
+		}
+		if !strings.Contains(diagnosticsText, tc.wantText) {
+			t.Fatalf("expected %s result to contain %s, got: %s", tc.tool, tc.wantText, diagnosticsText)
+		}
 	}
-	if got := atomic.LoadInt32(&forwardedToolCalls); got != 1 {
-		t.Fatalf("expected exactly one forwarded diagnostics tool call, got %d", got)
+
+	if got := atomic.LoadInt32(&forwardedToolCalls); got != int32(len(cases)) {
+		t.Fatalf("expected %d forwarded diagnostics tool calls, got %d", len(cases), got)
 	}
 
 	server.CleanupGABPConnection("rimworld")
@@ -1214,6 +1234,17 @@ func serveTestGabpSessionWithAttention(listener net.Listener, expectedToken stri
 							"type": "object",
 						},
 					},
+					{
+						"name":        "rimbridge/wait_for_long_event_idle",
+						"description": "Wait for long events to finish",
+						"inputSchema": map[string]interface{}{
+							"type":       "object",
+							"properties": map[string]interface{}{},
+						},
+						"outputSchema": map[string]interface{}{
+							"type": "object",
+						},
+					},
 				},
 			})
 			if err := writer.WriteJSON(response); err != nil {
@@ -1272,7 +1303,7 @@ func serveTestGabpSessionWithAttention(listener net.Listener, expectedToken stri
 			}
 		case "tools/call":
 			if requestParams, ok := request.Params.(map[string]interface{}); ok {
-				if name, _ := requestParams["name"].(string); name != "rimbridge/core/ping" && name != "rimbridge/list_logs" {
+				if name, _ := requestParams["name"].(string); name != "rimbridge/core/ping" && name != "rimbridge/list_logs" && name != "rimbridge/wait_for_long_event_idle" {
 					done <- fmt.Errorf("unexpected tools/call target: %q", name)
 					return
 				}
@@ -1284,8 +1315,22 @@ func serveTestGabpSessionWithAttention(listener net.Listener, expectedToken stri
 					})
 					if err := writer.WriteJSON(response); err != nil {
 						done <- err
+						return
 					}
-					return
+					continue
+				}
+
+				if name, _ := requestParams["name"].(string); name == "rimbridge/wait_for_long_event_idle" {
+					atomic.AddInt32(forwardedToolCalls, 1)
+					response := util.NewGABPResponse(request.ID, map[string]interface{}{
+						"success": true,
+						"message": "RimWorld is idle.",
+					})
+					if err := writer.WriteJSON(response); err != nil {
+						done <- err
+						return
+					}
+					continue
 				}
 			}
 			atomic.AddInt32(forwardedToolCalls, 1)

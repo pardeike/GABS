@@ -51,7 +51,28 @@ func (s *SerializedStarter) StartWithVerification(
 	port int,
 	token string,
 ) *ProcessStartResult {
+	return s.StartWithVerificationWithTimeouts(controller, gabpConnector, gameID, port, token, 0, 0)
+}
+
+// StartWithVerificationWithTimeouts starts a process with optional per-call timeout overrides.
+// Zero or negative timeout values fall back to the starter defaults.
+func (s *SerializedStarter) StartWithVerificationWithTimeouts(
+	controller ControllerInterface,
+	gabpConnector GABPConnector,
+	gameID string,
+	port int,
+	token string,
+	processStartTimeout time.Duration,
+	gabpConnectTimeout time.Duration,
+) *ProcessStartResult {
 	result := &ProcessStartResult{}
+	defaultProcessStartTimeout, defaultGABPConnectTimeout := s.GetTimeouts()
+	if processStartTimeout <= 0 {
+		processStartTimeout = defaultProcessStartTimeout
+	}
+	if gabpConnectTimeout <= 0 {
+		gabpConnectTimeout = defaultGABPConnectTimeout
+	}
 
 	// Phase 1 & 2: Serialize the critical process starting and verification
 	// Only hold the lock for the environment setup and process starting
@@ -71,7 +92,7 @@ func (s *SerializedStarter) StartWithVerification(
 	// Phase 2: Wait for process to be detectable in system
 	// This is important for launcher-based games where there's a delay
 	if controller, ok := controller.(*Controller); ok {
-		if err := controller.WaitForProcessStart(s.processStartTimeout); err != nil {
+		if err := controller.WaitForProcessStart(processStartTimeout); err != nil {
 			s.mu.Unlock() // Release lock before returning
 			// Process didn't start or isn't detectable
 			result.Error = err
@@ -89,7 +110,7 @@ func (s *SerializedStarter) StartWithVerification(
 	// This doesn't need to be serialized since it doesn't affect environment variables
 	// and multiple GABP connections can be attempted simultaneously
 	if gabpConnector != nil {
-		gabpResult := s.attemptGABPConnection(controller, gabpConnector, gameID, port, token)
+		gabpResult := s.attemptGABPConnection(controller, gabpConnector, gameID, port, token, gabpConnectTimeout)
 		result.GABPConnected = gabpResult.Connected
 		result.GABPConnectError = gabpResult.Error
 		result.GABPConnectWait = gabpResult.Waited
@@ -117,13 +138,14 @@ func (s *SerializedStarter) attemptGABPConnection(
 	gameID string,
 	port int,
 	token string,
+	timeout time.Duration,
 ) gabpConnectAttemptResult {
 	startedAt := time.Now()
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
 
-	timeoutCtx, timeoutCancel := context.WithTimeoutCause(ctx, s.gabpConnectTimeout,
-		fmt.Errorf("no GABP server became available within %s", s.gabpConnectTimeout))
+	timeoutCtx, timeoutCancel := context.WithTimeoutCause(ctx, timeout,
+		fmt.Errorf("no GABP server became available within %s", timeout))
 	defer timeoutCancel()
 
 	monitorDone := make(chan struct{})
@@ -166,12 +188,16 @@ func (s *SerializedStarter) attemptGABPConnection(
 
 // SetTimeouts allows customization of timeout values
 func (s *SerializedStarter) SetTimeouts(processStart, gabpConnect time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.processStartTimeout = processStart
 	s.gabpConnectTimeout = gabpConnect
 }
 
 // GetTimeouts returns the current timeout values.
 func (s *SerializedStarter) GetTimeouts() (time.Duration, time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.processStartTimeout, s.gabpConnectTimeout
 }
 

@@ -39,6 +39,7 @@ func NewLogger(level string) Logger {
 	config.Level = zap.NewAtomicLevelAt(logLevel)
 	config.OutputPaths = []string{"stderr"}
 	config.ErrorOutputPaths = []string{"stderr"}
+	config.DisableStacktrace = true
 
 	logger, err := config.Build()
 	if err != nil {

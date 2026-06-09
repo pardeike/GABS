@@ -513,6 +513,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 					"type":        "string",
 					"description": "Game ID or launch target (Steam App ID, path, etc.)",
 				},
+				"timeout": map[string]interface{}{
+					"type":        "integer",
+					"description": "Optional GABP startup handshake timeout in seconds. Defaults to timeouts.startup.gabpConnectSeconds; increase for slow mod-heavy games.",
+				},
 			},
 			"required": []string{"gameId"},
 		},
@@ -533,8 +537,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
+		startupGABPTimeout, invalidTimeout := parseOptionalTimeoutSecondsArg(args, "timeout", 0)
+		if invalidTimeout != nil {
+			return invalidTimeout, nil
+		}
+
 		validationWarnings := gameValidationWarnings(*game)
-		startResult, err := s.startGame(*game, gamesConfig, backoffMin, backoffMax)
+		startResult, err := s.startGame(*game, gamesConfig, backoffMin, backoffMax, startupGABPTimeout)
 		if err != nil {
 			var activeErr *gameAlreadyActiveError
 			if errors.As(err, &activeErr) {
@@ -882,7 +891,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		return games
 	}
 
-	listToolsForDiscovery := func(gameID string, hasGameID bool) ([]listedGameTool, *config.GameConfig, *ToolResult) {
+	listToolsForDiscovery := func(gameID string, hasGameID bool, forceInitialSync bool) ([]listedGameTool, *config.GameConfig, *ToolResult) {
 		entries := make([]listedGameTool, 0)
 
 		if hasGameID {
@@ -891,6 +900,19 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				return nil, nil, &ToolResult{
 					Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameID)}},
 					IsError: true,
+				}
+			}
+
+			if forceInitialSync {
+				if err := s.ensureGameToolsMirrored(game.ID, 10*time.Second); err != nil {
+					return nil, game, &ToolResult{
+						Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' is connected, but syncing GABP tools failed: %v", game.ID, err)}},
+						StructuredContent: map[string]interface{}{
+							"gameId": game.ID,
+							"error":  err.Error(),
+						},
+						IsError: true,
+					}
 				}
 			}
 
@@ -907,6 +929,11 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}
 
 		for _, game := range getSortedGames() {
+			if forceInitialSync {
+				if err := s.ensureGameToolsMirrored(game.ID, 10*time.Second); err != nil {
+					s.log.Debugw("failed to sync GABP tools during discovery", "gameId", game.ID, "error", err)
+				}
+			}
 			for _, tool := range s.getGameSpecificTools(game.ID) {
 				entries = append(entries, listedGameTool{
 					GameID:        game.ID,
@@ -1133,7 +1160,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		return listedGameTool{}, false
 	}
 
-	resolveListedTool := func(gameID string, hasGameID bool, requested string) (listedGameTool, *ToolResult) {
+	resolveListedTool := func(gameID string, hasGameID bool, requested string, forceInitialSync bool) (listedGameTool, *ToolResult) {
 		requested = strings.TrimSpace(requested)
 		if requested == "" {
 			return listedGameTool{}, &ToolResult{
@@ -1143,7 +1170,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}
 
 		if hasGameID {
-			entries, game, listErr := listToolsForDiscovery(gameID, true)
+			entries, game, listErr := listToolsForDiscovery(gameID, true, forceInitialSync)
 			if listErr != nil {
 				return listedGameTool{}, listErr
 			}
@@ -1157,7 +1184,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			return entry, nil
 		}
 
-		entries, _, listErr := listToolsForDiscovery("", false)
+		entries, _, listErr := listToolsForDiscovery("", false, forceInitialSync)
 		if listErr != nil {
 			return listedGameTool{}, listErr
 		}
@@ -1244,7 +1271,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			return invalidArg, nil
 		}
 
-		entries, game, listErr := listToolsForDiscovery(gameID, hasGameID)
+		entries, game, listErr := listToolsForDiscovery(gameID, hasGameID, true)
 		if listErr != nil {
 			return listErr, nil
 		}
@@ -1360,7 +1387,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		entry, resolveErr := resolveListedTool(gameID, hasGameID, requestedTool)
+		entry, resolveErr := resolveListedTool(gameID, hasGameID, requestedTool, true)
 		if resolveErr != nil {
 			return resolveErr, nil
 		}
@@ -1440,7 +1467,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			return invalidArg, nil
 		}
 
-		entries, game, listErr := listToolsForDiscovery(gameID, hasGameID)
+		entries, game, listErr := listToolsForDiscovery(gameID, hasGameID, true)
 		if listErr != nil {
 			return listErr, nil
 		}
@@ -1950,7 +1977,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			return invalidProxyTimeout, nil
 		}
 
-		entry, resolveErr := resolveListedTool(gameIdArg, hasGameID, toolName)
+		entry, resolveErr := resolveListedTool(gameIdArg, hasGameID, toolName, false)
 		if resolveErr != nil {
 			if directResult, handled := s.callDirectGABPTool(gamesConfig, gameIdArg, hasGameID, toolName, toolArgs, proxyTimeout); handled {
 				return directResult, nil
@@ -2787,6 +2814,31 @@ func (s *Server) getGameSpecificTools(gameID string) []Tool {
 	return gameTools
 }
 
+func (s *Server) ensureGameToolsMirrored(gameID string, timeout time.Duration) error {
+	if len(s.getGameSpecificTools(gameID)) > 0 {
+		return nil
+	}
+
+	s.mu.RLock()
+	client := s.gabpClients[gameID]
+	s.mu.RUnlock()
+	if client == nil || !client.IsConnected() {
+		return nil
+	}
+
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+
+	if err := s.syncGABPToolsWithTimeout(client, gameID, timeout); err != nil {
+		return err
+	}
+	if err := s.exposeGABPResources(client, gameID); err != nil {
+		return err
+	}
+	return nil
+}
+
 // checkGameStatus returns the current status of a game
 // getStatusDescription provides a user-friendly description of the game status
 func (s *Server) getStatusDescription(gameID string, gameConfig *config.GameConfig) string {
@@ -3028,7 +3080,7 @@ func (s *Server) cleanupStoppedGame(gameID string) {
 
 // startGame starts a game process using the serialized starter approach
 // This implements @pardeike's requirements for serialized, verified process starting
-func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration) (*process.ProcessStartResult, error) {
+func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration, startupGABPTimeout time.Duration) (*process.ProcessStartResult, error) {
 	launchSpec := launchSpecFromGame(game)
 
 	// Create and configure controller
@@ -3080,7 +3132,7 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	// Use serialized starter with verification
 	// This implements the asynchronous handling requested by @pardeike
 	gabpConnector := NewAsyncServerGABPConnector(s, backoffMin, backoffMax)
-	result := s.starter.StartWithVerification(controller, gabpConnector, game.ID, port, token)
+	result := s.starter.StartWithVerificationWithTimeouts(controller, gabpConnector, game.ID, port, token, 0, startupGABPTimeout)
 
 	if result.Error != nil {
 		return result, fmt.Errorf("failed to start game '%s' (mode: %s, target: %s): %w",

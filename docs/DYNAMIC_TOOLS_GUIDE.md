@@ -67,6 +67,10 @@ background, the public `tools/list` response remains stable, and
 game tool immediately. Use `games_tool_names` when you need discovery; skip it
 when the next command name is already known.
 
+For slow mod-heavy games, pass a larger `timeout` to `games_start` or configure
+`timeouts.startup.gabpConnectSeconds` so startup waits for the bridge instead of
+forcing a later manual connect step.
+
 ## AI Discovery Strategies
 
 ### 1. The `games_tool_names` -> `games_tool_detail` Discovery Pattern (Recommended)

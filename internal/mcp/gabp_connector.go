@@ -25,7 +25,7 @@ func NewServerGABPConnector(server *Server, backoffMin, backoffMax time.Duration
 }
 
 func NewAsyncServerGABPConnector(server *Server, backoffMin, backoffMax time.Duration) *ServerGABPConnector {
-	return newServerGABPConnector(server, backoffMin, backoffMax, false, 5*time.Second)
+	return newServerGABPConnector(server, backoffMin, backoffMax, false, 0)
 }
 
 func newServerGABPConnector(server *Server, backoffMin, backoffMax time.Duration, mirrorSynchronously bool, asyncMirrorDelay time.Duration) *ServerGABPConnector {

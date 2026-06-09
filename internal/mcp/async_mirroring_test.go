@@ -96,6 +96,40 @@ func TestAsyncConnectorAllowsGamesCallToolBeforeMirroring(t *testing.T) {
 	assertAsyncMirroringServerDone(t, serverDone)
 }
 
+func TestGamesToolNamesForcesInitialMirrorSync(t *testing.T) {
+	server, port, bridgeToken, serverDone := newAsyncMirroringDiscoveryTestServer(t)
+
+	connector := newServerGABPConnector(server, 5*time.Millisecond, 10*time.Millisecond, false, time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := connector.AttemptConnection(ctx, "rimworld", port, bridgeToken); err != nil {
+		t.Fatalf("expected async connector to connect: %v", err)
+	}
+
+	namesText := marshalMessage(t, server.HandleMessage(&Message{
+		JSONRPC: "2.0",
+		Method:  "tools/call",
+		ID:      json.RawMessage(`"names-before-mirror"`),
+		Params: map[string]interface{}{
+			"name": "games.tool_names",
+			"arguments": map[string]interface{}{
+				"gameId": "rimworld",
+				"brief":  true,
+				"query":  "ping",
+			},
+		},
+	}))
+
+	if strings.Contains(namesText, `"isError":true`) {
+		t.Fatalf("expected discovery to succeed before async mirror, got: %s", namesText)
+	}
+	if !strings.Contains(namesText, "rimworld_rimbridge_core_ping") {
+		t.Fatalf("expected discovery to force initial mirror sync, got: %s", namesText)
+	}
+	assertAsyncMirroringServerDone(t, serverDone)
+}
+
 func TestUnmirroredDirectMCPToolCallUsesGABPFallback(t *testing.T) {
 	server, port, bridgeToken, serverDone := newAsyncMirroringTestServer(t)
 
@@ -193,6 +227,39 @@ func newAsyncMirroringTestServer(t *testing.T) (*Server, int, string, <-chan err
 	bridgeToken := "async-mirroring-token"
 	serverDone := make(chan error, 1)
 	go serveTestGabpSessionExpectToolCallBeforeList(listener, bridgeToken, serverDone)
+
+	gamesConfig := &config.GamesConfig{
+		Games: map[string]config.GameConfig{
+			"rimworld": {
+				ID:         "rimworld",
+				Name:       "RimWorld",
+				LaunchMode: "DirectPath",
+				Target:     "/Applications/RimWorldMac.app/Contents/MacOS/RimWorld by Ludeon Studios",
+			},
+		},
+	}
+
+	log := util.NewLogger("error")
+	server := NewServerForTesting(log)
+	server.RegisterGameManagementTools(gamesConfig, 5*time.Millisecond, 10*time.Millisecond)
+
+	return server, listener.Addr().(*net.TCPAddr).Port, bridgeToken, serverDone
+}
+
+func newAsyncMirroringDiscoveryTestServer(t *testing.T) (*Server, int, string, <-chan error) {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = listener.Close()
+	})
+
+	bridgeToken := "async-mirroring-token"
+	serverDone := make(chan error, 1)
+	go serveTestGabpSessionExpectListForDiscovery(listener, bridgeToken, serverDone)
 
 	gamesConfig := &config.GamesConfig{
 		Games: map[string]config.GameConfig{
@@ -416,6 +483,82 @@ func serveTestGabpSessionExpectListBeforeSafeToolCall(listener net.Listener, exp
 			response := util.NewGABPResponse(request.ID, map[string]interface{}{
 				"text":    "pong",
 				"message": "pong",
+			})
+			if err := writer.WriteJSON(response); err != nil {
+				done <- err
+				return
+			}
+			done <- nil
+			return
+		default:
+			done <- fmt.Errorf("unexpected method: %s", request.Method)
+			return
+		}
+	}
+}
+
+func serveTestGabpSessionExpectListForDiscovery(listener net.Listener, expectedToken string, done chan<- error) {
+	conn, err := listener.Accept()
+	if err != nil {
+		done <- err
+		return
+	}
+	defer conn.Close()
+
+	reader := util.NewLSPFrameReader(conn)
+	writer := util.NewLSPFrameWriter(conn)
+
+	for {
+		data, err := reader.ReadMessage()
+		if err != nil {
+			done <- err
+			return
+		}
+
+		var request util.GABPMessage
+		if err := json.Unmarshal(data, &request); err != nil {
+			done <- err
+			return
+		}
+
+		switch request.Method {
+		case "session/hello":
+			params, ok := request.Params.(map[string]interface{})
+			if !ok {
+				done <- fmt.Errorf("session/hello params not decoded as object: %#v", request.Params)
+				return
+			}
+			if token, _ := params["token"].(string); token != expectedToken {
+				done <- fmt.Errorf("unexpected handshake token: %q", token)
+				return
+			}
+
+			response := util.NewGABPResponse(request.ID, gabp.SessionWelcomeResult{
+				AgentID: "rimworld",
+				App: gabp.AppInfo{
+					Name:    "RimBridgeServer",
+					Version: "0.1.0",
+				},
+				Capabilities: gabp.Capabilities{
+					Methods:   []string{"tools/list", "tools/call"},
+					Events:    []string{"system/log"},
+					Resources: []string{},
+				},
+				SchemaVersion: "1.0",
+			})
+			if err := writer.WriteJSON(response); err != nil {
+				done <- err
+				return
+			}
+		case "tools/list":
+			response := util.NewGABPResponse(request.ID, map[string]interface{}{
+				"tools": []map[string]interface{}{
+					{
+						"name":        "rimbridge/core/ping",
+						"description": "Ping bridge",
+						"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
+					},
+				},
 			})
 			if err := writer.WriteJSON(response); err != nil {
 				done <- err

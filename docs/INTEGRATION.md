@@ -71,6 +71,12 @@ reviewed and acknowledged. The recovery flow is:
 3. Call `games_ack_attention` with the returned `attentionId`
 4. Retry the original game call
 
+GABS still allows bridge diagnostics and lifecycle observation tools through the
+gate so an agent can understand the failure without disturbing the game further.
+For RimBridgeServer this includes status, operation journal, log journal,
+operation wait, game-loaded wait, and long-event idle wait tools. Mutating
+gameplay and load/steer calls remain blocked until attention is acknowledged.
+
 ## Setting Up AI Assistants
 
 ### OpenAI API Integration

@@ -166,6 +166,47 @@ func TestSerializedStarterReturnsPromptlyAfterGABPConnects(t *testing.T) {
 	}
 }
 
+func TestSerializedStarterUsesPerCallGABPTimeoutOverride(t *testing.T) {
+	starter := NewSerializedStarter()
+	starter.SetTimeouts(2*time.Second, 5*time.Second)
+
+	controller := NewController()
+	spec := LaunchSpec{
+		GameId:   "test-gabp-timeout-override",
+		Mode:     "DirectPath",
+		PathOrId: "/bin/sleep",
+		Args:     []string{"3"},
+	}
+
+	if err := controller.Configure(spec); err != nil {
+		t.Fatalf("Configure error: %v", err)
+	}
+	defer controller.Stop(time.Second)
+
+	start := time.Now()
+	result := starter.StartWithVerificationWithTimeouts(controller, blockingTestConnector{}, spec.GameId, 0, "", 0, time.Second)
+	duration := time.Since(start)
+
+	if result.Error != nil {
+		t.Fatalf("unexpected start error: %v", result.Error)
+	}
+	if result.GABPConnected {
+		t.Fatal("expected GABP connection timeout")
+	}
+	if result.GABPConnectError == nil {
+		t.Fatal("expected GABP connection error")
+	}
+	if !strings.Contains(result.GABPConnectError.Error(), "1s") {
+		t.Fatalf("expected override timeout in error, got %v", result.GABPConnectError)
+	}
+	if duration > 2500*time.Millisecond {
+		t.Fatalf("expected one-off GABP timeout override to return promptly, took %v", duration)
+	}
+	if _, gabpConnectTimeout := starter.GetTimeouts(); gabpConnectTimeout != 5*time.Second {
+		t.Fatalf("per-call override mutated starter default timeout to %v", gabpConnectTimeout)
+	}
+}
+
 func TestSerializedStarterStopsWaitingWhenProcessExitsDuringGABPConnect(t *testing.T) {
 	starter := NewSerializedStarter()
 	starter.SetTimeouts(2*time.Second, 10*time.Second)

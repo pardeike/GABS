@@ -95,7 +95,7 @@ func (c *Client) Connect(ctx context.Context, addr string, token string, backoff
 		if err == nil {
 			break
 		}
-		c.log.Warnw("connection attempt failed", "attempt", attempts+1, "error", err)
+		c.log.Debugw("connection attempt failed", "attempt", attempts+1, "error", err)
 
 		if ctx.Err() != nil {
 			return fmt.Errorf("connect cancelled after %d attempts: %w", attempts+1, ctx.Err())

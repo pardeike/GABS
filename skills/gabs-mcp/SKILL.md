@@ -25,6 +25,7 @@ Use GABS as the stable control surface for a local game-development loop. GABS s
 - Use `games_show` when a game fails to start or stop, especially for Steam/Epic `stopProcessName` validation.
 - Use `games_connect` after a game is already open, after a GABS restart, or when `games_start` says the process is running but GABP was not ready.
 - Use `games_connect` with `forceTakeover: true` only when intentionally moving ownership from another live GABS session.
+- For slow mod-heavy games, pass a larger `timeout` to `games_start` or configure `timeouts.startup.gabpConnectSeconds` so startup waits for the GABP bridge instead of returning early.
 
 ## Discovery
 
@@ -43,6 +44,7 @@ Use GABS as the stable control surface for a local game-development loop. GABS s
   - `timeout` for long-running game actions.
 - Fully qualified slash or dotted GABP names can be sent through `games_call_tool` before direct mirrored MCP tools appear.
 - If a call is blocked by attention, use `games_get_attention`, decide what to do, then acknowledge with `games_ack_attention` when appropriate.
+- While attention is open, diagnostic and lifecycle observation tools may still be callable through `games_call_tool`; use them to inspect bridge status, operations, logs, game-loaded state, or long-event idle state before acknowledging.
 
 ## Recovery
 
