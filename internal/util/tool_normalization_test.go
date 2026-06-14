@@ -6,24 +6,24 @@ import (
 
 func TestNormalizeToolNameForOpenAI(t *testing.T) {
 	testCases := []struct {
-		name           string
-		input          string
-		maxLength      int
-		expectedOutput string
+		name               string
+		input              string
+		maxLength          int
+		expectedOutput     string
 		expectedNormalized bool
 	}{
 		{
 			name:               "SimpleDotReplacement",
-			input:              "minecraft.inventory.get",
+			input:              "factory.inventory.get",
 			maxLength:          64,
-			expectedOutput:     "minecraft_inventory_get",
+			expectedOutput:     "factory_inventory_get",
 			expectedNormalized: true,
 		},
 		{
 			name:               "ComplexGameTool",
-			input:              "rimworld.crafting.build",
+			input:              "adventure.crafting.build",
 			maxLength:          64,
-			expectedOutput:     "rimworld_crafting_build",
+			expectedOutput:     "adventure_crafting_build",
 			expectedNormalized: true,
 		},
 		{
@@ -49,9 +49,9 @@ func TestNormalizeToolNameForOpenAI(t *testing.T) {
 		},
 		{
 			name:               "LongNameTruncationAtUnderscore",
-			input:              "minecraft.inventory.get.all.items.from.player.backpack.detailed",
+			input:              "factory.inventory.get.all.items.from.player.backpack.detailed",
 			maxLength:          50,
-			expectedOutput:     "minecraft_inventory_get_all_items_from_player",
+			expectedOutput:     "factory_inventory_get_all_items_from_player",
 			expectedNormalized: true,
 		},
 		{
@@ -70,9 +70,9 @@ func TestNormalizeToolNameForOpenAI(t *testing.T) {
 		},
 		{
 			name:               "LeadingTrailingDots",
-			input:              ".minecraft.inventory.",
+			input:              ".factory.inventory.",
 			maxLength:          64,
-			expectedOutput:     "minecraft_inventory",
+			expectedOutput:     "factory_inventory",
 			expectedNormalized: true,
 		},
 		{
@@ -98,9 +98,9 @@ func TestNormalizeToolNameForOpenAI(t *testing.T) {
 		},
 		{
 			name:               "ShortMaxLength",
-			input:              "minecraft.inventory.get",
+			input:              "factory.inventory.get",
 			maxLength:          10,
-			expectedOutput:     "minecraft",
+			expectedOutput:     "factory",
 			expectedNormalized: true,
 		},
 		{
@@ -161,12 +161,12 @@ func TestValidateOpenAIToolName(t *testing.T) {
 		},
 		{
 			name:     "ValidComplexNormalized",
-			input:    "minecraft_inventory_get",
+			input:    "factory_inventory_get",
 			expected: true,
 		},
 		{
 			name:     "InvalidWithDots",
-			input:    "minecraft.inventory.get",
+			input:    "factory.inventory.get",
 			expected: false,
 		},
 		{
@@ -259,7 +259,7 @@ func TestNormalizeToolNameBasic(t *testing.T) {
 // Test edge cases and boundary conditions
 func TestNormalizationEdgeCases(t *testing.T) {
 	t.Run("ZeroMaxLength", func(t *testing.T) {
-		result := NormalizeToolNameForOpenAI("minecraft.inventory.get", 0)
+		result := NormalizeToolNameForOpenAI("factory.inventory.get", 0)
 		// Should use default length (64)
 		if len(result.NormalizedName) > 64 {
 			t.Errorf("Expected max length to default to 64, but got length %d", len(result.NormalizedName))
@@ -267,7 +267,7 @@ func TestNormalizationEdgeCases(t *testing.T) {
 	})
 
 	t.Run("NegativeMaxLength", func(t *testing.T) {
-		result := NormalizeToolNameForOpenAI("minecraft.inventory.get", -5)
+		result := NormalizeToolNameForOpenAI("factory.inventory.get", -5)
 		// Should use default length (64)
 		if len(result.NormalizedName) > 64 {
 			t.Errorf("Expected max length to default to 64, but got length %d", len(result.NormalizedName))
@@ -275,7 +275,7 @@ func TestNormalizationEdgeCases(t *testing.T) {
 	})
 
 	t.Run("VeryShortMaxLength", func(t *testing.T) {
-		result := NormalizeToolNameForOpenAI("minecraft.inventory.get", 1)
+		result := NormalizeToolNameForOpenAI("factory.inventory.get", 1)
 		// Should produce a valid 1-character name
 		if len(result.NormalizedName) != 1 {
 			t.Errorf("Expected length 1, got length %d: '%s'", len(result.NormalizedName), result.NormalizedName)

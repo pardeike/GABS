@@ -23,24 +23,24 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 	// Create shared games config for all phases
 	gamesConfig := &config.GamesConfig{}
 	err1 := gamesConfig.AddGame(config.GameConfig{
-		ID:         "minecraft",
-		Name:       "Minecraft Server",
+		ID:         "factory",
+		Name:       "Example Game",
 		LaunchMode: "DirectPath",
-		Target:     "/opt/minecraft/server.jar",
+		Target:     "/opt/factory/server.jar",
 	})
 	if err1 != nil {
-		t.Fatalf("Failed to add minecraft game: %v", err1)
+		t.Fatalf("Failed to add factory game: %v", err1)
 	}
 
 	err2 := gamesConfig.AddGame(config.GameConfig{
-		ID:              "rimworld",
-		Name:            "RimWorld",
+		ID:              "adventure",
+		Name:            "AdventureGame",
 		LaunchMode:      "SteamAppId",
-		Target:          "294100",
-		StopProcessName: "RimWorldWin64.exe", // Required for Steam games
+		Target:          "123456",
+		StopProcessName: "GameName.exe", // Required for Steam games
 	})
 	if err2 != nil {
-		t.Fatalf("Failed to add rimworld game: %v", err2)
+		t.Fatalf("Failed to add adventure game: %v", err2)
 	}
 
 	// Step 1: Simulate initial GABS server state - only core game management tools
@@ -85,25 +85,25 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 		}
 
 		// Verify NO game-specific tools yet
-		if strings.Contains(responseStr, "minecraft.") || strings.Contains(responseStr, "rimworld.") {
+		if strings.Contains(responseStr, "factory.") || strings.Contains(responseStr, "adventure.") {
 			t.Error("Should not see game-specific tools before games are connected")
 		}
 
 		t.Log("✅ Phase 1 Complete: AI agent sees the current stable core management surface")
 	})
 
-	// Step 2: Simulate game connection with GABP mod - tools expand dramatically
+	// Step 2: Simulate game connection with GABP bridge - tools expand dramatically
 	t.Run("Phase2_GameConnection", func(t *testing.T) {
-		// Simulate what happens when a game with GABP mod connects
+		// Simulate what happens when a game with GABP bridge connects
 		// The Mirror system would do this automatically in real usage
 
-		t.Log("🎮 Minecraft game connects with GABP mod...")
+		t.Log("🎮 FactorySim game connects with GABP bridge...")
 
-		// Simulate registering tools from Minecraft GABP mod
-		minecraftTools := []Tool{
+		// Simulate registering tools from FactorySim GABP bridge
+		factoryTools := []Tool{
 			{
-				Name:        "minecraft.inventory.get",
-				Description: "Get player inventory in Minecraft (Game: minecraft)",
+				Name:        "factory.inventory.get",
+				Description: "Get player inventory in FactorySim (Game: factory)",
 				InputSchema: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -116,8 +116,8 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 				},
 			},
 			{
-				Name:        "minecraft.inventory.set",
-				Description: "Modify player inventory in Minecraft (Game: minecraft)",
+				Name:        "factory.inventory.set",
+				Description: "Modify player inventory in FactorySim (Game: factory)",
 				InputSchema: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -129,8 +129,8 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 				},
 			},
 			{
-				Name:        "minecraft.world.place_block",
-				Description: "Place a block in Minecraft world (Game: minecraft)",
+				Name:        "factory.world.place_block",
+				Description: "Place a block in FactorySim world (Game: factory)",
 				InputSchema: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -143,8 +143,8 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 				},
 			},
 			{
-				Name:        "minecraft.player.teleport",
-				Description: "Teleport player in Minecraft (Game: minecraft)",
+				Name:        "factory.player.teleport",
+				Description: "Teleport player in FactorySim (Game: factory)",
 				InputSchema: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -157,8 +157,8 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 				},
 			},
 			{
-				Name:        "minecraft.chat.send",
-				Description: "Send chat message in Minecraft (Game: minecraft)",
+				Name:        "factory.chat.send",
+				Description: "Send chat message in FactorySim (Game: factory)",
 				InputSchema: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -169,8 +169,8 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 				},
 			},
 			{
-				Name:        "minecraft.time.set",
-				Description: "Set world time in Minecraft (Game: minecraft)",
+				Name:        "factory.time.set",
+				Description: "Set world time in FactorySim (Game: factory)",
 				InputSchema: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -180,8 +180,8 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 				},
 			},
 			{
-				Name:        "minecraft.weather.set",
-				Description: "Control weather in Minecraft (Game: minecraft)",
+				Name:        "factory.weather.set",
+				Description: "Control weather in FactorySim (Game: factory)",
 				InputSchema: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -192,8 +192,8 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 			},
 		}
 
-		// Register Minecraft tools (as Mirror would do)
-		for _, tool := range minecraftTools {
+		// Register FactorySim tools (as Mirror would do)
+		for _, tool := range factoryTools {
 			// Capture tool by value to avoid closure bug
 			currentTool := tool
 			server.RegisterTool(currentTool, func(toolName string) func(args map[string]interface{}) (*ToolResult, error) {
@@ -205,7 +205,7 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 			}(currentTool.Name))
 		}
 
-		t.Logf("✅ Registered %d Minecraft tools", len(minecraftTools))
+		t.Logf("✅ Registered %d FactorySim tools", len(factoryTools))
 
 		// AI agent discovers expanded tools
 		listMsg := &Message{
@@ -219,17 +219,17 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 		responseStr := string(respBytes)
 
 		t.Log("🤖 AI Agent Discovers Tool Expansion:")
-		t.Logf("Phase 2 - Available tools after Minecraft connection: %s", responseStr)
+		t.Logf("Phase 2 - Available tools after FactorySim connection: %s", responseStr)
 
 		// Count tools to show expansion
 		toolCount := strings.Count(responseStr, `"name"`)
 		t.Logf("✅ AI now sees %d total tools (was 6, expanded by %d)", toolCount, toolCount-6)
 
 		// Verify game-specific tools are present
-		minecraftToolNames := []string{"minecraft.inventory.get", "minecraft.world.place_block", "minecraft.player.teleport", "minecraft.chat.send"}
-		for _, tool := range minecraftToolNames {
+		factoryToolNames := []string{"factory.inventory.get", "factory.world.place_block", "factory.player.teleport", "factory.chat.send"}
+		for _, tool := range factoryToolNames {
 			if !strings.Contains(responseStr, tool) {
-				t.Errorf("Expected Minecraft tool '%s' not found after connection", tool)
+				t.Errorf("Expected FactorySim tool '%s' not found after connection", tool)
 			}
 		}
 	})
@@ -238,15 +238,15 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 	t.Run("Phase3_AIDiscoveryWorkflow", func(t *testing.T) {
 		t.Log("🤖 AI Agent using discovery pattern...")
 
-		// AI uses games.tools to discover what Minecraft can do
+		// AI uses games.tools to discover what FactorySim can do
 		toolsMsg := &Message{
 			JSONRPC: "2.0",
 			Method:  "tools/call",
-			ID:      json.RawMessage(`"discover-minecraft"`),
+			ID:      json.RawMessage(`"discover-factory"`),
 			Params: map[string]interface{}{
 				"name": "games.tools",
 				"arguments": map[string]interface{}{
-					"gameId": "minecraft",
+					"gameId": "factory",
 				},
 			},
 		}
@@ -266,29 +266,29 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 			}
 		}
 
-		t.Log("✅ AI can now understand what Minecraft mod provides")
+		t.Log("✅ AI can now understand what FactorySim bridge provides")
 	})
 
-	// Step 4: Show multi-game scenario - RimWorld also connects
+	// Step 4: Show multi-game scenario - AdventureGame also connects
 	t.Run("Phase4_MultiGameExpansion", func(t *testing.T) {
-		t.Log("🎮 RimWorld game also connects with GABP mod...")
+		t.Log("🎮 AdventureGame game also connects with GABP bridge...")
 
-		// Simulate RimWorld GABP mod connecting
-		rimworldTools := []Tool{
+		// Simulate AdventureGame GABP bridge connecting
+		adventureTools := []Tool{
 			{
-				Name:        "rimworld.inventory.get",
-				Description: "Get colonist inventory in RimWorld (Game: rimworld)",
+				Name:        "adventure.inventory.get",
+				Description: "Get unit inventory in AdventureGame (Game: adventure)",
 				InputSchema: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"colonistId": map[string]interface{}{"type": "string"},
+						"unitId": map[string]interface{}{"type": "string"},
 					},
-					"required": []string{"colonistId"},
+					"required": []string{"unitId"},
 				},
 			},
 			{
-				Name:        "rimworld.crafting.build",
-				Description: "Build items/structures in RimWorld (Game: rimworld)",
+				Name:        "adventure.crafting.build",
+				Description: "Build items/structures in AdventureGame (Game: adventure)",
 				InputSchema: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -300,21 +300,21 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 				},
 			},
 			{
-				Name:        "rimworld.colonist.command",
-				Description: "Give orders to colonists in RimWorld (Game: rimworld)",
+				Name:        "adventure.unit.command",
+				Description: "Give orders to units in AdventureGame (Game: adventure)",
 				InputSchema: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"colonistId": map[string]interface{}{"type": "string"},
-						"task":       map[string]interface{}{"type": "string"},
-						"priority":   map[string]interface{}{"type": "integer"},
+						"unitId":   map[string]interface{}{"type": "string"},
+						"task":     map[string]interface{}{"type": "string"},
+						"priority": map[string]interface{}{"type": "integer"},
 					},
-					"required": []string{"colonistId", "task"},
+					"required": []string{"unitId", "task"},
 				},
 			},
 			{
-				Name:        "rimworld.research.progress",
-				Description: "Check research progress in RimWorld (Game: rimworld)",
+				Name:        "adventure.research.progress",
+				Description: "Check research progress in AdventureGame (Game: adventure)",
 				InputSchema: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -327,9 +327,9 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 			},
 		}
 
-		// Register RimWorld tools
-		for i := 0; i < len(rimworldTools); i++ {
-			tool := rimworldTools[i] // Get by index to avoid range loop issues
+		// Register AdventureGame tools
+		for i := 0; i < len(adventureTools); i++ {
+			tool := adventureTools[i] // Get by index to avoid range loop issues
 			server.RegisterTool(tool, func(toolName string) func(args map[string]interface{}) (*ToolResult, error) {
 				return func(args map[string]interface{}) (*ToolResult, error) {
 					return &ToolResult{
@@ -352,7 +352,7 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 
 		toolCount := strings.Count(responseStr, `"name"`)
 		t.Logf("🚀 Phase 4 - AI now sees %d total tools!", toolCount)
-		t.Logf("Tool expansion: 6 core → 13 (+ Minecraft) → %d (+ RimWorld)", toolCount)
+		t.Logf("Tool expansion: 6 core → 13 (+ FactorySim) → %d (+ AdventureGame)", toolCount)
 
 		// Show how AI can use games.tools to understand multi-game context
 		multiGameMsg := &Message{
@@ -373,7 +373,7 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 		t.Logf("games.tools (all games): %s", multiResponseStr)
 
 		// Verify both games' tools are clearly separated
-		if !strings.Contains(multiResponseStr, "minecraft") || !strings.Contains(multiResponseStr, "rimworld") {
+		if !strings.Contains(multiResponseStr, "factory") || !strings.Contains(multiResponseStr, "adventure") {
 			t.Error("Multi-game discovery should mention both games")
 		}
 
@@ -386,17 +386,17 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 
 		// Pattern 1: AI checks what's available before acting
 		t.Run("Pattern1_DiscoveryFirst", func(t *testing.T) {
-			// User: "Help me with Minecraft"
-			// AI: "Let me see what I can do with Minecraft..."
+			// User: "Help me with FactorySim"
+			// AI: "Let me see what I can do with FactorySim..."
 
 			checkMsg := &Message{
 				JSONRPC: "2.0",
 				Method:  "tools/call",
-				ID:      json.RawMessage(`"check-minecraft"`),
+				ID:      json.RawMessage(`"check-factory"`),
 				Params: map[string]interface{}{
 					"name": "games.tools",
 					"arguments": map[string]interface{}{
-						"gameId": "minecraft",
+						"gameId": "factory",
 					},
 				},
 			}
@@ -409,9 +409,9 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 			useMsg := &Message{
 				JSONRPC: "2.0",
 				Method:  "tools/call",
-				ID:      json.RawMessage(`"use-minecraft-tool"`),
+				ID:      json.RawMessage(`"use-factory-tool"`),
 				Params: map[string]interface{}{
-					"name": "minecraft.inventory.get",
+					"name": "factory.inventory.get",
 					"arguments": map[string]interface{}{
 						"playerId": "steve",
 					},
@@ -429,28 +429,28 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 		t.Run("Pattern2_GamePrefixClarity", func(t *testing.T) {
 			// Both games have inventory.get - but AI uses game-prefixed names
 
-			// Get Minecraft inventory
+			// Get FactorySim inventory
 			mcMsg := &Message{
 				JSONRPC: "2.0",
 				Method:  "tools/call",
 				ID:      json.RawMessage(`"mc-inventory"`),
 				Params: map[string]interface{}{
-					"name": "minecraft.inventory.get",
+					"name": "factory.inventory.get",
 					"arguments": map[string]interface{}{
 						"playerId": "steve",
 					},
 				},
 			}
 
-			// Get RimWorld inventory
+			// Get AdventureGame inventory
 			rwMsg := &Message{
 				JSONRPC: "2.0",
 				Method:  "tools/call",
 				ID:      json.RawMessage(`"rw-inventory"`),
 				Params: map[string]interface{}{
-					"name": "rimworld.inventory.get",
+					"name": "adventure.inventory.get",
 					"arguments": map[string]interface{}{
-						"colonistId": "alice",
+						"unitId": "alice",
 					},
 				},
 			}
@@ -461,8 +461,8 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 			mcBytes, _ := json.Marshal(mcResponse)
 			rwBytes, _ := json.Marshal(rwResponse)
 
-			t.Logf("Minecraft inventory: %s", string(mcBytes))
-			t.Logf("RimWorld inventory: %s", string(rwBytes))
+			t.Logf("FactorySim inventory: %s", string(mcBytes))
+			t.Logf("AdventureGame inventory: %s", string(rwBytes))
 
 			t.Log("✅ Game prefixes eliminate ambiguity perfectly")
 		})
@@ -478,10 +478,10 @@ func TestAIToolManagementStrategies(t *testing.T) {
 	// Set up test environment with game config
 	gamesConfig := &config.GamesConfig{}
 	gamesConfig.AddGame(config.GameConfig{
-		ID:         "minecraft",
-		Name:       "Minecraft Server",
+		ID:         "factory",
+		Name:       "Example Game",
 		LaunchMode: "DirectPath",
-		Target:     "/opt/minecraft/server.jar",
+		Target:     "/opt/factory/server.jar",
 	})
 
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, 5*time.Second)
@@ -505,7 +505,7 @@ func TestAIToolManagementStrategies(t *testing.T) {
 
 		// Simulate game connecting (tool expansion)
 		server.RegisterTool(Tool{
-			Name:        "minecraft.inventory.get",
+			Name:        "factory.inventory.get",
 			Description: "Get inventory",
 		}, func(args map[string]interface{}) (*ToolResult, error) {
 			return &ToolResult{Content: []Content{{Type: "text", Text: "mock"}}}, nil
@@ -526,8 +526,8 @@ func TestAIToolManagementStrategies(t *testing.T) {
 		t.Log("🧠 AI Agent: Using lazy discovery pattern")
 
 		// AI doesn't load all tools upfront, instead discovers as needed
-		// User: "Get my Minecraft inventory"
-		// AI: First checks if Minecraft tools are available
+		// User: "Get my FactorySim inventory"
+		// AI: First checks if FactorySim tools are available
 
 		toolsMsg := &Message{
 			JSONRPC: "2.0",
@@ -535,7 +535,7 @@ func TestAIToolManagementStrategies(t *testing.T) {
 			ID:      json.RawMessage(`"lazy-check"`),
 			Params: map[string]interface{}{
 				"name":      "games.tools",
-				"arguments": map[string]interface{}{"gameId": "minecraft"},
+				"arguments": map[string]interface{}{"gameId": "factory"},
 			},
 		}
 
@@ -543,10 +543,10 @@ func TestAIToolManagementStrategies(t *testing.T) {
 		respBytes, _ := json.Marshal(response)
 		responseStr := string(respBytes)
 
-		if strings.Contains(responseStr, "minecraft.inventory") {
-			t.Log("✅ Found Minecraft inventory tools, can proceed")
+		if strings.Contains(responseStr, "factory.inventory") {
+			t.Log("✅ Found FactorySim inventory tools, can proceed")
 		} else {
-			t.Log("ℹ️ No Minecraft inventory tools yet, need to start game first")
+			t.Log("ℹ️ No FactorySim inventory tools yet, need to start game first")
 		}
 
 		t.Log("✅ Lazy discovery reduces unnecessary tool loading")
@@ -589,17 +589,17 @@ func TestRealWorldScenarios(t *testing.T) {
 	// Set up realistic game environment
 	gamesConfig := &config.GamesConfig{}
 	gamesConfig.AddGame(config.GameConfig{
-		ID:         "minecraft",
-		Name:       "Minecraft Server",
+		ID:         "factory",
+		Name:       "Example Game",
 		LaunchMode: "DirectPath",
-		Target:     "/opt/minecraft/server.jar",
+		Target:     "/opt/factory/server.jar",
 	})
 	gamesConfig.AddGame(config.GameConfig{
-		ID:              "rimworld",
-		Name:            "RimWorld",
+		ID:              "adventure",
+		Name:            "AdventureGame",
 		LaunchMode:      "SteamAppId",
-		Target:          "294100",
-		StopProcessName: "RimWorldWin64.exe",
+		Target:          "123456",
+		StopProcessName: "GameName.exe",
 	})
 
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, 5*time.Second)
@@ -632,16 +632,16 @@ func TestRealWorldScenarios(t *testing.T) {
 	})
 
 	t.Run("Scenario2_GameModInstallation", func(t *testing.T) {
-		// User starts game, installs GABP mod, mod connects
-		t.Log("👤 User: I started Minecraft and installed a GABP mod")
+		// User starts game, installs GABP bridge, bridge connects
+		t.Log("👤 User: I started FactorySim and installed a GABP bridge")
 
-		// Simulate mod connecting and registering tools
-		minecraftTools := []string{"inventory.get", "world.place_block", "player.teleport"}
-		for _, toolName := range minecraftTools {
-			fullName := fmt.Sprintf("minecraft.%s", toolName)
+		// Simulate bridge connecting and registering tools
+		factoryTools := []string{"inventory.get", "world.place_block", "player.teleport"}
+		for _, toolName := range factoryTools {
+			fullName := fmt.Sprintf("factory.%s", toolName)
 			server.RegisterTool(Tool{
 				Name:        fullName,
-				Description: fmt.Sprintf("Minecraft %s tool", toolName),
+				Description: fmt.Sprintf("FactorySim %s tool", toolName),
 			}, func(args map[string]interface{}) (*ToolResult, error) {
 				return &ToolResult{Content: []Content{{Type: "text", Text: "mock result"}}}, nil
 			})
@@ -651,10 +651,10 @@ func TestRealWorldScenarios(t *testing.T) {
 		toolsMsg := &Message{
 			JSONRPC: "2.0",
 			Method:  "tools/call",
-			ID:      json.RawMessage(`"mod-discovery"`),
+			ID:      json.RawMessage(`"bridge-discovery"`),
 			Params: map[string]interface{}{
 				"name":      "games.tools",
-				"arguments": map[string]interface{}{"gameId": "minecraft"},
+				"arguments": map[string]interface{}{"gameId": "factory"},
 			},
 		}
 
@@ -663,26 +663,26 @@ func TestRealWorldScenarios(t *testing.T) {
 		responseStr := string(respBytes)
 
 		t.Log("🤖 AI: Great! I can now help you with:")
-		for _, tool := range minecraftTools {
+		for _, tool := range factoryTools {
 			if strings.Contains(responseStr, tool) {
 				t.Logf("  ✅ %s", tool)
 			}
 		}
 
-		t.Log("✅ Mod installation discovery works perfectly")
+		t.Log("✅ Bridge installation discovery works perfectly")
 	})
 
 	t.Run("Scenario3_MultipleGameManagement", func(t *testing.T) {
-		// User has multiple games running with different mods
-		t.Log("👤 User: I'm running both Minecraft and RimWorld")
+		// User has multiple games running with different bridges
+		t.Log("👤 User: I'm running both FactorySim and AdventureGame")
 
-		// Add RimWorld tools too
-		rimworldTools := []string{"inventory.get", "crafting.build", "research.progress"}
-		for _, toolName := range rimworldTools {
-			fullName := fmt.Sprintf("rimworld.%s", toolName)
+		// Add AdventureGame tools too
+		adventureTools := []string{"inventory.get", "crafting.build", "research.progress"}
+		for _, toolName := range adventureTools {
+			fullName := fmt.Sprintf("adventure.%s", toolName)
 			server.RegisterTool(Tool{
 				Name:        fullName,
-				Description: fmt.Sprintf("RimWorld %s tool", toolName),
+				Description: fmt.Sprintf("AdventureGame %s tool", toolName),
 			}, func(args map[string]interface{}) (*ToolResult, error) {
 				return &ToolResult{Content: []Content{{Type: "text", Text: "mock result"}}}, nil
 			})
@@ -704,11 +704,11 @@ func TestRealWorldScenarios(t *testing.T) {
 		responseStr := string(respBytes)
 
 		t.Log("🤖 AI: I can manage both games simultaneously:")
-		t.Log("  Minecraft: inventory, world building, player control")
-		t.Log("  RimWorld: colonist management, crafting, research")
+		t.Log("  FactorySim: inventory, world building, player control")
+		t.Log("  AdventureGame: unit management, crafting, research")
 
 		// Verify both game namespaces are present
-		if strings.Contains(responseStr, "minecraft") && strings.Contains(responseStr, "rimworld") {
+		if strings.Contains(responseStr, "factory") && strings.Contains(responseStr, "adventure") {
 			t.Log("✅ Multi-game management works perfectly")
 		} else {
 			t.Error("Should see both game namespaces")

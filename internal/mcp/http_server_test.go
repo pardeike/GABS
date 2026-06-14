@@ -110,9 +110,9 @@ func TestMCPHTTPEndpoint(t *testing.T) {
 	}
 
 	tests := []struct {
-		name     string
-		request  Message
-		wantErr  bool
+		name    string
+		request Message
+		wantErr bool
 	}{
 		{"initialize", initRequest, false},
 		{"tools/list", toolsRequest, false},
@@ -131,7 +131,7 @@ func TestMCPHTTPEndpoint(t *testing.T) {
 			}
 
 			if response != nil {
-				t.Logf("Request %s: ID=%v, Result present=%v, Error=%v", 
+				t.Logf("Request %s: ID=%v, Result present=%v, Error=%v",
 					tt.name, response.ID, response.Result != nil, response.Error)
 			}
 		})
@@ -144,7 +144,7 @@ func TestSSENotificationFormat(t *testing.T) {
 	params := map[string]interface{}{}
 
 	notification := NewNotification(method, params)
-	
+
 	// Verify notification structure
 	if notification.JSONRPC != "2.0" {
 		t.Errorf("Expected JSONRPC 2.0, got %s", notification.JSONRPC)
@@ -247,7 +247,7 @@ func TestValidJSONRPCOverHTTP(t *testing.T) {
 			"protocolVersion": "2024-11-05",
 			"capabilities":    map[string]interface{}{},
 			"clientInfo": map[string]interface{}{
-				"name":    "http-test-client", 
+				"name":    "http-test-client",
 				"version": "1.0.0",
 			},
 		},

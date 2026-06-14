@@ -210,7 +210,7 @@ func (c *Controller) IsRunning() bool {
 // isRunningByName checks if the game process is running by its StopProcessName.
 // This is used as a fallback when the direct child process has exited, which happens
 // when the launched executable is a launcher/loader that spawns the actual game process
-// and then exits (e.g., BLSE for Bannerlord, mod loaders, etc.).
+// and then exits (e.g., BLSE for Bannerlord, bridge loaders, etc.).
 func (c *Controller) isRunningByName() bool {
 	if c.spec.StopProcessName == "" {
 		return false

@@ -14,11 +14,11 @@ import (
 
 // HTTPClient represents an HTTP client connection for SSE
 type HTTPClient struct {
-	ID       string
-	Writer   http.ResponseWriter
-	Flusher  http.Flusher
-	Done     chan struct{}
-	Request  *http.Request
+	ID      string
+	Writer  http.ResponseWriter
+	Flusher http.Flusher
+	Done    chan struct{}
+	Request *http.Request
 }
 
 // ServeHTTP starts the MCP server on HTTP (Streamable HTTP transport)
@@ -174,7 +174,7 @@ func (s *Server) handleSSEConnection(w http.ResponseWriter, r *http.Request, cli
 
 	// Generate client ID
 	clientID := fmt.Sprintf("client-%d", time.Now().UnixNano())
-	
+
 	// Create client
 	client := &HTTPClient{
 		ID:      clientID,

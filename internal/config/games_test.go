@@ -41,10 +41,10 @@ func TestGamesConfig(t *testing.T) {
 		config, _ := LoadGamesConfigFromPath(configPath)
 
 		game := GameConfig{
-			ID:          "minecraft",
-			Name:        "Minecraft",
+			ID:          "factory",
+			Name:        "FactorySim",
 			LaunchMode:  "DirectPath",
-			Target:      "/path/to/minecraft",
+			Target:      "/path/to/factory",
 			Description: "A test game",
 		}
 
@@ -52,13 +52,13 @@ func TestGamesConfig(t *testing.T) {
 			t.Fatalf("Failed to add valid game: %v", err)
 		}
 
-		retrieved, exists := config.GetGame("minecraft")
+		retrieved, exists := config.GetGame("factory")
 		if !exists {
 			t.Error("Expected game to exist after adding")
 		}
 
-		if retrieved.Name != "Minecraft" {
-			t.Errorf("Expected name 'Minecraft', got '%s'", retrieved.Name)
+		if retrieved.Name != "FactorySim" {
+			t.Errorf("Expected name 'FactorySim', got '%s'", retrieved.Name)
 		}
 
 		if retrieved.LaunchMode != "DirectPath" {
@@ -76,11 +76,11 @@ func TestGamesConfig(t *testing.T) {
 				},
 			},
 			Games: map[string]GameConfig{
-				"rimworld": {
-					ID:         "rimworld",
-					Name:       "RimWorld",
+				"adventure": {
+					ID:         "adventure",
+					Name:       "AdventureGame",
 					LaunchMode: "SteamAppId",
-					Target:     "294100",
+					Target:     "123456",
 				},
 			},
 		}
@@ -99,17 +99,17 @@ func TestGamesConfig(t *testing.T) {
 			t.Errorf("Expected 1 game, got %d", len(loadedConfig.Games))
 		}
 
-		game, exists := loadedConfig.GetGame("rimworld")
+		game, exists := loadedConfig.GetGame("adventure")
 		if !exists {
-			t.Error("Expected rimworld game to exist")
+			t.Error("Expected adventure game to exist")
 		}
 
-		if game.Name != "RimWorld" {
-			t.Errorf("Expected name 'RimWorld', got '%s'", game.Name)
+		if game.Name != "AdventureGame" {
+			t.Errorf("Expected name 'AdventureGame', got '%s'", game.Name)
 		}
 
-		if game.Target != "294100" {
-			t.Errorf("Expected target '294100', got '%s'", game.Target)
+		if game.Target != "123456" {
+			t.Errorf("Expected target '123456', got '%s'", game.Target)
 		}
 
 		processStartTimeout, gabpConnectTimeout := loadedConfig.GetStartupTimeouts()
@@ -471,11 +471,11 @@ func TestGameConfigValidation(t *testing.T) {
 
 	t.Run("ValidSteamGameWithStopProcess", func(t *testing.T) {
 		game := GameConfig{
-			ID:              "rimworld",
-			Name:            "RimWorld",
+			ID:              "adventure",
+			Name:            "AdventureGame",
 			LaunchMode:      "SteamAppId",
-			Target:          "294100",
-			StopProcessName: "RimWorldWin64.exe",
+			Target:          "123456",
+			StopProcessName: "GameName.exe",
 		}
 
 		if err := game.Validate(); err != nil {
@@ -485,10 +485,10 @@ func TestGameConfigValidation(t *testing.T) {
 
 	t.Run("InvalidSteamGameWithoutStopProcess", func(t *testing.T) {
 		game := GameConfig{
-			ID:         "rimworld",
-			Name:       "RimWorld",
+			ID:         "adventure",
+			Name:       "AdventureGame",
 			LaunchMode: "SteamAppId",
-			Target:     "294100",
+			Target:     "123456",
 			// Missing StopProcessName
 		}
 

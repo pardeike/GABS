@@ -1,7 +1,7 @@
 # AI Dynamic Tools FAQ - Answering Your GABS Questions
 
 ## The Question
-> "At the start of the GABS server, it offers a basic set of mcp tools to an AI. This includes starting games for example. Once a game is started, GABS will try to connect to the games GABP server and will (hopefully) start mirroring the games mcp tools. Since I have yet to write such a mod (I am still developing GABS) it is unclear to me if at that point the amount of mcp tools will increase and if an AI will figure this out. How do you think this will work out in the real world when the amount of mcp tools is dynamic?"
+> "At the start of the GABS server, it offers a basic set of mcp tools to an AI. This includes starting games for example. Once a game is started, GABS will try to connect to the games GABP server and will (hopefully) start mirroring the games mcp tools. Since I have yet to write such a game-side bridge (I am still developing GABS) it is unclear to me if at that point the amount of mcp tools will increase and if an AI will figure this out. How do you think this will work out in the real world when the amount of mcp tools is dynamic?"
 
 > **See also:** [Dynamic Tools Guide](DYNAMIC_TOOLS_GUIDE.md) for technical implementation details, [AI Integration Guide](INTEGRATION.md) for connecting AI agents.
 
@@ -18,11 +18,11 @@ GABS provides a compact two-step discovery flow specifically for this purpose:
 
 ```javascript
 // AI discovers compact names for a specific game
-const minecraftToolNames = await mcp.callTool("games_tool_names", {"gameId": "minecraft", "brief": true});
+const factoryToolNames = await mcp.callTool("games_tool_names", {"gameId": "factory", "brief": true});
 
 // AI inspects one candidate in detail
 const inventoryDetail = await mcp.callTool("games_tool_detail", {
-  "tool": "minecraft_inventory_get"
+  "tool": "factory_inventory_get"
 });
 
 // The richer compatibility listing still exists when needed
@@ -36,17 +36,17 @@ Even with many tools from multiple games, AI agents can stay oriented because:
 
 ```
 ✅ Clear and Unambiguous:
-- minecraft_inventory_get
-- minecraft_world_place_block
-- rimworld_inventory_get
-- rimworld_crafting_build
-- valheim_inventory_get
-- valheim_building_construct
+- factory_inventory_get
+- factory_world_place_block
+- adventure_inventory_get
+- adventure_crafting_build
+- arena_inventory_get
+- arena_building_construct
 
 ❌ Confusing (what GABS avoids):
 - inventory.get  (which game?)
-- place_block   (Minecraft or Valheim?)
-- build         (RimWorld crafting or Valheim building?)
+- place_block   (FactorySim or AdventureArena?)
+- build         (AdventureGame crafting or AdventureArena building?)
 ```
 
 ### 3. **Progressive Disclosure Pattern**
@@ -66,40 +66,40 @@ up front.
 
 ### Example 1: Natural Discovery
 ```
-User: "Help me with my Minecraft server"
+User: "Help me with my FactorySim server"
 
-AI: Let me see what I can do with Minecraft...
-    -> games_tool_names {"gameId": "minecraft", "brief": true}
+AI: Let me see what I can do with FactorySim...
+    -> games_tool_names {"gameId": "factory", "brief": true}
 
 AI: I can help you with:
     - Managing player inventories
-    - World building and block placement  
+    - World building and block placement
     - Player teleportation
     - Chat and server control
-    
+
     What would you like to do?
 
 User: "Give me a diamond sword"
 
 AI: I'll add that to your inventory...
-    -> minecraft_inventory_set {"playerId": "steve", "item": "diamond_sword", "count": 1}
+    -> factory_inventory_set {"playerId": "steve", "item": "diamond_sword", "count": 1}
 ```
 
-### Example 2: Multi-Game Awareness  
+### Example 2: Multi-Game Awareness
 ```
-User: "I'm running both Minecraft and RimWorld, help me manage both"
+User: "I'm running both FactorySim and AdventureGame, help me manage both"
 
 AI: Let me check what I can do with both games...
     -> games_tool_names {"brief": true}
 
 AI: Perfect! I can help you with:
-    
-    **Minecraft**:
+
+    **FactorySim**:
     - Inventory management, world building, player control
-    
-    **RimWorld**:  
-    - Colony management, crafting, research
-    
+
+    **AdventureGame**:
+    - Party management, crafting, research
+
     Both games are clearly separated, so I can help you with either.
     Which would you like to work with first?
 ```
@@ -111,7 +111,7 @@ class GABSClient {
   async refreshToolsWhenNeeded() {
     // Check if games have changed state
     const currentGames = await this.mcp.callTool("games_status", {});
-    
+
     if (this.gameStateChanged(currentGames)) {
       // Refresh compact tool names
       this.availableTools = await this.mcp.callTool("games_tool_names", {"brief": true});
@@ -148,7 +148,7 @@ The test suite covers the important discovery behaviors:
 async handleGameRequest(gameId, action) {
   const gameTools = await mcp.callTool("games_tool_names", {gameId, brief: true});
   const availableActions = parseToolsForCapabilities(gameTools);
-  
+
   if (availableActions.includes(action)) {
     return await executeAction(gameId, action);
   } else {
@@ -174,7 +174,7 @@ function organizeToolsForUser(allTools) {
 const toolsCache = await mcp.callTool("games_tool_names", {}); // DON'T cache forever
 
 // Don't assume tools exist without checking
-await mcp.callTool("minecraft_inventory_get", {...}); // Check games_tool_names first!
+await mcp.callTool("factory_inventory_get", {...}); // Check games_tool_names first!
 
 // Don't overwhelm users with massive tool lists
 console.log("Here are all available tools..."); // Group by game instead!
@@ -201,7 +201,7 @@ session open.
 - `games_connect` also returns quickly instead of hanging on a competing bridge
   connection
 - `games_status` can report that another GABS session owns the process
-- If takeover is intentional, `games_connect {"gameId": "rimworld",
+- If takeover is intentional, `games_connect {"gameId": "adventure",
   "forceTakeover": true}` moves ownership to the current session
 
 ### Current State
@@ -218,7 +218,7 @@ session open.
 ### Still Evolving
 - **Richer event streaming**: real-time event transport keeps improving as
   bridges expose more event capabilities.
-- **Broader mirrored resources**: mods can keep expanding the game-specific
+- **Broader mirrored resources**: game integrations can keep expanding the game-specific
   resource surface beyond the baseline state and log resources.
 - **Batch operations**: multi-action atomic workflows are still future work.
 

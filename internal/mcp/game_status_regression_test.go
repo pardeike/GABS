@@ -21,19 +21,19 @@ func TestDoubleCheckGameStatusFix(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Create RimWorld config - the specific game that was hanging
-	rimworldGame := config.GameConfig{
-		ID:              "rimworld",
-		Name:            "RimWorld", 
+	// Create AdventureGame config - the specific game that was hanging
+	adventureGame := config.GameConfig{
+		ID:              "adventure",
+		Name:            "AdventureGame",
 		LaunchMode:      "SteamAppId",
-		Target:          "294100",
-		StopProcessName: "RimWorldWin64.exe",
+		Target:          "123456",
+		StopProcessName: "GameName.exe",
 	}
-	
+
 	gamesConfig := &config.GamesConfig{
 		Games: make(map[string]config.GameConfig),
 	}
-	gamesConfig.AddGame(rimworldGame)
+	gamesConfig.AddGame(adventureGame)
 
 	// Create MCP server
 	log := util.NewLogger("info")
@@ -45,16 +45,16 @@ func TestDoubleCheckGameStatusFix(t *testing.T) {
 	backoffMax := 1 * time.Second
 	server.RegisterGameManagementTools(gamesConfig, backoffMin, backoffMax)
 
-	t.Run("games.status should not hang on rimworld", func(t *testing.T) {
-		// This tests the exact problem reported: gabs.games_status({"gameId":"rimworld"}) hangs
+	t.Run("games.status should not hang on adventure", func(t *testing.T) {
+		// This tests the exact problem reported: gabs.games_status({"gameId":"adventure"}) hangs
 		statusMsg := &Message{
 			JSONRPC: "2.0",
 			Method:  "tools/call",
-			ID:      json.RawMessage(`"rimworld-status"`),
+			ID:      json.RawMessage(`"adventure-status"`),
 			Params: map[string]interface{}{
 				"name": "games.status",
 				"arguments": map[string]interface{}{
-					"gameId": "rimworld",
+					"gameId": "adventure",
 				},
 			},
 		}
@@ -71,17 +71,17 @@ func TestDoubleCheckGameStatusFix(t *testing.T) {
 			respBytes, _ := json.Marshal(response)
 			responseStr := string(respBytes)
 			t.Logf("✅ games.status completed successfully: %s", responseStr)
-			
+
 			// Verify it returns proper response
 			if strings.Contains(responseStr, `"error"`) {
 				t.Errorf("games.status returned error: %s", responseStr)
 			}
-			
-			// Should contain RimWorld info
-			if !strings.Contains(responseStr, "rimworld") || !strings.Contains(responseStr, "RimWorld") {
-				t.Errorf("Expected rimworld game info in response: %s", responseStr)
+
+			// Should contain AdventureGame info
+			if !strings.Contains(responseStr, "adventure") || !strings.Contains(responseStr, "AdventureGame") {
+				t.Errorf("Expected adventure game info in response: %s", responseStr)
 			}
-			
+
 		case <-time.After(2 * time.Second):
 			t.Fatal("❌ games.status call timed out - the deadlock issue still exists!")
 		}
@@ -92,11 +92,11 @@ func TestDoubleCheckGameStatusFix(t *testing.T) {
 		startMsg := &Message{
 			JSONRPC: "2.0",
 			Method:  "tools/call",
-			ID:      json.RawMessage(`"start-rimworld"`),
+			ID:      json.RawMessage(`"start-adventure"`),
 			Params: map[string]interface{}{
 				"name": "games.start",
 				"arguments": map[string]interface{}{
-					"gameId": "rimworld",
+					"gameId": "adventure",
 				},
 			},
 		}
@@ -108,11 +108,11 @@ func TestDoubleCheckGameStatusFix(t *testing.T) {
 		statusMsg := &Message{
 			JSONRPC: "2.0",
 			Method:  "tools/call",
-			ID:      json.RawMessage(`"rimworld-status-after-start"`),
+			ID:      json.RawMessage(`"adventure-status-after-start"`),
 			Params: map[string]interface{}{
 				"name": "games.status",
 				"arguments": map[string]interface{}{
-					"gameId": "rimworld",
+					"gameId": "adventure",
 				},
 			},
 		}
@@ -128,7 +128,7 @@ func TestDoubleCheckGameStatusFix(t *testing.T) {
 			respBytes, _ := json.Marshal(response)
 			responseStr := string(respBytes)
 			t.Logf("✅ games.status after start completed: %s", responseStr)
-			
+
 		case <-time.After(2 * time.Second):
 			t.Fatal("❌ games.status after start timed out - deadlock still exists!")
 		}

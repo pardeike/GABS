@@ -15,8 +15,8 @@ import (
 // TestMultiGameToolMirroring demonstrates the confusion AI faces with multiple games
 func TestMultiGameToolMirroring(t *testing.T) {
 	// This test simulates what happens when you have 2 games running:
-	// - Minecraft with inventory/get, world/place_block tools
-	// - RimWorld with inventory/get, crafting/build tools
+	// - FactorySim with inventory/get, world/place_block tools
+	// - AdventureGame with inventory/get, crafting/build tools
 	//
 	// Current behavior: Tool name conflicts, no way to specify game context
 	// Expected after fix: Clear game-specific tool names or context
@@ -29,32 +29,32 @@ func TestMultiGameToolMirroring(t *testing.T) {
 		// Simulate registering tools from different games
 		// In reality, Mirror instances would do this
 
-		// Register minecraft tools
-		minecraftTools := []Tool{
-			{Name: "minecraft.inventory.get", Description: "Get player inventory in Minecraft (Game: minecraft)"},
-			{Name: "minecraft.world.place_block", Description: "Place a block in Minecraft world (Game: minecraft)"},
-			{Name: "minecraft.player.teleport", Description: "Teleport player in Minecraft (Game: minecraft)"},
+		// Register factory tools
+		factoryTools := []Tool{
+			{Name: "factory.inventory.get", Description: "Get player inventory in FactorySim (Game: factory)"},
+			{Name: "factory.world.place_block", Description: "Place a block in FactorySim world (Game: factory)"},
+			{Name: "factory.player.teleport", Description: "Teleport player in FactorySim (Game: factory)"},
 		}
 
-		rimworldTools := []Tool{
-			{Name: "rimworld.inventory.get", Description: "Get colonist inventory in RimWorld (Game: rimworld)"},
-			{Name: "rimworld.crafting.build", Description: "Build items in RimWorld (Game: rimworld)"},
-			{Name: "rimworld.player.teleport", Description: "Move colonist in RimWorld (Game: rimworld)"},
+		adventureTools := []Tool{
+			{Name: "adventure.inventory.get", Description: "Get unit inventory in AdventureGame (Game: adventure)"},
+			{Name: "adventure.crafting.build", Description: "Build items in AdventureGame (Game: adventure)"},
+			{Name: "adventure.player.teleport", Description: "Move unit in AdventureGame (Game: adventure)"},
 		}
 
 		// Register tools as Mirror would do
-		for _, tool := range minecraftTools {
+		for _, tool := range factoryTools {
 			server.RegisterTool(tool, func(args map[string]interface{}) (*ToolResult, error) {
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("Minecraft tool %s executed", tool.Name)}},
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("FactorySim tool %s executed", tool.Name)}},
 				}, nil
 			})
 		}
 
-		for _, tool := range rimworldTools {
+		for _, tool := range adventureTools {
 			server.RegisterTool(tool, func(args map[string]interface{}) (*ToolResult, error) {
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("RimWorld tool %s executed", tool.Name)}},
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("AdventureGame tool %s executed", tool.Name)}},
 				}, nil
 			})
 		}
@@ -75,13 +75,13 @@ func TestMultiGameToolMirroring(t *testing.T) {
 		t.Logf("Fixed tools list (clear for AI): %s", string(respBytes))
 
 		// Verify AI can call specific game tools
-		t.Run("CallMinecraftInventory", func(t *testing.T) {
+		t.Run("CallFactorySimInventory", func(t *testing.T) {
 			callMsg := &Message{
 				JSONRPC: "2.0",
 				Method:  "tools/call",
-				ID:      json.RawMessage(`"call-minecraft-inventory"`),
+				ID:      json.RawMessage(`"call-factory-inventory"`),
 				Params: map[string]interface{}{
-					"name": "minecraft.inventory.get",
+					"name": "factory.inventory.get",
 					"arguments": map[string]interface{}{
 						"playerId": "steve",
 					},
@@ -90,33 +90,33 @@ func TestMultiGameToolMirroring(t *testing.T) {
 
 			callResponse := server.HandleMessage(callMsg)
 			if callResponse == nil {
-				t.Fatal("Expected response from minecraft.inventory.get")
+				t.Fatal("Expected response from factory.inventory.get")
 			}
 
 			callBytes, _ := json.Marshal(callResponse)
-			t.Logf("Minecraft inventory call result: %s", string(callBytes))
+			t.Logf("FactorySim inventory call result: %s", string(callBytes))
 		})
 
-		t.Run("CallRimWorldInventory", func(t *testing.T) {
+		t.Run("CallAdventureGameInventory", func(t *testing.T) {
 			callMsg := &Message{
 				JSONRPC: "2.0",
 				Method:  "tools/call",
-				ID:      json.RawMessage(`"call-rimworld-inventory"`),
+				ID:      json.RawMessage(`"call-adventure-inventory"`),
 				Params: map[string]interface{}{
-					"name": "rimworld.inventory.get",
+					"name": "adventure.inventory.get",
 					"arguments": map[string]interface{}{
-						"playerId": "colonist1",
+						"playerId": "unit1",
 					},
 				},
 			}
 
 			callResponse := server.HandleMessage(callMsg)
 			if callResponse == nil {
-				t.Fatal("Expected response from rimworld.inventory.get")
+				t.Fatal("Expected response from adventure.inventory.get")
 			}
 
 			callBytes, _ := json.Marshal(callResponse)
-			t.Logf("RimWorld inventory call result: %s", string(callBytes))
+			t.Logf("AdventureGame inventory call result: %s", string(callBytes))
 		})
 	})
 }
@@ -136,17 +136,17 @@ func TestGamesToolsCommand(t *testing.T) {
 	gamesConfig := &config.GamesConfig{
 		Version: "1.0",
 		Games: map[string]config.GameConfig{
-			"minecraft": {
-				ID:         "minecraft",
-				Name:       "Minecraft",
+			"factory": {
+				ID:         "factory",
+				Name:       "FactorySim",
 				LaunchMode: "DirectPath",
-				Target:     "/opt/minecraft/start.sh",
+				Target:     "/opt/factory/start.sh",
 			},
-			"rimworld": {
-				ID:         "rimworld",
-				Name:       "RimWorld",
+			"adventure": {
+				ID:         "adventure",
+				Name:       "AdventureGame",
 				LaunchMode: "SteamAppId",
-				Target:     "294100",
+				Target:     "123456",
 			},
 		},
 	}
@@ -167,10 +167,10 @@ func TestGamesToolsCommand(t *testing.T) {
 	server.RegisterGameManagementTools(loadedConfig, 0, 0)
 
 	// Simulate having some game-specific tools registered (as Mirror would do)
-	minecraftTools := []Tool{
+	factoryTools := []Tool{
 		{
-			Name:        "minecraft.inventory.get",
-			Description: "Get player inventory in Minecraft (Game: minecraft)",
+			Name:        "factory.inventory.get",
+			Description: "Get player inventory in FactorySim (Game: factory)",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -201,30 +201,30 @@ func TestGamesToolsCommand(t *testing.T) {
 			},
 		},
 		{
-			Name:        "minecraft.world.place_block",
-			Description: "Place a block in Minecraft world (Game: minecraft)",
+			Name:        "factory.world.place_block",
+			Description: "Place a block in FactorySim world (Game: factory)",
 		},
 	}
 
-	rimworldTools := []Tool{
+	adventureTools := []Tool{
 		{
-			Name:        "rimworld.inventory.get",
-			Description: "Get colonist inventory in RimWorld (Game: rimworld)",
+			Name:        "adventure.inventory.get",
+			Description: "Get unit inventory in AdventureGame (Game: adventure)",
 		},
 		{
-			Name:        "rimworld.crafting.build",
-			Description: "Build items in RimWorld (Game: rimworld)",
+			Name:        "adventure.crafting.build",
+			Description: "Build items in AdventureGame (Game: adventure)",
 		},
 	}
 
 	// Register tools
-	for _, tool := range minecraftTools {
+	for _, tool := range factoryTools {
 		server.RegisterTool(tool, func(args map[string]interface{}) (*ToolResult, error) {
 			return &ToolResult{Content: []Content{{Type: "text", Text: "Tool executed"}}}, nil
 		})
 	}
 
-	for _, tool := range rimworldTools {
+	for _, tool := range adventureTools {
 		server.RegisterTool(tool, func(args map[string]interface{}) (*ToolResult, error) {
 			return &ToolResult{Content: []Content{{Type: "text", Text: "Tool executed"}}}, nil
 		})
@@ -251,25 +251,25 @@ func TestGamesToolsCommand(t *testing.T) {
 		responseStr := string(respBytes)
 		t.Logf("games.tools (all games): %s", responseStr)
 
-		// Should mention both minecraft and rimworld tools
-		if !strings.Contains(responseStr, "minecraft.inventory.get") {
-			t.Error("Expected to see minecraft tools")
+		// Should mention both factory and adventure tools
+		if !strings.Contains(responseStr, "factory.inventory.get") {
+			t.Error("Expected to see factory tools")
 		}
-		if !strings.Contains(responseStr, "rimworld.inventory.get") {
-			t.Error("Expected to see rimworld tools")
+		if !strings.Contains(responseStr, "adventure.inventory.get") {
+			t.Error("Expected to see adventure tools")
 		}
 	})
 
-	t.Run("ListMinecraftToolsOnly", func(t *testing.T) {
+	t.Run("ListFactorySimToolsOnly", func(t *testing.T) {
 		// Test games.tools with specific gameId
 		toolsMsg := &Message{
 			JSONRPC: "2.0",
 			Method:  "tools/call",
-			ID:      json.RawMessage(`"list-minecraft-tools"`),
+			ID:      json.RawMessage(`"list-factory-tools"`),
 			Params: map[string]interface{}{
 				"name": "games.tools",
 				"arguments": map[string]interface{}{
-					"gameId": "minecraft",
+					"gameId": "factory",
 				},
 			},
 		}
@@ -281,14 +281,14 @@ func TestGamesToolsCommand(t *testing.T) {
 
 		respBytes, _ := json.Marshal(response)
 		responseStr := string(respBytes)
-		t.Logf("games.tools (minecraft only): %s", responseStr)
+		t.Logf("games.tools (factory only): %s", responseStr)
 
-		// Should mention minecraft tools but not rimworld
-		if !strings.Contains(responseStr, "minecraft.inventory.get") {
-			t.Error("Expected to see minecraft tools")
+		// Should mention factory tools but not adventure
+		if !strings.Contains(responseStr, "factory.inventory.get") {
+			t.Error("Expected to see factory tools")
 		}
-		if strings.Contains(responseStr, "rimworld.inventory.get") {
-			t.Error("Should not see rimworld tools when filtering for minecraft")
+		if strings.Contains(responseStr, "adventure.inventory.get") {
+			t.Error("Should not see adventure tools when filtering for factory")
 		}
 		if !strings.Contains(responseStr, "\"structuredContent\"") {
 			t.Error("Expected games.tools to include structured content")
@@ -309,7 +309,7 @@ func TestGamesToolsCommand(t *testing.T) {
 			Params: map[string]interface{}{
 				"name": "games.tool_names",
 				"arguments": map[string]interface{}{
-					"gameId": "minecraft",
+					"gameId": "factory",
 				},
 			},
 		}
@@ -321,10 +321,10 @@ func TestGamesToolsCommand(t *testing.T) {
 
 		respBytes, _ := json.Marshal(response)
 		responseStr := string(respBytes)
-		t.Logf("games.tool_names (minecraft): %s", responseStr)
+		t.Logf("games.tool_names (factory): %s", responseStr)
 
-		if !strings.Contains(responseStr, "minecraft.inventory.get") {
-			t.Error("Expected compact tool list to include minecraft.inventory.get")
+		if !strings.Contains(responseStr, "factory.inventory.get") {
+			t.Error("Expected compact tool list to include factory.inventory.get")
 		}
 		if !strings.Contains(responseStr, "games.tool_detail") {
 			t.Error("Expected guidance to use games.tool_detail")
@@ -342,7 +342,7 @@ func TestGamesToolsCommand(t *testing.T) {
 			Params: map[string]interface{}{
 				"name": "games.tool_names",
 				"arguments": map[string]interface{}{
-					"gameId": "minecraft",
+					"gameId": "factory",
 					"brief":  true,
 				},
 			},
@@ -360,7 +360,7 @@ func TestGamesToolsCommand(t *testing.T) {
 		if !strings.Contains(responseStr, "\"brief\":true") {
 			t.Error("Expected structured content to note brief mode")
 		}
-		if !strings.Contains(responseStr, "\"summary\":\"Get player inventory in Minecraft (Game: minecraft)\"") {
+		if !strings.Contains(responseStr, "\"summary\":\"Get player inventory in FactorySim (Game: factory)\"") {
 			t.Error("Expected structured content to include one-line summaries")
 		}
 		if strings.Contains(responseStr, "Include equipped armor") {
@@ -376,8 +376,8 @@ func TestGamesToolsCommand(t *testing.T) {
 			Params: map[string]interface{}{
 				"name": "games.tool_detail",
 				"arguments": map[string]interface{}{
-					"gameId": "minecraft",
-					"tool":   "minecraft.inventory.get",
+					"gameId": "factory",
+					"tool":   "factory.inventory.get",
 				},
 			},
 		}
@@ -413,7 +413,7 @@ func TestGamesToolsCommand(t *testing.T) {
 			Params: map[string]interface{}{
 				"name": "games.tool_detail",
 				"arguments": map[string]interface{}{
-					"tool": "minecraft.inventory.get",
+					"tool": "factory.inventory.get",
 				},
 			},
 		}
@@ -430,7 +430,7 @@ func TestGamesToolsCommand(t *testing.T) {
 		if strings.Contains(responseStr, "\"isError\":true") {
 			t.Error("Expected fully qualified tool_detail lookup without gameId to succeed")
 		}
-		if !strings.Contains(responseStr, "\"gameId\":\"minecraft\"") {
+		if !strings.Contains(responseStr, "\"gameId\":\"factory\"") {
 			t.Error("Expected games.tool_detail to resolve the game from the qualified tool name")
 		}
 	})
@@ -512,10 +512,10 @@ func TestGamesToolsCommand(t *testing.T) {
 		responseStr := string(respBytes)
 		t.Logf("games.tools (filtered): %s", responseStr)
 
-		if !strings.Contains(responseStr, "rimworld.crafting.build") {
+		if !strings.Contains(responseStr, "adventure.crafting.build") {
 			t.Error("Expected filtered games.tools to include crafting tool")
 		}
-		if strings.Contains(responseStr, "• minecraft.inventory.get") {
+		if strings.Contains(responseStr, "• factory.inventory.get") {
 			t.Error("Filtered games.tools should not include unrelated tools")
 		}
 	})
@@ -528,8 +528,8 @@ func TestGamesToolsCommand(t *testing.T) {
 			Params: map[string]interface{}{
 				"name": "games.tools",
 				"arguments": map[string]interface{}{
-					"gameId": "rimworld",
-					"prefix": "rimworld.core",
+					"gameId": "adventure",
+					"prefix": "adventure.core",
 				},
 			},
 		}
@@ -543,13 +543,13 @@ func TestGamesToolsCommand(t *testing.T) {
 		responseStr := string(respBytes)
 		t.Logf("games.tools (no filtered matches): %s", responseStr)
 
-		if !strings.Contains(responseStr, "No matching game-specific tools for 'rimworld'.") {
+		if !strings.Contains(responseStr, "No matching game-specific tools for 'adventure'.") {
 			t.Error("Expected games.tools to clearly say the filter matched nothing")
 		}
 		if !strings.Contains(responseStr, "2 game-specific tools are currently connected for this game") {
 			t.Error("Expected games.tools to mention connected tools still exist")
 		}
-		if !strings.Contains(responseStr, "none matched prefix \\\"rimworld.core\\\"") {
+		if !strings.Contains(responseStr, "none matched prefix \\\"adventure.core\\\"") {
 			t.Error("Expected games.tools to echo the unmatched prefix")
 		}
 		if strings.Contains(responseStr, "no GABP tools are currently connected") {
@@ -565,7 +565,7 @@ func TestGamesToolsCommand(t *testing.T) {
 			Params: map[string]interface{}{
 				"name": "games.tool_names",
 				"arguments": map[string]interface{}{
-					"gameId": "rimworld",
+					"gameId": "adventure",
 					"query":  "teleport",
 				},
 			},
@@ -580,7 +580,7 @@ func TestGamesToolsCommand(t *testing.T) {
 		responseStr := string(respBytes)
 		t.Logf("games.tool_names (no filtered matches): %s", responseStr)
 
-		if !strings.Contains(responseStr, "No matching game-specific tool names for 'rimworld'.") {
+		if !strings.Contains(responseStr, "No matching game-specific tool names for 'adventure'.") {
 			t.Error("Expected games.tool_names to clearly say the filter matched nothing")
 		}
 		if !strings.Contains(responseStr, "none matched query \\\"teleport\\\"") {
@@ -603,11 +603,11 @@ func TestGameToolNamesDefaultLimit(t *testing.T) {
 	gamesConfig := &config.GamesConfig{
 		Version: "1.0",
 		Games: map[string]config.GameConfig{
-			"minecraft": {
-				ID:         "minecraft",
-				Name:       "Minecraft",
+			"factory": {
+				ID:         "factory",
+				Name:       "FactorySim",
 				LaunchMode: "DirectPath",
-				Target:     "/opt/minecraft/start.sh",
+				Target:     "/opt/factory/start.sh",
 			},
 		},
 	}
@@ -627,7 +627,7 @@ func TestGameToolNamesDefaultLimit(t *testing.T) {
 
 	for i := 0; i < 55; i++ {
 		tool := Tool{
-			Name:        fmt.Sprintf("minecraft.bulk.tool_%02d", i),
+			Name:        fmt.Sprintf("factory.bulk.tool_%02d", i),
 			Description: fmt.Sprintf("Bulk tool %02d", i),
 		}
 		server.RegisterTool(tool, func(args map[string]interface{}) (*ToolResult, error) {
@@ -642,7 +642,7 @@ func TestGameToolNamesDefaultLimit(t *testing.T) {
 		Params: map[string]interface{}{
 			"name": "games.tool_names",
 			"arguments": map[string]interface{}{
-				"gameId": "minecraft",
+				"gameId": "factory",
 			},
 		},
 	}
@@ -671,25 +671,25 @@ func TestProposedSolution(t *testing.T) {
 	t.Run("GamePrefixedTools", func(t *testing.T) {
 		// Strategy 1: Prefix all tools with game ID
 		// inventory/get becomes:
-		// - minecraft.inventory.get
-		// - rimworld.inventory.get
+		// - factory.inventory.get
+		// - adventure.inventory.get
 
 		// This makes it clear to AI which game each tool belongs to
-		// AI can then explicitly choose: "use minecraft.inventory.get to get Steve's inventory"
+		// AI can then explicitly choose: "use factory.inventory.get to get Steve's inventory"
 		t.Log("Strategy 1: Game-prefixed tool names")
-		t.Log("  minecraft.inventory.get - Get player inventory in Minecraft")
-		t.Log("  rimworld.inventory.get - Get colonist inventory in RimWorld")
+		t.Log("  factory.inventory.get - Get player inventory in FactorySim")
+		t.Log("  adventure.inventory.get - Get unit inventory in AdventureGame")
 		t.Log("  AI can clearly specify which game to target")
 	})
 
 	t.Run("GameContextParameter", func(t *testing.T) {
 		// Strategy 2: Add gameId parameter to all mirrored tools
-		// inventory/get with parameters: {gameId: "minecraft", playerId: "steve"}
+		// inventory/get with parameters: {gameId: "factory", playerId: "steve"}
 		// This allows keeping original tool names while adding game context
 
 		t.Log("Strategy 2: Game context parameter")
-		t.Log("  inventory/get with {gameId: 'minecraft', playerId: 'steve'}")
-		t.Log("  inventory/get with {gameId: 'rimworld', playerId: 'colonist1'}")
+		t.Log("  inventory/get with {gameId: 'factory', playerId: 'steve'}")
+		t.Log("  inventory/get with {gameId: 'adventure', playerId: 'unit1'}")
 		t.Log("  AI adds gameId parameter to specify target game")
 	})
 
@@ -699,10 +699,10 @@ func TestProposedSolution(t *testing.T) {
 		// This is simpler but requires switching context
 
 		t.Log("Strategy 3: Single active game context")
-		t.Log("  games.switch {'gameId': 'minecraft'}")
-		t.Log("  Now all tools (inventory_get, world_place_block) apply to Minecraft")
-		t.Log("  games.switch {'gameId': 'rimworld'}")
-		t.Log("  Now all tools (inventory_get, crafting_build) apply to RimWorld")
+		t.Log("  games.switch {'gameId': 'factory'}")
+		t.Log("  Now all tools (inventory_get, world_place_block) apply to FactorySim")
+		t.Log("  games.switch {'gameId': 'adventure'}")
+		t.Log("  Now all tools (inventory_get, crafting_build) apply to AdventureGame")
 	})
 
 	// I think Strategy 1 (game-prefixed tools) is clearest for AI

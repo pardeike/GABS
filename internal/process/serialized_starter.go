@@ -30,7 +30,7 @@ type SerializedStarter struct {
 func NewSerializedStarter() *SerializedStarter {
 	return &SerializedStarter{
 		processStartTimeout: 10 * time.Second, // Time to wait for process to appear in system
-		gabpConnectTimeout:  60 * time.Second, // Startup window for mod bridge availability
+		gabpConnectTimeout:  60 * time.Second, // Startup window for bridge availability
 	}
 }
 

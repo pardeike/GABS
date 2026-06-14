@@ -3,7 +3,7 @@
 Compatible with **GABP v1.1** on wire major **`gabp/1`**.
 
 GABS lets MCP-capable AI tools start games, check status, and call tools exposed
-by GABP-compatible game mods.
+by GABP-compatible game integrations.
 
 If you are installing GABS from a release archive, start with **Quick Start**
 below. If you want the full copy-paste setup guide, read the
@@ -18,7 +18,7 @@ to real games.
 - Keep everything local by default
 - Work with Claude Desktop, Codex CLI, and other MCP clients
 - Support direct executables, Steam App IDs, Epic App IDs, and custom commands
-- Mirror game-specific mod tools into MCP when the mod connects
+- Mirror game-specific tools into MCP when the bridge connects
 
 ## Quick Start
 
@@ -58,13 +58,13 @@ chmod +x gabs
 
 ```bash
 # Interactive setup
-gabs games add minecraft
+gabs games add factory
 
 # See saved game IDs
 gabs games list
 
 # Show one game's saved config
-gabs games show minecraft
+gabs games show factory
 ```
 
 The setup is interactive. In most cases you only need to answer:
@@ -76,7 +76,7 @@ The setup is interactive. In most cases you only need to answer:
   `games.kill`
 
 For Steam and Epic games, `stopProcessName` is required. Example values:
-`RimWorldWin64.exe`, `RimWorld`, or `java`.
+`GameName.exe`, `AdventureGame`, or `java`.
 
 ### 3. Add GABS to your AI client
 
@@ -117,16 +117,16 @@ If your client disconnects after `tools/list` because it rejects a public tool's
 [Configuration Guide](docs/CONFIGURATION.md). Mirrored game tools are discovered
 through `games_tool_names` and are not advertised in the public `tools/list`
 response.
-If a game or mod starts slowly, you can also tune startup waits with the
+If a game or bridge starts slowly, you can also tune startup waits with the
 `timeouts.startup` section described in the
 [Configuration Guide](docs/CONFIGURATION.md).
 
 ### 4. Try these prompts
 
 - "List my games"
-- "Start RimWorld"
+- "Start AdventureGame"
 - "Show the status of all games"
-- "Stop Minecraft"
+- "Stop FactorySim"
 
 If you want a download-to-working walkthrough, use the
 [AI Client Setup Guide](docs/AI_CLIENT_SETUP.md).
@@ -138,9 +138,12 @@ If you want a download-to-working walkthrough, use the
 - **More than one AI session**: that is fine. GABS coordinates ownership per
   game so two live sessions do not both launch or attach to the same game by
   accident.
-- **Game mod cannot find bridge config**: the mod should first read
+- **Game bridge cannot find bridge config**: the game-side bridge should first read
   `GABP_SERVER_PORT`, `GABP_TOKEN`, and `GABS_GAME_ID`, and only fall back to
   `GABS_BRIDGE_PATH` or `~/.gabs/<gameId>/bridge.json`.
+- **Confusing bridge state**: start with `games_status`. It compares the
+  runtime file, bridge file, passive listener evidence, and process environment
+  where the OS allows it, then returns diagnosis details and next actions.
 
 ## How It Works
 
@@ -148,18 +151,18 @@ Most users only need this mental model:
 
 - Your AI client starts `gabs server`
 - GABS starts or attaches to your game
-- If the game mod speaks GABP, GABS mirrors that mod's tools into MCP
+- If the game-side bridge speaks GABP, GABS mirrors that bridge's tools into MCP
 
-Architecture details matter mainly if you are writing a mod or debugging a
+Architecture details matter mainly if you are writing a game-side bridge or debugging a
 bridge issue.
 
 ![GABS Architecture](docs/architecture-flow.svg)
 
 ```
-AI Agent ← MCP → GABS ← GABP Client → GABP Server (Game Mod) ← Game API → Game
+AI Agent ← MCP → GABS ← GABP Client → GABP Server (Game Bridge) ← Game API → Game
 ```
 
-In the GABP layer, your mod is the server and GABS is the client.
+In the GABP layer, your game-side bridge is the server and GABS is the client.
 
 ## Common MCP Tools
 
@@ -172,8 +175,8 @@ tool names by default because some clients reject dots in tool names:
 - **`games_stop`** - Stop a game gracefully
 - **`games_kill`** - Force stop a game
 - **`games_status`** - Check if a game is running
-- **`games_connect`** - Reconnect to a running game's mod bridge
-- **`games_tool_names`** - List mirrored game-specific tools after a mod connects
+- **`games_connect`** - Reconnect to a running game's game-side bridge
+- **`games_tool_names`** - List mirrored game-specific tools after a bridge connects
 - **`games_tool_detail`** - Show the schema for one mirrored tool
 - **`games_call_tool`** - Call a connected game tool through the stable core surface
 
@@ -184,11 +187,11 @@ explicitly disable normalization in config.
 For the full MCP surface and advanced behavior, see the
 [AI Integration Guide](docs/INTEGRATION.md).
 
-## Game-Specific Tools from Mods
+## Game-Specific Tools from Bridges
 
-When a GABP-compatible mod connects, GABS mirrors the mod's canonical
+When a GABP-compatible bridge connects, GABS mirrors the bridge's canonical
 slash-delimited GABP tool names into strict-safe names such as
-`minecraft_inventory_get` or `rimworld_crafting_build`. The public `tools/list`
+`factory_inventory_get` or `adventure_crafting_build`. The public `tools/list`
 response stays core-only so clients do not churn on large game-specific tool
 sets. Use `games_tool_names` for discovery, `games_tool_detail` for one schema,
 and `games_call_tool` for the actual call. Direct mirrored MCP tools may still
@@ -197,10 +200,10 @@ dynamic `tools/list` refreshes.
 
 The usual discovery flow is:
 ```
-AI: "Reconnect to RimWorld and show me its mod tools"
-GABS: games_connect {"gameId": "rimworld"}
-GABS: games_tool_names {"gameId": "rimworld", "brief": true}
-GABS: games_tool_detail {"tool": "rimworld_crafting_build"}
+AI: "Reconnect to AdventureGame and show me its game-specific tools"
+GABS: games_connect {"gameId": "adventure"}
+GABS: games_tool_names {"gameId": "adventure", "brief": true}
+GABS: games_tool_detail {"tool": "adventure_crafting_build"}
 ```
 
 Most users can ignore attention gating, resource mirroring, and protocol
@@ -211,28 +214,31 @@ details until they need them. Those topics are covered in the dedicated docs.
 - **[AI Client Setup Guide](docs/AI_CLIENT_SETUP.md)** - Install a release bundle and connect Claude Desktop, Codex CLI, or generic MCP clients
 - **[Configuration Guide](docs/CONFIGURATION.md)** - Detailed setup for different game types and tool normalization
 - **[AI Integration Guide](docs/INTEGRATION.md)** - Connect GABS to different AI tools and deployment scenarios
-- **[Mod Development Guide](docs/MOD_DEVELOPMENT.md)** - Add GABP support to your game mods
+- **[GABP Bridge Development Guide](docs/GABP_BRIDGE_DEVELOPMENT.md)** - Add GABP support to your game integrations
 - **[Advanced Usage Guide](docs/ADVANCED_USAGE.md)** - Multiple instances, HTTP mode, scripting, and more
 - **[Deployment Guide](docs/DEPLOYMENT.md)** - Production deployments and cloud setups
 - **[OpenAI Tool Normalization](docs/OPENAI_TOOL_NORMALIZATION.md)** - Configure tool name compatibility for OpenAI API
 - **[Dynamic Tools Guide](docs/DYNAMIC_TOOLS_GUIDE.md)** - How AI agents handle expanding tool sets
 - **[AI Dynamic Tools FAQ](docs/AI_DYNAMIC_TOOLS_FAQ.md)** - Common questions about dynamic tool discovery
 
-## For Mod Developers
+## For Bridge Developers
 
-Want your game to work with GABS? Add GABP support to your mod:
+Want your game to work with GABS? Add GABP support to your game-side bridge:
 
 1. **Read GABP configuration** from environment variables when your game starts:
    - `GABS_GAME_ID` - Your game's identifier
-   - `GABP_SERVER_PORT` - Port your mod should listen on
+   - `GABP_SERVER_PORT` - Port your game-side bridge should listen on
    - `GABP_TOKEN` - Authentication token for GABS connections
    - `GABS_BRIDGE_PATH` - Optional `bridge.json` fallback/debug path
-2. **Start a local GABP server** to listen for GABS connections (your mod = server, GABS = client)
+   Environment values are authoritative when present. `bridge.json` is a
+   fallback/debug file so agents can recover or inspect state, not an override
+   for fresh `GABP_*` values.
+2. **Start a local GABP server** to listen for GABS connections (your game-side bridge = server, GABS = client)
 3. **Implement the current GABP runtime methods** (`session/hello`, `tools/list`, `tools/call`) or use the official `gabp-runtime` library so your schemas match what GABS expects
    - For GABP v1.1 bridges, advertise optional attention support through capabilities before exposing `attention/current`, `attention/ack`, and the attention lifecycle channels
 4. **Expose game features** as tools, resources, and events using canonical GABP tool names such as `inventory/get` or `core/ping`
 
-See the [Mod Development Guide](docs/MOD_DEVELOPMENT.md) for complete examples in C#, Java, and Python.
+See the [GABP Bridge Development Guide](docs/GABP_BRIDGE_DEVELOPMENT.md) for complete examples in C#, Java, and Python.
 
 ## Build from Source
 

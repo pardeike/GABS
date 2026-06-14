@@ -60,7 +60,7 @@ func TestEnvironmentVariables(t *testing.T) {
 	controller := &Controller{}
 
 	spec := LaunchSpec{
-		GameId:   "minecraft",
+		GameId:   "factory",
 		Mode:     "DirectPath",
 		PathOrId: "echo",
 		Args:     []string{"test"},
@@ -76,7 +76,7 @@ func TestEnvironmentVariables(t *testing.T) {
 
 	// Verify the bridge path generation
 	bridgePath := controller.getBridgePath()
-	expectedGameId := "minecraft"
+	expectedGameId := "factory"
 
 	if !strings.Contains(bridgePath, expectedGameId) {
 		t.Errorf("Bridge path should contain game ID '%s', got: %s", expectedGameId, bridgePath)
@@ -97,7 +97,7 @@ func TestEnvironmentVariables(t *testing.T) {
 	}
 
 	// The environment variables that would be set are:
-	// GABS_GAME_ID=minecraft
+	// GABS_GAME_ID=factory
 	// GABS_BRIDGE_PATH=<bridgePath>
 	// GABP_SERVER_PORT=12345
 	// GABP_TOKEN=test-token-1234567890abcdef

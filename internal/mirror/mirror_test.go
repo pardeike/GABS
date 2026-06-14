@@ -126,7 +126,7 @@ func TestMirrorResourceCreation(t *testing.T) {
 		},
 	}
 
-	mirror := New(log, server, mockClient, "minecraft", &config.ToolNormalizationConfig{})
+	mirror := New(log, server, mockClient, "factory", &config.ToolNormalizationConfig{})
 
 	// Expose resources
 	err := mirror.ExposeResources()

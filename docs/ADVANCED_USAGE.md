@@ -9,10 +9,10 @@ This guide covers advanced GABS features for power users and complex setups.
 You can run multiple copies of the same game with different configurations:
 
 ```bash
-# Configure multiple Minecraft servers
-gabs games add minecraft-survival
-gabs games add minecraft-creative
-gabs games add minecraft-test
+# Configure multiple FactorySim servers
+gabs games add factory-survival
+gabs games add factory-creative
+gabs games add factory-test
 
 # Start GABS server
 gabs server
@@ -20,12 +20,12 @@ gabs server
 
 AI can then control each instance separately:
 - "Start the creative server but keep survival server running"
-- "Check status of all minecraft instances"
+- "Check status of all factory instances"
 - "Stop the test server and start survival"
 
 ### Use Cases
 - **Testing**: Run test servers alongside production
-- **Multiple worlds**: Different game modes or worlds
+- **Multiple worlds**: Different game-side bridges or worlds
 - **Load balancing**: Switch between servers based on player count
 
 ## Advanced Launch Configurations
@@ -52,7 +52,7 @@ Point to scripts that handle complex startup logic:
 
 ```bash
 # DirectPath pointing to a script:
-# /home/user/game-scripts/start-minecraft.sh
+# /home/user/game-scripts/start-factory.sh
 ```
 
 ## HTTP Mode Deep Dive
@@ -107,7 +107,7 @@ curl -X POST http://localhost:8080/mcp \
 # Start a game
 curl -X POST http://localhost:8080/mcp \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"games.start","arguments":{"gameId":"minecraft"}}}'
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"games.start","arguments":{"gameId":"factory"}}}'
 ```
 
 #### Python Integration
@@ -152,7 +152,7 @@ client = GABSClient()
 games = client.list_games()
 print("Available games:", games)
 
-result = client.start_game("minecraft")
+result = client.start_game("factory")
 print("Start result:", result)
 ```
 
@@ -211,11 +211,11 @@ async function manageGames() {
         const games = await client.listGames();
         console.log('Available games:', games);
         
-        await client.startGame('minecraft');
-        console.log('Started minecraft');
+        await client.startGame('factory');
+        console.log('Started factory');
         
-        const status = await client.getGameStatus('minecraft');
-        console.log('Minecraft status:', status);
+        const status = await client.getGameStatus('factory');
+        console.log('FactorySim status:', status);
         
     } catch (error) {
         console.error('Error managing games:', error);
@@ -249,7 +249,7 @@ the GABP protocol version.
 ```
 
 This feature:
-- Converts dotted names (`minecraft.inventory.get`) to underscored names (`minecraft_inventory_get`)
+- Converts dotted names (`factory.inventory.get`) to underscored names (`factory_inventory_get`)
 - Enforces character limits for API compatibility
 - Preserves original names in descriptions for user clarity
 
@@ -277,7 +277,7 @@ subcommand:
 
 ```bash
 gabs games list
-gabs games show minecraft
+gabs games show factory
 ```
 
 ## Security Considerations
@@ -353,11 +353,11 @@ sleep 5
 # Start games via API
 curl -X POST http://localhost:8080/mcp \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"games.start","arguments":{"gameId":"minecraft"}}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"games.start","arguments":{"gameId":"factory"}}}'
 
 curl -X POST http://localhost:8080/mcp \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"games.start","arguments":{"gameId":"rimworld"}}}'
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"games.start","arguments":{"gameId":"adventure"}}}'
 
 echo "Game servers started. GABS PID: $GABS_PID"
 ```
@@ -405,7 +405,7 @@ gabs server --http :8081
 top -p $(pgrep gabs)
 
 # Check game process memory
-ps aux | grep -E "(minecraft|rimworld|gabs)"
+ps aux | grep -E "(factory|adventure|gabs)"
 ```
 
 ### Network Issues

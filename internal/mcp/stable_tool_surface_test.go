@@ -16,8 +16,8 @@ func TestToolsListHidesTrackedGameToolsButKeepsDiscoveryAndCalls(t *testing.T) {
 
 	gamesConfig := &config.GamesConfig{}
 	if err := gamesConfig.AddGame(config.GameConfig{
-		ID:         "rimworld",
-		Name:       "RimWorld",
+		ID:         "adventure",
+		Name:       "AdventureGame",
 		LaunchMode: "DirectPath",
 		Target:     "/bin/true",
 	}); err != nil {
@@ -25,8 +25,8 @@ func TestToolsListHidesTrackedGameToolsButKeepsDiscoveryAndCalls(t *testing.T) {
 	}
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, 5*time.Second)
 
-	server.RegisterGameTool("rimworld", Tool{
-		Name:        "rimworld.map_snapshot",
+	server.RegisterGameTool("adventure", Tool{
+		Name:        "adventure.map_snapshot",
 		Description: "Read map state",
 		InputSchema: map[string]interface{}{
 			"type":       "object",
@@ -53,7 +53,7 @@ func TestToolsListHidesTrackedGameToolsButKeepsDiscoveryAndCalls(t *testing.T) {
 		t.Fatalf("decode tools/list: %v", err)
 	}
 	for _, tool := range listResult.Tools {
-		if tool.Name == "rimworld.map_snapshot" {
+		if tool.Name == "adventure.map_snapshot" {
 			t.Fatal("tracked game tool leaked into public tools/list")
 		}
 	}
@@ -65,7 +65,7 @@ func TestToolsListHidesTrackedGameToolsButKeepsDiscoveryAndCalls(t *testing.T) {
 		Params: map[string]interface{}{
 			"name": "games_tool_names",
 			"arguments": map[string]interface{}{
-				"gameId": "rimworld",
+				"gameId": "adventure",
 				"brief":  true,
 			},
 		},
@@ -77,7 +77,7 @@ func TestToolsListHidesTrackedGameToolsButKeepsDiscoveryAndCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal games_tool_names result: %v", err)
 	}
-	if !strings.Contains(string(namesBytes), "rimworld.map_snapshot") {
+	if !strings.Contains(string(namesBytes), "adventure.map_snapshot") {
 		t.Fatalf("game tool was not discoverable through games_tool_names: %s", namesBytes)
 	}
 
@@ -86,7 +86,7 @@ func TestToolsListHidesTrackedGameToolsButKeepsDiscoveryAndCalls(t *testing.T) {
 		Method:  "tools/call",
 		ID:      json.RawMessage(`"direct-call"`),
 		Params: map[string]interface{}{
-			"name":      "rimworld.map_snapshot",
+			"name":      "adventure.map_snapshot",
 			"arguments": map[string]interface{}{},
 		},
 	})

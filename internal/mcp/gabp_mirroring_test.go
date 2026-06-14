@@ -149,7 +149,7 @@ func TestGABPMirroringFunctionality(t *testing.T) {
 		},
 	}
 
-	gameID := "minecraft"
+	gameID := "factory"
 
 	// Test tool synchronization
 	err := server.syncGABPToolsWithInterface(mockClient, gameID)
@@ -168,8 +168,8 @@ func TestGABPMirroringFunctionality(t *testing.T) {
 
 	// Check that game-specific tools exist
 	expectedTools := []string{
-		"minecraft.inventory.get",
-		"minecraft.world.blocks.place",
+		"factory.inventory.get",
+		"factory.world.blocks.place",
 	}
 
 	server.mu.RLock()
@@ -182,11 +182,11 @@ func TestGABPMirroringFunctionality(t *testing.T) {
 
 	// Test tool execution through the MCP interface
 	server.mu.RLock()
-	handler, exists := server.tools["minecraft.inventory.get"]
+	handler, exists := server.tools["factory.inventory.get"]
 	server.mu.RUnlock()
 
 	if !exists {
-		t.Fatal("Tool minecraft.inventory.get not found")
+		t.Fatal("Tool factory.inventory.get not found")
 	}
 
 	// Execute the tool

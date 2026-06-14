@@ -41,16 +41,16 @@ func TestENVIsolationInGameLaunching(t *testing.T) {
 			cmd.Env = append(cmd.Env,
 				"GABS_GAME_ID="+gID,
 				"GABP_SERVER_PORT="+string(rune(port+48)), // Convert to string (simplified)
-				"GABP_TOKEN="+token[:16], // Use first 16 chars for test
+				"GABP_TOKEN="+token[:16],                  // Use first 16 chars for test
 			)
 
 			output, execErr := cmd.Output()
 			results[index] = envTestResult{
-				GameID:     gID,
-				Port:       port,
-				Token:      token[:16],
-				Output:     strings.TrimSpace(string(output)),
-				Error:      execErr,
+				GameID: gID,
+				Port:   port,
+				Token:  token[:16],
+				Output: strings.TrimSpace(string(output)),
+				Error:  execErr,
 			}
 		}(i, gameID)
 
@@ -69,7 +69,7 @@ func TestENVIsolationInGameLaunching(t *testing.T) {
 			continue
 		}
 
-		t.Logf("  %s: Port=%d, Token=%s..., Output=%s", 
+		t.Logf("  %s: Port=%d, Token=%s..., Output=%s",
 			result.GameID, result.Port, result.Token, result.Output)
 
 		// Verify the process received the correct ENV variables for its game
@@ -81,7 +81,7 @@ func TestENVIsolationInGameLaunching(t *testing.T) {
 		// Verify no cross-contamination by checking that other game IDs don't appear
 		for _, otherGameID := range gameIDs {
 			if otherGameID != result.GameID && strings.Contains(result.Output, "GAME:"+otherGameID) {
-				t.Errorf("Process for %s received ENV from %s! Cross-contamination detected. Output: %s", 
+				t.Errorf("Process for %s received ENV from %s! Cross-contamination detected. Output: %s",
 					result.GameID, otherGameID, result.Output)
 			}
 		}

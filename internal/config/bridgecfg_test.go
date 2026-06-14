@@ -22,11 +22,11 @@ func TestWriteBridgeJSON(t *testing.T) {
 		},
 		{
 			name:   "local config (same as default)",
-			gameID: "minecraft",
+			gameID: "factory",
 		},
 		{
 			name:   "another local config",
-			gameID: "rimworld",
+			gameID: "adventure",
 		},
 	}
 
@@ -130,7 +130,7 @@ func TestBridgeConfigWithCustomDirectory(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	gameID := "testgame"
-	
+
 	// Test WriteBridgeJSON with custom config directory
 	port, token, configPath, err := WriteBridgeJSON(gameID, tmpDir)
 	if err != nil {
@@ -207,14 +207,14 @@ func TestBackwardCompatibility(t *testing.T) {
 // TestPortFallbackFunctionality tests the new port allocation with fallback ranges
 func TestPortFallbackFunctionality(t *testing.T) {
 	tests := []struct {
-		name         string
-		gamesConfig  *GamesConfig
-		expectError  bool
+		name        string
+		gamesConfig *GamesConfig
+		expectError bool
 	}{
 		{
-			name:         "default fallback ranges",
-			gamesConfig:  nil,
-			expectError:  false,
+			name:        "default fallback ranges",
+			gamesConfig: nil,
+			expectError: false,
 		},
 		{
 			name: "custom port range",
@@ -248,7 +248,7 @@ func TestPortFallbackFunctionality(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			port, err := assignPortWithConfig(tt.gamesConfig)
-			
+
 			if tt.expectError && err == nil {
 				t.Error("Expected error but got none")
 			}
@@ -314,11 +314,11 @@ func TestConfigPortRanges(t *testing.T) {
 			if tt.gamesConfig != nil && tt.gamesConfig.PortRanges != nil {
 				ranges = tt.gamesConfig.PortRanges.CustomRanges
 			}
-			
+
 			if len(ranges) != tt.expectedRanges {
 				t.Errorf("Expected %d ranges, got %d", tt.expectedRanges, len(ranges))
 			}
-			
+
 			if tt.expectedRanges > 0 && len(ranges) > 0 && tt.firstRange != nil {
 				if ranges[0].Min != tt.firstRange.Min || ranges[0].Max != tt.firstRange.Max {
 					t.Errorf("Expected first range %v, got %v", tt.firstRange, ranges[0])
@@ -330,125 +330,125 @@ func TestConfigPortRanges(t *testing.T) {
 
 // TestWriteBridgeJSONWithConfig tests the new config-based bridge creation
 func TestWriteBridgeJSONWithConfig(t *testing.T) {
-tempDir := t.TempDir()
+	tempDir := t.TempDir()
 
-tests := []struct {
-name        string
-gameID      string
-gamesConfig *GamesConfig
-}{
-{
-name:        "with nil config (uses defaults)",
-gameID:      "testgame1",
-gamesConfig: nil,
-},
-{
-name:   "with custom port ranges",
-gameID: "testgame2",
-gamesConfig: &GamesConfig{
-PortRanges: &PortRangeConfig{
-CustomRanges: []PortRange{{Min: 8000, Max: 8999}},
-},
-},
-},
-{
-name:   "with empty port ranges (uses defaults)",
-gameID: "testgame3",
-gamesConfig: &GamesConfig{
-PortRanges: &PortRangeConfig{
-CustomRanges: []PortRange{},
-},
-},
-},
-}
+	tests := []struct {
+		name        string
+		gameID      string
+		gamesConfig *GamesConfig
+	}{
+		{
+			name:        "with nil config (uses defaults)",
+			gameID:      "testgame1",
+			gamesConfig: nil,
+		},
+		{
+			name:   "with custom port ranges",
+			gameID: "testgame2",
+			gamesConfig: &GamesConfig{
+				PortRanges: &PortRangeConfig{
+					CustomRanges: []PortRange{{Min: 8000, Max: 8999}},
+				},
+			},
+		},
+		{
+			name:   "with empty port ranges (uses defaults)",
+			gameID: "testgame3",
+			gamesConfig: &GamesConfig{
+				PortRanges: &PortRangeConfig{
+					CustomRanges: []PortRange{},
+				},
+			},
+		},
+	}
 
-for _, tt := range tests {
-t.Run(tt.name, func(t *testing.T) {
-// Create game-specific directory
-gameDir := filepath.Join(tempDir, tt.gameID)
-if err := os.MkdirAll(gameDir, 0755); err != nil {
-t.Fatalf("Failed to create game dir: %v", err)
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create game-specific directory
+			gameDir := filepath.Join(tempDir, tt.gameID)
+			if err := os.MkdirAll(gameDir, 0755); err != nil {
+				t.Fatalf("Failed to create game dir: %v", err)
+			}
 
-// Write bridge.json with games config
-port, token, cfgPath, err := WriteBridgeJSONWithConfig(tt.gameID, gameDir, tt.gamesConfig)
-if err != nil {
-t.Fatalf("WriteBridgeJSONWithConfig failed: %v", err)
-}
+			// Write bridge.json with games config
+			port, token, cfgPath, err := WriteBridgeJSONWithConfig(tt.gameID, gameDir, tt.gamesConfig)
+			if err != nil {
+				t.Fatalf("WriteBridgeJSONWithConfig failed: %v", err)
+			}
 
-// Verify return values
-if port <= 0 || port > 65535 {
-t.Errorf("Port %d out of valid range [1, 65535]", port)
-}
-if len(token) != 64 {
-t.Errorf("Token length %d, expected 64", len(token))
-}
+			// Verify return values
+			if port <= 0 || port > 65535 {
+				t.Errorf("Port %d out of valid range [1, 65535]", port)
+			}
+			if len(token) != 64 {
+				t.Errorf("Token length %d, expected 64", len(token))
+			}
 
-// Config path should be bridge.json in the game's directory
-if !strings.Contains(cfgPath, gameDir) {
-t.Errorf("Config path %s should contain game dir %s", cfgPath, gameDir)
-}
-if filepath.Base(cfgPath) != "bridge.json" {
-t.Errorf("Config path %s should be bridge.json", cfgPath)
-}
+			// Config path should be bridge.json in the game's directory
+			if !strings.Contains(cfgPath, gameDir) {
+				t.Errorf("Config path %s should contain game dir %s", cfgPath, gameDir)
+			}
+			if filepath.Base(cfgPath) != "bridge.json" {
+				t.Errorf("Config path %s should be bridge.json", cfgPath)
+			}
 
-// Read and verify the bridge file contents
-data, err := os.ReadFile(cfgPath)
-if err != nil {
-t.Fatalf("Failed to read bridge file: %v", err)
-}
+			// Read and verify the bridge file contents
+			data, err := os.ReadFile(cfgPath)
+			if err != nil {
+				t.Fatalf("Failed to read bridge file: %v", err)
+			}
 
-var bridge BridgeJSON
-if err := json.Unmarshal(data, &bridge); err != nil {
-t.Fatalf("Failed to parse bridge file: %v", err)
-}
+			var bridge BridgeJSON
+			if err := json.Unmarshal(data, &bridge); err != nil {
+				t.Fatalf("Failed to parse bridge file: %v", err)
+			}
 
-// Verify configuration was applied correctly
-if bridge.Port != port {
-t.Errorf("Port mismatch: bridge.json has %d, expected %d", bridge.Port, port)
-}
-if bridge.Token != token {
-t.Errorf("Token mismatch")
-}
-if bridge.GameId != tt.gameID {
-t.Errorf("GameId %s, expected %s", bridge.GameId, tt.gameID)
-}
-})
-}
+			// Verify configuration was applied correctly
+			if bridge.Port != port {
+				t.Errorf("Port mismatch: bridge.json has %d, expected %d", bridge.Port, port)
+			}
+			if bridge.Token != token {
+				t.Errorf("Token mismatch")
+			}
+			if bridge.GameId != tt.gameID {
+				t.Errorf("GameId %s, expected %s", bridge.GameId, tt.gameID)
+			}
+		})
+	}
 }
 
 // TestDeterministicPortSelection tests that port assignment is deterministic and repeatable
 func TestDeterministicPortSelection(t *testing.T) {
 	// Test that the port assignment approach is deterministic within the same process
-	
+
 	// First, find what port would be assigned in a small range
 	minPort := 8000
 	maxPort := 8010
-	
+
 	// Reset the global offset to ensure deterministic behavior
 	portOffsetMutex.Lock()
 	originalOffset := portOffset
 	portOffset = 0
 	portOffsetMutex.Unlock()
-	
+
 	// Restore offset after test
 	defer func() {
 		portOffsetMutex.Lock()
 		portOffset = originalOffset
 		portOffsetMutex.Unlock()
 	}()
-	
+
 	// Get first assigned port with reset offset
 	port1 := assignPortFromRange(minPort, maxPort)
-	
+
 	// Verify it's in the expected range
 	if port1 < minPort || port1 > maxPort {
 		t.Errorf("Port %d not in range [%d, %d]", port1, minPort, maxPort)
 	}
-	
+
 	// With offset=0, it should be the first port in range (minPort)
 	expectedPort := minPort
-	
+
 	if port1 != expectedPort {
 		t.Errorf("Expected deterministic port %d, got %d", expectedPort, port1)
 	}
@@ -459,21 +459,21 @@ func TestPortAssignmentDeterminism(t *testing.T) {
 	// Test that port assignment uses offset to avoid collisions
 	minPort := 9000
 	maxPort := 9005
-	
+
 	var assignedPorts []int
-	
+
 	// Assign ports multiple times and verify they use offset
 	for i := 0; i < 3; i++ {
 		port := assignPortFromRange(minPort, maxPort)
-		
+
 		// Verify it's in the expected range
 		if port < minPort || port > maxPort {
 			t.Errorf("Port %d not in range [%d, %d]", port, minPort, maxPort)
 		}
-		
+
 		assignedPorts = append(assignedPorts, port)
 	}
-	
+
 	// Verify ports are different due to offset mechanism
 	if len(assignedPorts) >= 2 {
 		allSame := true

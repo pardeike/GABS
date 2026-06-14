@@ -68,15 +68,15 @@ Use the full path in your AI configuration, for example
 Run the interactive setup once for each game:
 
 ```bash
-gabs games add rimworld
-gabs games add minecraft
+gabs games add adventure
+gabs games add factory
 ```
 
 Then verify the saved configuration:
 
 ```bash
 gabs games list
-gabs games show rimworld
+gabs games show adventure
 ```
 
 During setup, the important fields are:
@@ -87,9 +87,9 @@ During setup, the important fields are:
 
 Examples of `stopProcessName`:
 
-- RimWorld on Windows: `RimWorldWin64.exe`
-- RimWorld on macOS/Linux: `RimWorld`
-- Java-based Minecraft setups: `java`
+- AdventureGame on Windows: `GameName.exe`
+- AdventureGame on macOS/Linux: `AdventureGame`
+- Java-based FactorySim setups: `java`
 
 For Steam and Epic launch modes, `stopProcessName` is required. Without it,
 GABS can launch the game but cannot stop the real game process reliably.
@@ -100,7 +100,7 @@ After setup, these commands should work:
 
 ```bash
 gabs games list
-gabs games show rimworld
+gabs games show adventure
 gabs version
 ```
 
@@ -172,8 +172,8 @@ Enable tool normalization in `~/.gabs/config.json`:
 }
 ```
 
-This turns tool names like `games.call_tool` and `minecraft.inventory.get` into
-`games_call_tool` and `minecraft_inventory_get`. Older dotted names remain
+This turns tool names like `games.call_tool` and `factory.inventory.get` into
+`games_call_tool` and `factory_inventory_get`. Older dotted names remain
 accepted as call aliases.
 
 See also:
@@ -227,9 +227,9 @@ curl -X POST http://localhost:8080/mcp \
 Once your AI client is connected, try prompts like:
 
 - "List my configured games"
-- "Start RimWorld"
+- "Start AdventureGame"
 - "Show the status of all games"
-- "Reconnect to RimWorld and list its tools"
+- "Reconnect to AdventureGame and list its tools"
 
 If you have more than one live GABS session, the second session will not launch
 or connect to the same game again by default. To intentionally move ownership
@@ -237,7 +237,7 @@ to the current session, use:
 
 ```json
 {
-  "gameId": "rimworld",
+  "gameId": "adventure",
   "forceTakeover": true
 }
 ```
@@ -257,7 +257,15 @@ Per-game runtime files live under:
 - `~/.gabs/<gameId>/bridge.json`
 - `~/.gabs/<gameId>/runtime.json`
 
-`runtime.json` is internal ownership tracking used by GABS itself.
+`bridge.json` is fallback/debug bridge metadata. The game-side bridge should prefer
+`GABP_SERVER_PORT`, `GABP_TOKEN`, and `GABS_GAME_ID` from its process
+environment when those values exist. `runtime.json` is internal ownership
+tracking used by GABS itself.
+
+If these files look confusing, call `games_status` before editing them by hand.
+The structured `diagnostics` field reports stale runtime files, stale bridge
+files, passively detected orphan listeners, missing bridge files, and launcher
+environment mismatches, with `nextActions` for recovery.
 
 ## Troubleshooting
 
@@ -278,9 +286,9 @@ gabs games show <game-id>
 Launcher-based games such as Steam and Epic titles need the actual game process
 name, not just the launcher.
 
-### A Mod Cannot Find `bridge.json`
+### A Bridge Cannot Find `bridge.json`
 
-Make sure the mod first checks the environment variables:
+Make sure the game-side bridge first checks the environment variables:
 
 - `GABP_SERVER_PORT`
 - `GABP_TOKEN`
@@ -291,3 +299,7 @@ and only falls back to:
 - `~/.gabs/<gameId>/bridge.json`
 
 or the `GABS_BRIDGE_PATH` environment variable when present.
+
+Do not patch game-side bridge code to prefer `bridge.json` over present `GABP_*`
+environment variables. That can make an old bridge file win over the actual
+running process state.

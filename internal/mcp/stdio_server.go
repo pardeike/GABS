@@ -51,9 +51,9 @@ type gabpDisconnectRecord struct {
 
 var serverInstanceCounter uint64
 
-const ServerInstructions = `GABS controls configured local games and mirrors connected GABP mod tools into MCP. Start with games_list or games_status, then use games_start or games_connect with gameId.
+const ServerInstructions = `GABS controls configured local games and mirrors connected GABP bridge tools into MCP. Start with games_list or games_status, then use games_start or games_connect with gameId.
 For game-specific actions, call games_tool_names with brief=true, inspect one tool with games_tool_detail, then invoke it through games_call_tool.
-Prefer strict-safe tool names such as games_start; dotted aliases remain accepted. Public tools/list is kept stable and core-only, so retry games_tool_names or connect before assuming a mod tool is missing.`
+Prefer strict-safe tool names such as games_start; dotted aliases remain accepted. Public tools/list is kept stable and core-only, so retry games_tool_names or connect before assuming a bridge tool is missing.`
 
 type gameAlreadyActiveError struct {
 	status string
@@ -461,7 +461,11 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			// Get status once to avoid double mutex lock
 			status := s.checkGameStatus(game.ID)
 			statusDesc := s.getStatusDescriptionFromStatus(status, game)
+			statusItem := s.gameStatusStructured(*game, status)
 			content.WriteString(fmt.Sprintf("**%s** (%s): %s\n", game.ID, game.Name, statusDesc))
+			if diagnosticMessage := gameStateDiagnosticMessage(statusItem); diagnosticMessage != "" {
+				content.WriteString(fmt.Sprintf("\nDiagnosis: %s\n", diagnosticMessage))
+			}
 			if disconnectNote := s.describeLastGABPDisconnect(game.ID); disconnectNote != "" {
 				content.WriteString(fmt.Sprintf("\n%s\n", disconnectNote))
 			}
@@ -475,7 +479,6 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 					}
 				}
 			}
-			statusItem := s.gameStatusStructured(*game, status)
 			return &ToolResult{
 				Content:           []Content{{Type: "text", Text: content.String()}},
 				StructuredContent: statusItem,
@@ -488,8 +491,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			for _, game := range games {
 				status := s.checkGameStatus(game.ID)
 				statusDesc := s.getStatusDescriptionFromStatus(status, &game)
-				content.WriteString(fmt.Sprintf("• **%s**: %s\n", game.ID, statusDesc))
-				statusItems = append(statusItems, s.gameStatusStructured(game, status))
+				statusItem := s.gameStatusStructured(game, status)
+				if diagnosticMessage := gameStateDiagnosticMessage(statusItem); diagnosticMessage != "" {
+					content.WriteString(fmt.Sprintf("• **%s**: %s — %s\n", game.ID, statusDesc, diagnosticMessage))
+				} else {
+					content.WriteString(fmt.Sprintf("• **%s**: %s\n", game.ID, statusDesc))
+				}
+				statusItems = append(statusItems, statusItem)
 			}
 
 			return &ToolResult{
@@ -515,7 +523,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				},
 				"timeout": map[string]interface{}{
 					"type":        "integer",
-					"description": "Optional GABP startup handshake timeout in seconds. Defaults to timeouts.startup.gabpConnectSeconds; increase for slow mod-heavy games.",
+					"description": "Optional GABP startup handshake timeout in seconds. Defaults to timeouts.startup.gabpConnectSeconds; increase for slow bridge startup.",
 				},
 			},
 			"required": []string{"gameId"},
@@ -576,7 +584,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			if startResult.GABPConnectError != nil {
 				message = fmt.Sprintf("%s: %v", message, startResult.GABPConnectError)
 			}
-			message = fmt.Sprintf("%s. The game may still be loading or the mod may be missing. Use games_status, then games_connect once the mod is ready.", message)
+			message = fmt.Sprintf("%s. The game may still be loading or the GABP bridge may be missing. Use games_status, then games_connect once the bridge is ready.", message)
 			message = appendValidationWarningText(message, validationWarnings)
 			structured := map[string]interface{}{
 				"gameId":           game.ID,
@@ -592,7 +600,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				}(),
 				"nextActions": []map[string]interface{}{
 					mcpNextAction("games_status", map[string]interface{}{"gameId": game.ID}, "Verify whether the game is still running."),
-					mcpNextAction("games_connect", map[string]interface{}{"gameId": game.ID}, "Connect after the mod finishes loading."),
+					mcpNextAction("games_connect", map[string]interface{}{"gameId": game.ID}, "Connect after the GABP bridge finishes loading."),
 				},
 			}
 			addValidationWarnings(structured, validationWarnings)
@@ -1033,6 +1041,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			if gabpName := toolMetaString(entry.Tool, toolMetaGABPName); gabpName != "" {
 				item["gabpName"] = gabpName
 			}
+			if tags := toolMetaStringSlice(entry.Tool, toolMetaTags); len(tags) > 0 {
+				item["tags"] = tags
+			}
 			if brief {
 				if summary := toolBriefDescription(entry.Tool.Description); summary != "" {
 					item["summary"] = summary
@@ -1059,6 +1070,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}
 			if gabpName := toolMetaString(entry.Tool, toolMetaGABPName); gabpName != "" {
 				item["gabpName"] = gabpName
+			}
+			if tags := toolMetaStringSlice(entry.Tool, toolMetaTags); len(tags) > 0 {
+				item["tags"] = tags
 			}
 			items = append(items, item)
 		}
@@ -1124,7 +1138,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}
 
 		content.WriteString(fmt.Sprintf("No game-specific %s available.\n", noun))
-		content.WriteString("Start games with GABP-compliant mods to see their tools.\n")
+		content.WriteString("Start games with GABP-compliant bridges to see their tools.\n")
 		return content.String()
 	}
 
@@ -1369,7 +1383,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				},
 				"tool": map[string]interface{}{
 					"type":        "string",
-					"description": "Tool name as returned by games_tool_names or games_tools (required). Prefer the fully qualified mirrored name, e.g. 'bannerlord.core.ping'.",
+					"description": "Tool name as returned by games_tool_names or games_tools (required). Prefer the fully qualified mirrored name, e.g. 'example.core.ping'.",
 				},
 			},
 			"required": []string{"tool"},
@@ -1416,6 +1430,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}
 		if gabpName := toolMetaString(entry.Tool, toolMetaGABPName); gabpName != "" {
 			structured["gabpName"] = gabpName
+		}
+		if tags := toolMetaStringSlice(entry.Tool, toolMetaTags); len(tags) > 0 {
+			structured["tags"] = tags
 		}
 
 		return &ToolResult{
@@ -1531,7 +1548,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				writeToolParams(&content, entry.Tool)
 				content.WriteString("\n")
 			}
-			content.WriteString("\nNote: Tools are prefixed with game ID (e.g., 'minecraft.inventory.get') to avoid conflicts between games.\n")
+			content.WriteString("\nNote: Tools are prefixed with game ID (e.g., 'factory.inventory.get') to avoid conflicts between games.\n")
 		}
 
 		content.WriteString("\nUse games_tool_names for a smaller list and games_tool_detail for one tool.")
@@ -1689,7 +1706,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 					disconnectNote = "\n" + disconnectNote
 				}
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to connect to GABP server for '%s' on port %d after %s: %v. GABS currently sees status '%s'. Make sure the game is still running and the mod is fully loaded.%s", game.ID, port, connectTimeout.Round(time.Second), err, status, disconnectNote)}},
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to connect to GABP server for '%s' on port %d after %s: %v. GABS currently sees status '%s'. Make sure the game is still running and the GABP bridge is fully loaded.%s", game.ID, port, connectTimeout.Round(time.Second), err, status, disconnectNote)}},
 					IsError: true,
 				}, nil
 			}
@@ -1698,7 +1715,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				disconnectNote = "\n" + disconnectNote
 			}
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to connect to GABP server for '%s' on port %d after %s: %v. Make sure the game mod is loaded.%s", game.ID, port, connectTimeout.Round(time.Second), err, disconnectNote)}},
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to connect to GABP server for '%s' on port %d after %s: %v. Make sure the GABP bridge is loaded.%s", game.ID, port, connectTimeout.Round(time.Second), err, disconnectNote)}},
 				IsError: true,
 			}, nil
 		}
@@ -1936,7 +1953,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				},
 				"tool": map[string]interface{}{
 					"type":        "string",
-					"description": "Tool name as returned by games_tool_names or games_tools (required). Prefer the full mirrored name, e.g. 'bannerlord.core.ping'.",
+					"description": "Tool name as returned by games_tool_names or games_tools (required). Prefer the full mirrored name, e.g. 'example.core.ping'.",
 				},
 				"arguments": map[string]interface{}{
 					"type":        "object",
@@ -2007,7 +2024,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		// normalization as well.
 		gabpToolName := gabpToolNameFromTool(entry.GameID, entry.Tool)
 
-		if !shouldBypassAttentionGate(toolName, gabpToolName, entry.Tool.Name) {
+		if !shouldBypassAttentionGateForTool(entry.Tool, toolName, gabpToolName, entry.Tool.Name) {
 			if blocked := s.enforceAttentionGate(entry.GameID, entry.Tool.Name, client); blocked != nil {
 				return blocked, nil
 			}
@@ -2156,13 +2173,19 @@ func appendValidationWarningText(message string, warnings []string) string {
 
 func (s *Server) gameStatusStructured(game config.GameConfig, status string) map[string]interface{} {
 	toolCount := len(s.getGameSpecificTools(game.ID))
+	diagnostics := s.gameStateDiagnostics(game, status)
+	nextActions := s.nextActionsForGameStatus(game, status, toolCount)
+	nextActions = nextActionsForGameStateDiagnostics(game, diagnostics, nextActions)
 	item := map[string]interface{}{
 		"gameId":            game.ID,
 		"name":              game.Name,
 		"status":            status,
 		"statusDescription": s.getStatusDescriptionFromStatus(status, &game),
 		"toolCount":         toolCount,
-		"nextActions":       s.nextActionsForGameStatus(game, status, toolCount),
+		"nextActions":       nextActions,
+	}
+	if diagnostics != nil {
+		item["diagnostics"] = diagnostics
 	}
 	if disconnectNote := s.describeLastGABPDisconnect(game.ID); disconnectNote != "" {
 		item["lastDisconnect"] = disconnectNote
@@ -2186,6 +2209,10 @@ func (s *Server) nextActionsForGameStatus(game config.GameConfig, status string,
 		return []map[string]interface{}{
 			mcpNextAction("games_start", gameArg, "Start the game before connecting to GABP tools."),
 		}
+	case "stale-runtime-cleaned":
+		return []map[string]interface{}{
+			mcpNextAction("games_start", gameArg, "Start the game with fresh bridge and runtime state."),
+		}
 	case "shared-running":
 		return []map[string]interface{}{
 			mcpNextAction("games_connect", gameArg, "Attach this GABS session to the already running game bridge."),
@@ -2201,7 +2228,7 @@ func (s *Server) nextActionsForGameStatus(game config.GameConfig, status string,
 		}
 	case "running-disconnected", "disconnected":
 		return []map[string]interface{}{
-			mcpNextAction("games_connect", gameArg, "Reconnect after the GABP bridge disconnected or the mod finished loading."),
+			mcpNextAction("games_connect", gameArg, "Reconnect after the GABP bridge disconnected or finished loading."),
 		}
 	case "launcher-running", "launcher-triggered":
 		return []map[string]interface{}{
@@ -2456,7 +2483,7 @@ func (s *Server) callDirectGABPTool(gamesConfig *config.GamesConfig, gameIDArg s
 	}
 
 	attentionToolNames := append([]string{requested}, candidates...)
-	if !shouldBypassAttentionGate(attentionToolNames...) {
+	if !s.shouldBypassAttentionGateForRequest(gameID, attentionToolNames...) {
 		if blocked := s.enforceAttentionGate(gameID, requested, client); blocked != nil {
 			return blocked, true
 		}
@@ -2868,6 +2895,8 @@ func (s *Server) getStatusDescriptionFromStatus(status string, gameConfig *confi
 		return "running (connected via GABP; process not managed by this GABS instance)"
 	case "disconnected":
 		return "GABP disconnected (the game may have crashed or closed the bridge)"
+	case "stale-runtime-cleaned":
+		return "stopped (stale runtime and bridge state were removed)"
 	case "stopped":
 		return "stopped"
 	case "launcher-running":
@@ -2952,6 +2981,7 @@ func (s *Server) resolveSharedRuntimeStatus(gameID string) string {
 	} else {
 		s.cleanupBridgeConfigInternal(gameID)
 		s.log.Debugw("removed stale runtime state", "gameId", gameID)
+		return "stale-runtime-cleaned"
 	}
 
 	return ""
@@ -3184,7 +3214,7 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 // establishGABPConnection attempts to connect to the game's GABP server with retry logic.
 // This runs in the background and implements the game-development workflow:
 //  1. Game starts with bridge config (already done in startGame)
-//  2. GABP client connects to game mod's server (implemented here)
+//  2. GABP client connects to the game's GABP server (implemented here)
 //  3. Mirror system syncs tools into the stable games_tool_names discovery path
 //  4. AI agents discover capabilities via games_tool_names, then inspect a few
 //     candidates with games_tool_detail before calling games_call_tool
@@ -3200,7 +3230,7 @@ func (s *Server) establishGABPConnection(gameID string, port int, token string, 
 	s.gabpClients[gameID] = client
 	s.mu.Unlock()
 
-	// Attempt connection with retry logic (handles game mod startup delays)
+	// Attempt connection with retry logic (handles game bridge startup delays)
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	err := client.Connect(ctx, addr, token, backoffMin, backoffMax)
@@ -3257,18 +3287,23 @@ func (s *Server) syncGABPToolsWithTimeout(client *gabp.Client, gameID string, ti
 		legacyToolName := legacyMCPToolName(gameID, gabpToolName)
 		qualifiedToolName := qualifiedGABPToolName(gameID, gabpToolName)
 
+		meta := map[string]interface{}{
+			toolMetaGABPName:          gabpToolName,
+			toolMetaQualifiedGABPName: qualifiedToolName,
+			toolMetaLegacyName:        legacyToolName,
+			toolMetaAliases:           []string{legacyToolName, qualifiedToolName, localLegacyMCPToolName(gabpToolName), gabpToolName, rawGABPToolName},
+			"originalName":            legacyToolName,
+		}
+		if len(tool.Tags) > 0 {
+			meta[toolMetaTags] = append([]string(nil), tool.Tags...)
+		}
+
 		mcpTool := Tool{
 			Name:         exposedToolName,
 			Description:  fmt.Sprintf("%s (Game: %s)", tool.Description, gameID),
 			InputSchema:  tool.InputSchema,
 			OutputSchema: tool.OutputSchema,
-			Meta: map[string]interface{}{
-				toolMetaGABPName:          gabpToolName,
-				toolMetaQualifiedGABPName: qualifiedToolName,
-				toolMetaLegacyName:        legacyToolName,
-				toolMetaAliases:           []string{legacyToolName, qualifiedToolName, localLegacyMCPToolName(gabpToolName), gabpToolName, rawGABPToolName},
-				"originalName":            legacyToolName,
-			},
+			Meta:         meta,
 		}
 
 		handler := func(toolName, exposedName string) func(args map[string]interface{}) (*ToolResult, error) {
@@ -3278,7 +3313,7 @@ func (s *Server) syncGABPToolsWithTimeout(client *gabp.Client, gameID string, ti
 					return invalidTimeout, nil
 				}
 
-				if !shouldBypassAttentionGate(exposedName, toolName) {
+				if !shouldBypassAttentionGateForTool(mcpTool, exposedName, toolName) {
 					if blocked := s.enforceAttentionGate(gameID, exposedName, client); blocked != nil {
 						return blocked, nil
 					}

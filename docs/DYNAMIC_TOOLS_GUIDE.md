@@ -32,33 +32,39 @@ Legacy dotted names such as `games.list` are accepted as call aliases, but
 strict-safe names are what `tools/list` advertises by default.
 
 ### Phase 2: Game Connection (Dynamic Discovery)
-After starting a game with GABP mods, the discovery surface expands:
+After starting a game with GABP bridges, the discovery surface expands:
 
 ```
 games_tool_names and games_tool_detail expose mirrored game tools. The exact set
-depends on the connected game and mod:
+depends on the connected game and bridge:
 
-Minecraft-Specific Examples:
-- minecraft_inventory_get     - Get player inventory
-- minecraft_inventory_set     - Modify player inventory
-- minecraft_world_get_block   - Check block at position
-- minecraft_world_place_block - Place block in world
-- minecraft_player_teleport   - Teleport player
-- minecraft_chat_send         - Send chat message
-- minecraft_time_set          - Set world time
-- minecraft_weather_set       - Control weather
+FactorySim-Specific Examples:
+- factory_inventory_get     - Get player inventory
+- factory_inventory_set     - Modify player inventory
+- factory_world_get_block   - Check block at position
+- factory_world_place_block - Place block in world
+- factory_player_teleport   - Teleport player
+- factory_chat_send         - Send chat message
+- factory_time_set          - Set world time
+- factory_weather_set       - Control weather
 
-RimWorld-Specific Tools (if rimworld also starts):
-- rimworld_inventory_get      - Get colonist inventory
-- rimworld_crafting_build     - Build items/structures
-- rimworld_colonist_command   - Give colonist orders
-- rimworld_research_progress  - Check research status
+AdventureGame-Specific Tools (if adventure also starts):
+- adventure_inventory_get      - Get party inventory
+- adventure_crafting_build     - Build items/structures
+- adventure_party_command   - Give party commands
+- adventure_quest_progress  - Check quest status
 ```
 
 GABS can also have multiple live sessions. If another session already owns a
 running game, `games.start` and `games.connect` return quickly instead of
 hanging, and `games.connect {"forceTakeover": true}` can intentionally move
 ownership to the current session.
+
+When a game is not connecting cleanly, call `games_status` first. Its structured
+diagnostics compare GABS runtime ownership, `bridge.json`, passive listener
+evidence, and the game process environment where available. Follow
+`nextActions` rather than assuming whether `bridge.json` or the process
+environment is stale.
 
 For low-latency startup loops, `games_start` returns after the GABP handshake
 instead of waiting for full tool mirroring. The mirror refresh runs in the
@@ -67,7 +73,7 @@ background, the public `tools/list` response remains stable, and
 game tool immediately. Use `games_tool_names` when you need discovery; skip it
 when the next command name is already known.
 
-For slow mod-heavy games, pass a larger `timeout` to `games_start` or configure
+For games with slow bridge startup, pass a larger `timeout` to `games_start` or configure
 `timeouts.startup.gabpConnectSeconds` so startup waits for the bridge instead of
 forcing a later manual connect step.
 
@@ -82,22 +88,22 @@ forcing a later manual connect step.
 async function discoverGameCapabilities() {
   // 1. See what games are available
   const games = await mcp.callTool("games_list", {});
-  
-  // 2. Check what games are running  
+
+  // 2. Check what games are running
   const status = await mcp.callTool("games_status", {});
-  
+
   // 3. Discover compact tool names for each running game
   const allToolNames = await mcp.callTool("games_tool_names", {"brief": true});
-  
+
   // 4. Get specific names for the game of interest
-  const minecraftToolNames = await mcp.callTool("games_tool_names", {"gameId": "minecraft", "brief": true});
+  const factoryToolNames = await mcp.callTool("games_tool_names", {"gameId": "factory", "brief": true});
 
   // 5. Inspect one candidate in detail only when needed
   const inventoryDetail = await mcp.callTool("games_tool_detail", {
-    "tool": "minecraft_inventory_get"
+    "tool": "factory_inventory_get"
   });
-  
-  return { games, status, allToolNames, minecraftToolNames, inventoryDetail };
+
+  return { games, status, allToolNames, factoryToolNames, inventoryDetail };
 }
 ```
 
@@ -107,16 +113,16 @@ AI agents should treat tool discovery as a progressive enhancement:
 
 ```
 Phase 1: Use core tools to start games
-"Start the Minecraft server" -> games_start {"gameId": "minecraft"}
+"Start the FactorySim server" -> games_start {"gameId": "factory"}
 
-Phase 2: Discover what's now possible  
-"What can I do with Minecraft now?" -> games_tool_names {"gameId": "minecraft", "brief": true}
+Phase 2: Discover what's now possible
+"What can I do with FactorySim now?" -> games_tool_names {"gameId": "factory", "brief": true}
 
 Phase 2b: Inspect one candidate when needed
-"What does minecraft_inventory_get accept?" -> games_tool_detail {"tool": "minecraft_inventory_get"}
+"What does factory_inventory_get accept?" -> games_tool_detail {"tool": "factory_inventory_get"}
 
 Phase 3: Use discovered tools
-"Get Steve's inventory" -> minecraft_inventory_get {"playerId": "steve"}
+"Get Steve's inventory" -> factory_inventory_get {"playerId": "steve"}
 ```
 
 ### 3. Context-Aware Tool Usage
@@ -125,10 +131,10 @@ Tools are namespaced by game ID to prevent conflicts:
 
 ```
 ✅ Clear Intent:
-- minecraft_inventory_get {"playerId": "steve"}      # Steve's Minecraft inventory
-- rimworld_inventory_get {"colonistId": "alice"}     # Alice's RimWorld inventory
+- factory_inventory_get {"playerId": "steve"}      # Steve's FactorySim inventory
+- adventure_inventory_get {"partyMemberId": "alice"}     # Alice's AdventureGame inventory
 
-❌ Ambiguous (avoided by design):  
+❌ Ambiguous (avoided by design):
 - inventory_get {"playerId": "steve"}                # Which game?
 ```
 
@@ -139,21 +145,21 @@ Tools are namespaced by game ID to prevent conflicts:
 User: "Help me manage my games"
 AI: Let me see what games you have configured...
     -> games_list
-    
-AI: I see you have minecraft and rimworld configured. Neither is running.
+
+AI: I see you have factory and adventure configured. Neither is running.
     Would you like me to start one of them?
 
-User: "Start Minecraft"  
-AI: Starting Minecraft...
-    -> games_start {"gameId": "minecraft"}
-    
-AI: Minecraft started! Let me see what I can help you with...
-    -> games_tool_names {"gameId": "minecraft", "brief": true}
-    
+User: "Start FactorySim"
+AI: Starting FactorySim...
+    -> games_start {"gameId": "factory"}
+
+AI: FactorySim started! Let me see what I can help you with...
+    -> games_tool_names {"gameId": "factory", "brief": true}
+
 AI: Great! Now I can help you with:
-    - Managing your inventory (minecraft_inventory_get/set)
-    - Building in your world (minecraft_world_place_block)
-    - Teleporting around (minecraft_player_teleport)
+    - Managing your inventory (factory_inventory_get/set)
+    - Building in your world (factory_world_place_block)
+    - Teleporting around (factory_player_teleport)
     - Controlling time and weather
     What would you like to do?
 ```
@@ -162,44 +168,44 @@ AI: Great! Now I can help you with:
 ```
 User: "I want to run both games and manage them"
 AI: I'll start both games and show you the expanded capabilities...
-    -> games_start {"gameId": "minecraft"}
-    -> games_start {"gameId": "rimworld"}
+    -> games_start {"gameId": "factory"}
+    -> games_start {"gameId": "adventure"}
     -> games_tool_names {"brief": true}
-    
+
 AI: Perfect! Now I can help you with:
-    
-    Minecraft:
+
+    FactorySim:
     - Inventory management
-    - World building  
+    - World building
     - Player control
-    
-    RimWorld:
-    - Colony management
+
+    AdventureGame:
+    - Party management
     - Crafting systems
-    - Research progress
-    
+    - Quest progress
+
     The tools are clearly separated by game name, so I can help
     you manage both simultaneously without confusion.
 ```
 
 ### Example 3: Discovery-Driven Assistance
 ```
-User: "What's possible with my Minecraft server?"
-AI: Let me check what your Minecraft mod exposes...
-    -> games_tool_names {"gameId": "minecraft", "brief": true}
-    -> games_tool_detail {"tool": "minecraft_inventory_get"}
-    
-AI: Your Minecraft setup provides these capabilities:
+User: "What's possible with my FactorySim server?"
+AI: Let me check what your FactorySim bridge exposes...
+    -> games_tool_names {"gameId": "factory", "brief": true}
+    -> games_tool_detail {"tool": "factory_inventory_get"}
+
+AI: Your FactorySim setup provides these capabilities:
     - Inventory System: Get/modify player inventories
-    - World Interaction: Place/check blocks, teleport players  
+    - World Interaction: Place/check blocks, teleport players
     - Server Control: Manage time, weather, send chat messages
-    
-    This suggests you have a comprehensive admin/creative mod installed.
+
+    This suggests you have a comprehensive admin/creative bridge installed.
     What would you like me to help you with?
 
 User: "Give me a diamond sword"
 AI: I'll add a diamond sword to your inventory...
-    -> minecraft_inventory_set {"playerId": "steve", "item": "diamond_sword", "count": 1}
+    -> factory_inventory_set {"playerId": "steve", "item": "diamond_sword", "count": 1}
 ```
 
 ## Technical Implementation for AI Developers
@@ -213,19 +219,19 @@ class GABSToolManager {
     this.lastRefresh = 0;
     this.refreshInterval = 30000; // 30 seconds
   }
-  
+
   async getAvailableTools(gameId = null) {
     if (this.shouldRefresh()) {
       await this.refreshToolCache();
     }
-    
+
     if (gameId) {
       return this.toolCache.get(gameId) || [];
     }
-    
+
     return Array.from(this.toolCache.values()).flat();
   }
-  
+
   async refreshToolCache() {
     const tools = await this.mcp.callTool("games_tool_names", {"brief": true});
     // Parse and cache by game...
@@ -239,16 +245,16 @@ class GABSToolManager {
 async function intelligentGameManagement(request) {
   // 1. Parse user intent
   const intent = parseUserRequest(request);
-  
+
   // 2. Check if we need to start games first
   if (intent.requiresGame && !await isGameRunning(intent.gameId)) {
     await startGame(intent.gameId);
-    
+
     // 3. If the next tool name is known, call it via games_call_tool immediately.
     // Refresh tool knowledge only when discovery is needed.
     await refreshAvailableTools();
   }
-  
+
   // 5. Execute with discovered tools
   return await executeWithDiscoveredTools(intent);
 }
@@ -267,7 +273,7 @@ async function intelligentGameManagement(request) {
 ### ❌ Don't:
 1. **Don't assume tools exist** without checking via `games_tool_names`
 2. **Don't cache tools indefinitely** - they change as games start/stop
-3. **Don't try to use generic tool names** like `inventory.get` 
+3. **Don't try to use generic tool names** like `inventory.get`
 4. **Don't overwhelm users** with massive detailed tool dumps - group and filter intelligently
 5. **Don't treat duplicate starts as success signals** - if another live GABS
    session already owns the game, expect `games_start` or `games_connect` to
@@ -277,7 +283,7 @@ async function intelligentGameManagement(request) {
 
 The GABS architecture specifically helps AI agents handle dynamic tools:
 
-1. **Clear Namespacing**: `minecraft_inventory_get` vs `rimworld_inventory_get` eliminates ambiguity
+1. **Clear Namespacing**: `factory_inventory_get` vs `adventure_inventory_get` eliminates ambiguity
 2. **Discovery Tools**: `games_tool_names` and `games_tool_detail` provide structured tool exploration
 3. **Stable Core Surface**: `tools/list` stays small while game tools appear in discovery results
 4. **Status Awareness**: AI can check game state before attempting tool use
@@ -288,7 +294,7 @@ The GABS architecture specifically helps AI agents handle dynamic tools:
 AI agents working with GABS will handle dynamic game capability expansion effectively because:
 
 1. **The discovery pattern is predictable** - start with `games_tool_names`
-2. **Tool names are unambiguous** - game prefixes prevent conflicts  
+2. **Tool names are unambiguous** - game prefixes prevent conflicts
 3. **Expansion is progressive** - discovery results update as capabilities are needed
 4. **The core remains stable** - basic game management always works
 

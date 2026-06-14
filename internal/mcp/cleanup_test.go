@@ -188,9 +188,9 @@ func TestRegisterGameToolCleanupWithNormalization(t *testing.T) {
 	log := util.NewLogger("error")
 	server := NewServerForTesting(log)
 
-	gameID := "minecraft"
+	gameID := "factory"
 	tool := Tool{
-		Name:        "minecraft.inventory.get",
+		Name:        "factory.inventory.get",
 		Description: "Normalized test tool",
 		InputSchema: map[string]interface{}{"type": "object"},
 	}
@@ -208,7 +208,7 @@ func TestRegisterGameToolCleanupWithNormalization(t *testing.T) {
 	server.RegisterGameTool(gameID, tool, handler, normalizationConfig)
 
 	server.mu.RLock()
-	if _, exists := server.tools["minecraft_inventory_get"]; !exists {
+	if _, exists := server.tools["factory_inventory_get"]; !exists {
 		server.mu.RUnlock()
 		t.Fatal("Expected normalized tool to be registered for cleanup test")
 	}

@@ -28,14 +28,14 @@ func TestOpenAINormalizationIntegration(t *testing.T) {
 	}{
 		{
 			name:                   "SimpleDotReplacement",
-			originalToolName:       "minecraft.inventory.get",
-			expectedNormalizedName: "minecraft_inventory_get",
+			originalToolName:       "factory.inventory.get",
+			expectedNormalizedName: "factory_inventory_get",
 			shouldPreserveOriginal: true,
 		},
 		{
 			name:                   "ComplexGameTool",
-			originalToolName:       "rimworld.crafting.build",
-			expectedNormalizedName: "rimworld_crafting_build",
+			originalToolName:       "adventure.crafting.build",
+			expectedNormalizedName: "adventure_crafting_build",
 			shouldPreserveOriginal: true,
 		},
 		{
@@ -46,8 +46,8 @@ func TestOpenAINormalizationIntegration(t *testing.T) {
 		},
 		{
 			name:                   "ComplexWithSpecialChars",
-			originalToolName:       "game.mod@special#tool",
-			expectedNormalizedName: "game_mod_special_tool",
+			originalToolName:       "game.bridge@special#tool",
+			expectedNormalizedName: "game_bridge_special_tool",
 			shouldPreserveOriginal: true,
 		},
 	}
@@ -123,7 +123,7 @@ func TestOpenAINormalizationDisabled(t *testing.T) {
 	}
 
 	originalTool := Tool{
-		Name:        "minecraft.inventory.get",
+		Name:        "factory.inventory.get",
 		Description: "Test tool",
 		InputSchema: map[string]interface{}{
 			"type":       "object",
@@ -139,16 +139,16 @@ func TestOpenAINormalizationDisabled(t *testing.T) {
 
 	// Check that the tool was registered with original name (not normalized)
 	server.mu.RLock()
-	_, exists := server.tools["minecraft.inventory.get"]
+	_, exists := server.tools["factory.inventory.get"]
 	server.mu.RUnlock()
 
 	if !exists {
-		t.Errorf("Expected original tool name 'minecraft.inventory.get' to be preserved when normalization is disabled")
+		t.Errorf("Expected original tool name 'factory.inventory.get' to be preserved when normalization is disabled")
 	}
 
 	// Ensure normalized version is NOT registered
 	server.mu.RLock()
-	_, normalizedExists := server.tools["minecraft_inventory_get"]
+	_, normalizedExists := server.tools["factory_inventory_get"]
 	server.mu.RUnlock()
 
 	if normalizedExists {
@@ -164,7 +164,7 @@ func TestRegisterToolBackwardCompatibility(t *testing.T) {
 	server := NewServerForTesting(logger)
 
 	originalTool := Tool{
-		Name:        "minecraft.inventory.get",
+		Name:        "factory.inventory.get",
 		Description: "Test tool",
 		InputSchema: map[string]interface{}{
 			"type":       "object",
@@ -181,7 +181,7 @@ func TestRegisterToolBackwardCompatibility(t *testing.T) {
 
 	// Check that the tool was registered with original name
 	server.mu.RLock()
-	_, exists := server.tools["minecraft.inventory.get"]
+	_, exists := server.tools["factory.inventory.get"]
 	server.mu.RUnlock()
 
 	if !exists {
@@ -193,31 +193,31 @@ func TestRegisterToolBackwardCompatibility(t *testing.T) {
 
 func TestNormalizedGameToolResolutionHelpers(t *testing.T) {
 	tool := Tool{
-		Name:        "minecraft_inventory_get",
+		Name:        "factory_inventory_get",
 		Description: "Normalized mirrored tool",
 		InputSchema: map[string]interface{}{"type": "object"},
 		Meta: map[string]interface{}{
-			"originalName": "minecraft.inventory.get",
+			"originalName": "factory.inventory.get",
 		},
 	}
 
 	matches := []string{
-		"minecraft_inventory_get",
-		"minecraft.inventory.get",
+		"factory_inventory_get",
+		"factory.inventory.get",
 		"inventory.get",
 	}
 
 	for _, requested := range matches {
-		if !toolMatchesRequestedName("minecraft", tool, requested) {
+		if !toolMatchesRequestedName("factory", tool, requested) {
 			t.Errorf("Expected normalized tool to match requested name %q", requested)
 		}
 	}
 
-	if toolMatchesRequestedName("minecraft", tool, "rimworld.inventory.get") {
+	if toolMatchesRequestedName("factory", tool, "adventure.inventory.get") {
 		t.Error("Did not expect normalized helper to match a different game's tool")
 	}
 
-	if gabpName := gabpToolNameFromTool("minecraft", tool); gabpName != "inventory/get" {
+	if gabpName := gabpToolNameFromTool("factory", tool); gabpName != "inventory/get" {
 		t.Errorf("Expected normalized helper to convert to GABP name inventory/get, got %q", gabpName)
 	}
 }

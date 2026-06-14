@@ -11,7 +11,7 @@ func TestConcurrentBridgeCreation(t *testing.T) {
 
 	var wg sync.WaitGroup
 	results := make([]concurrentResult, 10)
-	gameNames := []string{"minecraft", "rimworld", "terraria", "stardew", "factorio", "cities", "valheim", "subnautica", "kerbal", "oxygen"}
+	gameNames := []string{"factory", "adventure", "terraria", "stardew", "factorio", "cities", "adventurearena", "subnautica", "kerbal", "oxygen"}
 
 	// Launch 10 concurrent bridge creations for different games
 	for i := 0; i < 10; i++ {

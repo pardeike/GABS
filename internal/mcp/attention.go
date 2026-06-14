@@ -13,23 +13,35 @@ import (
 
 const attentionRefreshTimeout = 2 * time.Second
 
-var attentionGateBypassToolSuffixes = []string{
-	"rimbridge/get_operation",
-	"rimbridge/get_bridge_status",
-	"rimbridge/list_operations",
-	"rimbridge/list_operation_events",
-	"rimbridge/list_logs",
-	"rimbridge/wait_for_operation",
-	"rimbridge/wait_for_game_loaded",
-	"rimbridge/wait_for_long_event_idle",
-	"rimbridge.get_operation",
-	"rimbridge.get_bridge_status",
-	"rimbridge.list_operations",
-	"rimbridge.list_operation_events",
-	"rimbridge.list_logs",
-	"rimbridge.wait_for_operation",
-	"rimbridge.wait_for_game_loaded",
-	"rimbridge.wait_for_long_event_idle",
+var attentionGateBypassTags = map[string]struct{}{
+	"attention-bypass": {},
+	"attention_bypass": {},
+	"diagnostic":       {},
+	"diagnostics":      {},
+	"health":           {},
+	"lifecycle":        {},
+	"observation":      {},
+	"read-only":        {},
+	"read_only":        {},
+	"status":           {},
+	"telemetry":        {},
+}
+
+var attentionGateBypassNameTokens = map[string]struct{}{
+	"attention":   {},
+	"diagnostic":  {},
+	"diagnostics": {},
+	"health":      {},
+	"idle":        {},
+	"journal":     {},
+	"log":         {},
+	"logs":        {},
+	"operation":   {},
+	"operations":  {},
+	"ping":        {},
+	"ready":       {},
+	"status":      {},
+	"telemetry":   {},
 }
 
 type gameAttentionState struct {
@@ -236,21 +248,86 @@ func (s *Server) enforceAttentionGate(gameID string, exposedToolName string, cli
 	return buildAttentionBlockedToolResult(gameID, exposedToolName, current)
 }
 
+func shouldBypassAttentionGateForTool(tool Tool, toolNames ...string) bool {
+	for _, tag := range toolMetaStringSlice(tool, toolMetaTags) {
+		if isAttentionBypassTag(tag) {
+			return true
+		}
+	}
+
+	return shouldBypassAttentionGate(toolNames...)
+}
+
+func (s *Server) shouldBypassAttentionGateForRequest(gameID string, toolNames ...string) bool {
+	if shouldBypassAttentionGate(toolNames...) {
+		return true
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, trackedToolName := range s.gameTools[gameID] {
+		handler, exists := s.tools[trackedToolName]
+		if !exists {
+			continue
+		}
+		for _, toolName := range toolNames {
+			if toolMatchesRequestedName(gameID, handler.Tool, toolName) ||
+				canonicalGABPToolName(toolName) == canonicalGABPToolName(gabpToolNameFromTool(gameID, handler.Tool)) {
+				if shouldBypassAttentionGateForTool(handler.Tool, toolName) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+func isAttentionBypassTag(tag string) bool {
+	normalized := normalizeAttentionPolicyToken(tag)
+	_, ok := attentionGateBypassTags[normalized]
+	return ok
+}
+
 func shouldBypassAttentionGate(toolNames ...string) bool {
 	for _, toolName := range toolNames {
-		normalized := strings.TrimSpace(strings.ToLower(toolName))
+		normalized := strings.TrimSpace(toolName)
 		if normalized == "" {
 			continue
 		}
-
-		for _, suffix := range attentionGateBypassToolSuffixes {
-			if normalized == suffix || strings.HasSuffix(normalized, "."+suffix) {
+		for _, token := range attentionPolicyTokens(normalized) {
+			if _, ok := attentionGateBypassNameTokens[token]; ok {
 				return true
 			}
 		}
 	}
 
 	return false
+}
+
+func attentionPolicyTokens(name string) []string {
+	parts := strings.FieldsFunc(strings.ToLower(name), func(r rune) bool {
+		switch r {
+		case '/', '.', '_', '-', ':', ' ':
+			return true
+		default:
+			return false
+		}
+	})
+
+	tokens := make([]string, 0, len(parts))
+	for _, part := range parts {
+		normalized := normalizeAttentionPolicyToken(part)
+		if normalized != "" {
+			tokens = append(tokens, normalized)
+		}
+	}
+	return tokens
+}
+
+func normalizeAttentionPolicyToken(value string) string {
+	return strings.Trim(strings.ReplaceAll(strings.ToLower(strings.TrimSpace(value)), "-", "_"), "_")
 }
 
 func buildAttentionBlockedToolResult(gameID string, toolName string, attention *gabp.AttentionItem) *ToolResult {

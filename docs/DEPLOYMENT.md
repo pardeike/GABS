@@ -9,7 +9,7 @@ This guide explains how to deploy GABS in different scenarios, from local develo
 GABS uses a **configuration-first approach** where games are configured once, then controlled through MCP tools:
 
 ```
-AI Agent ← MCP → GABS ← GABP Client → GABP Server (Game Mod) ← Game API → Game
+AI Agent ← MCP → GABS ← GABP Client → GABP Server (Game Bridge) ← Game API → Game
 ```
 
 **Key Components:**
@@ -17,7 +17,7 @@ AI Agent ← MCP → GABS ← GABP Client → GABP Server (Game Mod) ← Game AP
 - **MCP**: Model Context Protocol for AI-tool communication
 - **GABS**: Game Agent Bridge Server (this project)
 - **GABP**: Game Agent Bridge Protocol on wire major `gabp/1`
-- **Game Mod**: GABP compliant modification in your game
+- **Game Bridge**: GABP compliant bridge integration in your game
 
 Current GABS releases are compatible with the additive GABP v1.1 surface while
 remaining on wire major `gabp/1`.
@@ -27,8 +27,8 @@ remaining on wire major `gabp/1`.
 ### 1. Configure Games
 ```bash
 # Interactive game configuration (do this once per game)
-gabs games add minecraft
-gabs games add rimworld
+gabs games add factory
+gabs games add adventure
 
 # Verify configuration
 gabs games list
@@ -45,9 +45,9 @@ gabs server --http localhost:8080
 
 ### 3. AI Control
 AI uses MCP tools to control games:
-- `games.start {"gameId": "minecraft"}` - Start game and create GABP bridge
-- `games.status {"gameId": "minecraft"}` - Check game status
-- `games.stop {"gameId": "minecraft"}` - Stop game gracefully
+- `games.start {"gameId": "factory"}` - Start game and create GABP bridge
+- `games.status {"gameId": "factory"}` - Check game status
+- `games.stop {"gameId": "factory"}` - Stop game gracefully
 
 ## Configuration Modes
 
@@ -59,14 +59,21 @@ GABS currently uses **local-only communication** for security and simplicity:
 During game configuration:
 - Bridge connections use localhost (127.0.0.1) only
 - Unique ports and tokens generated automatically
-- Game mods should prefer `GABP_SERVER_PORT`, `GABP_TOKEN`, and
+- Game integrations should prefer `GABP_SERVER_PORT`, `GABP_TOKEN`, and
   `GABS_GAME_ID`; `bridge.json` remains a fallback/debug path through
   `GABS_BRIDGE_PATH`
 - Maximum security with no network exposure
 
 GABS writes bridge metadata to `~/.gabs/{gameId}/bridge.json`, but current
-mods should usually read the environment variables first and use that file only
+game integrations should usually read the environment variables first and use that file only
 as a fallback.
+
+GABS also writes `~/.gabs/{gameId}/runtime.json` for ownership and lifecycle
+coordination between live GABS sessions. Game integrations must ignore
+`runtime.json`. When state looks wrong, `games_status` is the supported first
+diagnostic step: it reports stale runtime files, stale bridge files, missing
+bridge files, passively detected orphan listeners, and launcher/process
+environment mismatches with structured `diagnostics` and `nextActions`.
 
 ## Common Deployment Scenarios
 
@@ -76,7 +83,7 @@ as a fallback.
 
 ```bash
 # Configure game once
-gabs games add rimworld
+gabs games add adventure
 
 # Start GABS server
 gabs server
@@ -98,7 +105,7 @@ reaches GABS over HTTP from another machine or service.
 **On local machine:**
 1. Configure and run GABS:
    ```bash
-   gabs games add minecraft
+   gabs games add factory
    gabs server --http localhost:8080
    ```
 
@@ -116,7 +123,7 @@ Configure the client to connect to your GABS HTTP endpoint.
 **Considerations:**
 - Security: Prefer API key auth, reverse proxy auth, or VPN
 - Latency: Network delay affects responsiveness  
-- GABP communication between GABS and the mod remains local and secure
+- GABP communication between GABS and the game-side bridge remains local and secure
 
 ### Scenario 3: Multiple Game Server Management
 
@@ -124,9 +131,9 @@ Configure the client to connect to your GABS HTTP endpoint.
 
 ```bash
 # Configure multiple games
-gabs games add minecraft-survival
-gabs games add minecraft-creative
-gabs games add rimworld-colony1
+gabs games add factory-survival
+gabs games add factory-creative
+gabs games add adventure-a
 gabs games add terraria-world1
 
 # Start GABS
@@ -165,9 +172,9 @@ All GABP connections use token authentication. Tokens are:
 sudo ufw allow from <trusted_ai_ip> to any port 8080
 ```
 
-### Mod Security
+### Bridge Security
 
-Game mods should:
+Game integrations should:
 - Validate all incoming GABP messages
 - Implement proper input sanitization
 - Use principle of least privilege for game access
@@ -178,12 +185,12 @@ Game mods should:
 ### Connection Issues
 
 1. **"failed to connect to GABP"**
-   - Check that the game mod is running and listening on
+   - Check that the game-side bridge is running and listening on
      `127.0.0.1:GABP_SERVER_PORT`
-   - Ensure `GABP_TOKEN` matches between GABS and the mod
-   - Verify the mod is reading the environment variables GABS provides, or
+   - Ensure `GABP_TOKEN` matches between GABS and the game-side bridge
+   - Verify the game-side bridge is reading the environment variables GABS provides, or
      using `bridge.json` only as a fallback
-   - Check game logs to confirm the mod finished starting its GABP server
+   - Check game logs to confirm the game-side bridge finished starting its GABP server
 
 2. **"failed to read bridge.json"** 
    - Ensure GABS launched or reattached the game first; GABS is the component
@@ -191,12 +198,12 @@ Game mods should:
    - Prefer reading the environment variables that GABS injects, and use
      `~/.gabs/{gameId}/bridge.json` or `GABS_BRIDGE_PATH` only as a fallback
    - Check file permissions on config directory
-   - Verify gameId matches between GABS and mod
+   - Verify gameId matches between GABS and bridge
 
 3. **Connection timeout**
-   - Check that the mod has actually started its GABP server yet
-   - Verify the mod is listening on loopback and using the expected port/token
-   - Adjust `--reconnectBackoff` if the mod starts slowly or retries need a
+   - Check that the game-side bridge has actually started its GABP server yet
+   - Verify the game-side bridge is listening on loopback and using the expected port/token
+   - Adjust `--reconnectBackoff` if the bridge starts slowly or retries need a
      wider window
    - If you are using HTTP mode remotely, check the HTTP path separately from
      the local GABP path
@@ -205,7 +212,7 @@ Game mods should:
 
 **For low-latency scenarios:**
 - Use local mode when possible
-- Optimize mod's GABP message handling
+- Optimize bridge's GABP message handling
 - Consider message batching for bulk operations
 
 **For high-latency scenarios:**  
@@ -215,16 +222,16 @@ Game mods should:
 
 ## Development Best Practices
 
-### Mod Development
+### Bridge Development
 
-1. **Read bridge settings on mod startup:**
+1. **Read bridge settings on bridge startup:**
    ```csharp
    var config = ReadBridgeConfig(); // Prefer env vars, fall back to GABS_BRIDGE_PATH or ~/.gabs/{gameId}/bridge.json
    var server = new GABPServer("127.0.0.1", config.Port, config.Token);
    ```
 
 2. **Handle reconnections gracefully:**
-   - Allow GABS to reconnect over the mod lifetime
+   - Allow GABS to reconnect over the bridge lifetime
    - Clean up resources on disconnect
    - Maintain game state consistency
 
@@ -241,7 +248,7 @@ Game mods should:
    - Use `games.connect` when you need to reattach to an already running game
 
 2. **Configure proper timeouts:**
-   - Match reconnect settings to mod startup behavior
+   - Match reconnect settings to bridge startup behavior
    - Consider game loading times in timeout values
 
 3. **Monitor connection health:**
@@ -253,10 +260,10 @@ Game mods should:
 
 Potential improvements being considered:
 
-1. **Reverse Connection Mode:** GABS creates server, mod connects to it (useful for certain firewall scenarios)
+1. **Reverse Connection Mode:** GABS creates server, bridge connects to it (useful for certain firewall scenarios)
 2. **Proxy/Tunnel Support:** Built-in support for SSH tunnels, HTTP proxies
 3. **Load Balancing:** Multiple GABS instances connecting to the same game
-4. **Discovery Protocol:** Automatic discovery of available games/mods
+4. **Discovery Protocol:** Automatic discovery of available games and bridge integrations
 5. **TLS Encryption:** Transport-level encryption for sensitive deployments
 
 ## Configuration Reference
@@ -267,9 +274,13 @@ Potential improvements being considered:
 {
   "port": 49234,
   "token": "a1b2c3d4e5f6...",
-  "gameId": "minecraft"
+  "gameId": "factory"
 }
 ```
+
+`bridge.json` mirrors the same port/token/game ID used for the local bridge.
+It is intentionally secondary to `GABP_SERVER_PORT`, `GABP_TOKEN`, and
+`GABS_GAME_ID` when those environment variables are present.
 
 ### Command Line Options
 
@@ -288,8 +299,15 @@ Potential improvements being considered:
 - `GABS_CONFIG_DIR`: Override default config directory  
 - `GABS_LOG_LEVEL`: Set default log level
 
-**GABP Bridge (Set by GABS for Game Mods):**
-- `GABS_GAME_ID`: Game identifier passed to mod
+**GABP Bridge (Set by GABS for Game Bridges):**
+- `GABS_GAME_ID`: Game identifier passed to bridge
 - `GABS_BRIDGE_PATH`: Path to bridge.json configuration file
-- `GABP_SERVER_PORT`: Port number for mod to listen on
+- `GABP_SERVER_PORT`: Port number for bridge to listen on
 - `GABP_TOKEN`: Authentication token for GABS connection
+
+Launcher modes such as `SteamAppId` start through the platform launcher. If the
+launcher is already running, the real game process may inherit older `GABP_*`
+values than the newest `bridge.json`. In that case, do not make the game-side
+bridge prefer the bridge file; use `games_status` to diagnose the mismatch,
+then stop/restart or use `DirectPath`/`CustomCommand` when deterministic
+environment injection is required.

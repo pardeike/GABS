@@ -1,12 +1,12 @@
-# Mod Development Guide
+# GABP Bridge Development Guide
 
-This guide helps you add GABP support to your game mods so they can work with GABS.
+This guide helps you add GABP support to your game integrations so they can work with GABS.
 
 > **Prerequisites:** Understanding of [GABS Configuration](CONFIGURATION.md) and [AI Integration](INTEGRATION.md) recommended. For deployment scenarios, see [Deployment Guide](DEPLOYMENT.md).
 
 ## What is GABP?
 
-[GABP](https://github.com/pardeike/GABP) (Game Agent Bridge Protocol) is a simple way for AI tools to talk to your game mods. Think of it like a translator between AI assistants and your game.
+[GABP](https://github.com/pardeike/GABP) (Game Agent Bridge Protocol) is a simple way for AI tools to talk to your game integrations. Think of it like a translator between AI assistants and your game.
 
 Current GABS releases are compatible with **GABP v1.1** while remaining on the
 stable wire major **`gabp/1`**.
@@ -16,24 +16,24 @@ stable wire major **`gabp/1`**.
 **IMPORTANT: Understanding Client-Server Roles**
 
 In GABP architecture:
-- **Your mod = GABP Server** (listens for connections on a port)
-- **GABS = GABP Client** (connects to your mod)
+- **Your game-side bridge = GABP Server** (listens for connections on a port)
+- **GABS = GABP Client** (connects to your game-side bridge)
 
 This is different from how GABS operates as an MCP server. The communication flow is:
 
 ```
-AI Agent ← MCP → GABS ← GABP Client → GABP Server (Your Mod) ← Game API → Game
+AI Agent ← MCP → GABS ← GABP Client → GABP Server (Your Game Bridge) ← Game API → Game
 ```
 
 **Why this architecture?**
 - GABS has better knowledge of which ports are available  
 - Communication is always local (127.0.0.1) since GABS must launch the game
-- GABS can connect to mods when they're ready, not the other way around
+- GABS can connect to game integrations when they're ready, not the other way around
 - Multiple game instances can run concurrently with unique ports
 
 ## Quick Overview
 
-To work with GABS, your mod needs to:
+To work with GABS, your game-side bridge needs to:
 
 1. **Read GABP server config** when the game starts (port to listen on, auth token)
 2. **Act as GABP server** - listen for connections from GABS
@@ -46,7 +46,7 @@ When GABS starts your game, it passes GABP server configuration via environment 
 ### Essential Environment Variables
 
 - `GABS_GAME_ID` - Your game's identifier 
-- `GABP_SERVER_PORT` - Port number your mod should listen on (e.g., 12345)
+- `GABP_SERVER_PORT` - Port number your game-side bridge should listen on (e.g., 12345)
 - `GABP_TOKEN` - Authentication token for GABS connections
 
 ### Optional Environment Variables
@@ -74,7 +74,7 @@ If present, `GABS_BRIDGE_PATH` points to a JSON file with the same information:
 
 ## Step 2: Acting as GABP Server
 
-Your mod acts as a GABP server and needs to:
+Your game-side bridge acts as a GABP server and needs to:
 
 1. **Start a TCP server** on `127.0.0.1:GABP_SERVER_PORT`
 2. **Wait for GABS to connect** (GABS acts as the client)
@@ -83,12 +83,12 @@ Your mod acts as a GABP server and needs to:
    JSON-RPC-style request/response semantics
 5. **Respond to tool calls** and **send events**
 
-### Why Your Mod is the Server
+### Why Your Game Bridge is the Server
 
 - **Port Management**: GABS knows which ports are available and assigns unique ones
 - **Concurrency**: Multiple game instances can run with different ports
 - **Local Only**: Communication is always localhost (127.0.0.1) 
-- **Lifecycle**: GABS launches your game, then connects when mod is ready
+- **Lifecycle**: GABS launches your game, then connects when game-side bridge is ready
 
 ## Step 3: Exposing Your Features
 
@@ -99,6 +99,11 @@ Functions that AI can call to do things in your game:
 - `inventory/get` - Get player inventory
 - `world/place_block` - Place a block in the world
 - `player/teleport` - Move player to a location
+
+Tools can include optional `tags` in `tools/list`. GABS uses generic tags such
+as `diagnostic`, `health`, `lifecycle`, `observation`, `read-only`, `status`,
+`telemetry`, and `attention-bypass` to identify tools that may remain callable
+while an attention item is blocking normal game actions.
 
 ### Resources
 Files or data that AI can read:
@@ -114,7 +119,7 @@ Real-time notifications about what's happening:
 
 ## Example Implementation
 
-### C# (Unity/Harmony Mods)
+### C#
 ```csharp
 using System;
 using System.IO;
@@ -122,11 +127,10 @@ using System.Net;
 using System.Threading;
 using Newtonsoft.Json;
 
-public class GABPMod : Mod 
-{
+public class GABPBridge {
     private GABPServer server;
     
-    public override void Start() 
+    public void Start() 
     {
         // Read the bridge config
         var config = ReadBridgeConfig();
@@ -134,7 +138,7 @@ public class GABPMod : Mod
         // Start GABP server
         server = new GABPServer("127.0.0.1", config.Port, config.Token);
         
-        // Register your mod's capabilities
+        // Register your bridge's capabilities
         server.RegisterTool("inventory/get", GetPlayerInventory);
         server.RegisterTool("world/place_block", PlaceBlock);
         server.RegisterEvent("player/move");
@@ -222,13 +226,13 @@ public class BridgeConfig
 }
 ```
 
-### Java (Minecraft Mods)
+### Java
 ```java
 import java.io.*;
 import java.net.*;
 import com.google.gson.*;
 
-public class GABPMod {
+public class GABPBridge {
     private GABPServer server;
     
     public void onServerStart() {
@@ -330,7 +334,7 @@ import socket
 import threading
 from pathlib import Path
 
-class GABPMod:
+class GABPBridge:
     def __init__(self):
         self.server = None
         
@@ -410,12 +414,12 @@ GABP uses the `gabp/1` envelope over the bridge connection. The core runtime
 flow is:
 
 1. GABS sends `session/hello`
-2. Your mod returns a welcome response with capabilities
+2. Your game-side bridge returns a welcome response with capabilities
 3. GABS uses `tools/list` to discover your canonical tool schemas
 4. GABS uses `tools/call` to invoke your game functionality
-5. Your mod emits events with the same `gabp/1` envelope
+5. Your game-side bridge emits events with the same `gabp/1` envelope
 
-### Handshake Request (from GABS to your mod)
+### Handshake Request (from GABS to your game-side bridge)
 ```json
 {
   "v": "gabp/1",
@@ -435,16 +439,16 @@ flow is:
 }
 ```
 
-### Welcome Response (from your mod to GABS)
+### Welcome Response (from your game-side bridge to GABS)
 ```json
 {
   "v": "gabp/1",
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "type": "response",
   "result": {
-    "agentId": "rimworld",
+    "agentId": "adventure",
     "app": {
-      "name": "RimBridgeServer",
+      "name": "ExampleGameBridge",
       "version": "1.1.0"
     },
     "capabilities": {
@@ -467,7 +471,7 @@ flow is:
 }
 ```
 
-### Tool Call (from GABS to your mod)
+### Tool Call (from GABS to your game-side bridge)
 ```json
 {
   "v": "gabp/1",
@@ -483,7 +487,7 @@ flow is:
 }
 ```
 
-### Tool Response (from your mod to GABS)
+### Tool Response (from your game-side bridge to GABS)
 ```json
 {
   "v": "gabp/1",
@@ -496,7 +500,23 @@ flow is:
 }
 ```
 
-### Event Notification (from your mod to GABS)
+### Tool Descriptor with Tags (from your game-side bridge to GABS)
+```json
+{
+  "name": "diagnostics/list_logs",
+  "description": "List recent bridge log entries.",
+  "tags": ["diagnostic", "read-only"],
+  "inputSchema": {
+    "type": "object",
+    "properties": {}
+  },
+  "outputSchema": {
+    "type": "object"
+  }
+}
+```
+
+### Event Notification (from your game-side bridge to GABS)
 ```json
 {
   "v": "gabp/1",
@@ -520,13 +540,16 @@ GABP v1.1 is additive on top of `gabp/1`. If your bridge supports attention:
 - advertise `attention/current` and `attention/ack` in capabilities
 - advertise `attention/opened`, `attention/updated`, and
   `attention/cleared` when you emit those lifecycle events
+- tag observation tools with `diagnostic`, `read-only`, or another generic
+  attention-bypass tag if agents should be able to inspect state before
+  acknowledging a blocking attention item
 - do not assume the other side always supports attention; discover it through
   capabilities first
 
 ## Testing Your Implementation
 
-1. **Test config reading**: Make sure your mod can read the bridge config from the correct location using the environment variables
-2. **Test server startup**: Verify your mod starts a server on the right port
+1. **Test config reading**: Make sure your game-side bridge can read the bridge config from the correct location using the environment variables
+2. **Test server startup**: Verify your bridge starts a server on the right port
 3. **Test with GABS**: Run `gabs games start your-game` and see if GABS can connect
 4. **Test tools**: Use AI to call your tools and verify they work
 5. **Test events**: Make sure events are sent when things happen in your game
@@ -535,14 +558,14 @@ GABP v1.1 is additive on top of `gabp/1`. If your bridge supports attention:
 
 When GABS starts your game, it sets these environment variables for GABP server configuration:
 
-- `GABS_GAME_ID`: The game ID used by GABS (e.g., "minecraft", "rimworld")
-- `GABP_SERVER_PORT`: Port number your mod should listen on as GABP server
+- `GABS_GAME_ID`: The game ID used by GABS (e.g., "factory", "adventure")
+- `GABP_SERVER_PORT`: Port number your game-side bridge should listen on as GABP server
 - `GABP_TOKEN`: Authentication token for validating GABS connections
 - `GABS_BRIDGE_PATH`: Path to bridge.json file (for debugging/compatibility only)
 
 **Key Points:**
-- Your mod listens on `127.0.0.1:GABP_SERVER_PORT` 
-- GABS connects to your mod as a GABP client
+- Your game-side bridge listens on `127.0.0.1:GABP_SERVER_PORT` 
+- GABS connects to your game-side bridge as a GABP client
 - Use `GABP_TOKEN` to authenticate incoming connections from GABS
 
 ## Common Patterns
@@ -581,7 +604,7 @@ server/get_stats - Get server performance data
 3. **Handle errors**: Return helpful error messages when things go wrong
 4. **Send events**: Let AI know when important things happen
 5. **Document your tools**: Comment what each tool does and what arguments it takes
-6. **Test thoroughly**: Make sure your mod works with and without GABS
+6. **Test thoroughly**: Make sure your game-side bridge works with and without GABS
 
 ## Getting Help
 

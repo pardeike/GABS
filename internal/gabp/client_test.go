@@ -162,6 +162,7 @@ func TestConvertToToolDescriptorPrefersCanonicalInputSchema(t *testing.T) {
 		OutputSchema: map[string]interface{}{
 			"type": "object",
 		},
+		Tags: []string{"diagnostic", "read-only"},
 	}
 
 	descriptor := convertToToolDescriptor(raw)
@@ -172,6 +173,9 @@ func TestConvertToToolDescriptorPrefersCanonicalInputSchema(t *testing.T) {
 
 	if !reflect.DeepEqual(descriptor.InputSchema, raw.InputSchema) {
 		t.Fatalf("expected canonical inputSchema to be preserved, got %#v", descriptor.InputSchema)
+	}
+	if !reflect.DeepEqual(descriptor.Tags, raw.Tags) {
+		t.Fatalf("expected tags to be preserved, got %#v", descriptor.Tags)
 	}
 }
 
@@ -261,7 +265,7 @@ func TestConnectCompletesHandshakeWhenServerResponds(t *testing.T) {
 		}
 
 		response := util.NewGABPResponse(request.ID, SessionWelcomeResult{
-			AgentID: "rimworld",
+			AgentID: "adventure",
 			Capabilities: Capabilities{
 				Methods:   []string{"tools/list", "tools/call"},
 				Events:    []string{"system/log"},
@@ -326,7 +330,7 @@ func TestCallToolFailsFastWhenConnectionDrops(t *testing.T) {
 		}
 
 		if err := writer.WriteJSON(util.NewGABPResponse(hello.ID, SessionWelcomeResult{
-			AgentID: "rimworld",
+			AgentID: "adventure",
 			Capabilities: Capabilities{
 				Methods: []string{"tools/call"},
 			},
@@ -365,7 +369,7 @@ func TestCallToolFailsFastWhenConnectionDrops(t *testing.T) {
 	defer client.Close()
 
 	start := time.Now()
-	_, _, err = client.CallToolWithTimeout("rimbridge/core/ping", map[string]any{}, 30*time.Second)
+	_, _, err = client.CallToolWithTimeout("corebridge/core/ping", map[string]any{}, 30*time.Second)
 	duration := time.Since(start)
 	if err == nil {
 		t.Fatal("expected tool call to fail when the connection drops")

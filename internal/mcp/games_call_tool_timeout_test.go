@@ -25,7 +25,7 @@ func TestGamesCallToolHonorsOuterTimeout(t *testing.T) {
 		Params: map[string]interface{}{
 			"name": "games.connect",
 			"arguments": map[string]interface{}{
-				"gameId": "rimworld",
+				"gameId": "adventure",
 			},
 		},
 	}))
@@ -41,7 +41,7 @@ func TestGamesCallToolHonorsOuterTimeout(t *testing.T) {
 		Params: map[string]interface{}{
 			"name": "games.call_tool",
 			"arguments": map[string]interface{}{
-				"tool":    "rimworld.rimworld.load_game_ready",
+				"tool":    "adventure.adventure.load_game_ready",
 				"timeout": 1,
 			},
 		},
@@ -73,7 +73,7 @@ func TestGamesCallToolUsesToolTimeoutHintsFromArguments(t *testing.T) {
 		Params: map[string]interface{}{
 			"name": "games.connect",
 			"arguments": map[string]interface{}{
-				"gameId": "rimworld",
+				"gameId": "adventure",
 			},
 		},
 	}))
@@ -89,7 +89,7 @@ func TestGamesCallToolUsesToolTimeoutHintsFromArguments(t *testing.T) {
 		Params: map[string]interface{}{
 			"name": "games.call_tool",
 			"arguments": map[string]interface{}{
-				"tool": "rimworld.rimworld.load_game_ready",
+				"tool": "adventure.adventure.load_game_ready",
 				"arguments": map[string]interface{}{
 					"timeoutMs":         2500,
 					"waitForScreenFade": true,
@@ -138,7 +138,7 @@ func newGamesCallToolTimeoutTestServer(t *testing.T, toolDelay time.Duration) (*
 	serverDone := make(chan error, 1)
 	go serveTestGabpSessionWithDelayedToolResponse(listener, bridgeToken, toolDelay, serverDone)
 
-	bridgeDir := filepath.Join(tmpDir, "rimworld")
+	bridgeDir := filepath.Join(tmpDir, "adventure")
 	if err := os.MkdirAll(bridgeDir, 0755); err != nil {
 		t.Fatalf("failed to create bridge dir: %v", err)
 	}
@@ -146,7 +146,7 @@ func newGamesCallToolTimeoutTestServer(t *testing.T, toolDelay time.Duration) (*
 	bridgeData, err := json.MarshalIndent(config.BridgeJSON{
 		Port:   listener.Addr().(*net.TCPAddr).Port,
 		Token:  bridgeToken,
-		GameId: "rimworld",
+		GameId: "adventure",
 	}, "", "  ")
 	if err != nil {
 		t.Fatalf("failed to marshal bridge.json: %v", err)
@@ -157,11 +157,11 @@ func newGamesCallToolTimeoutTestServer(t *testing.T, toolDelay time.Duration) (*
 
 	gamesConfig := &config.GamesConfig{
 		Games: map[string]config.GameConfig{
-			"rimworld": {
-				ID:         "rimworld",
-				Name:       "RimWorld",
+			"adventure": {
+				ID:         "adventure",
+				Name:       "AdventureGame",
 				LaunchMode: "DirectPath",
-				Target:     "/Applications/RimWorldMac.app/Contents/MacOS/RimWorld by Ludeon Studios",
+				Target:     "/Applications/AdventureGameMac.app/Contents/MacOS/AdventureGame by ExampleStudio Studios",
 			},
 		},
 	}
@@ -210,9 +210,9 @@ func serveTestGabpSessionWithDelayedToolResponse(listener net.Listener, expected
 			}
 
 			response := util.NewGABPResponse(request.ID, gabp.SessionWelcomeResult{
-				AgentID: "rimworld",
+				AgentID: "adventure",
 				App: gabp.AppInfo{
-					Name:    "RimBridgeServer",
+					Name:    "ExampleGameBridge",
 					Version: "0.1.0",
 				},
 				Capabilities: gabp.Capabilities{
@@ -230,8 +230,8 @@ func serveTestGabpSessionWithDelayedToolResponse(listener net.Listener, expected
 			response := util.NewGABPResponse(request.ID, map[string]interface{}{
 				"tools": []map[string]interface{}{
 					{
-						"name":        "rimworld/load_game_ready",
-						"description": "Wait until the RimWorld session is ready for automation.",
+						"name":        "adventure/load_game_ready",
+						"description": "Wait until the AdventureGame session is ready for automation.",
 						"inputSchema": map[string]interface{}{
 							"type": "object",
 							"properties": map[string]interface{}{
@@ -259,7 +259,7 @@ func serveTestGabpSessionWithDelayedToolResponse(listener net.Listener, expected
 				done <- fmt.Errorf("tools/call params not decoded as object: %#v", request.Params)
 				return
 			}
-			if name, _ := requestParams["name"].(string); name != "rimworld/load_game_ready" {
+			if name, _ := requestParams["name"].(string); name != "adventure/load_game_ready" {
 				done <- fmt.Errorf("unexpected tools/call target: %q", name)
 				return
 			}

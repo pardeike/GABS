@@ -36,7 +36,7 @@ func TestGamesConnectCanReattachUsingBridgeConfigWithoutTrackedProcess(t *testin
 	serverDone := make(chan error, 1)
 	go serveTestGabpSession(listener, bridgeToken, serverDone)
 
-	bridgeDir := filepath.Join(tmpDir, "rimworld")
+	bridgeDir := filepath.Join(tmpDir, "adventure")
 	if err := os.MkdirAll(bridgeDir, 0755); err != nil {
 		t.Fatalf("failed to create bridge dir: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestGamesConnectCanReattachUsingBridgeConfigWithoutTrackedProcess(t *testin
 	bridgeData, err := json.MarshalIndent(config.BridgeJSON{
 		Port:   listener.Addr().(*net.TCPAddr).Port,
 		Token:  bridgeToken,
-		GameId: "rimworld",
+		GameId: "adventure",
 	}, "", "  ")
 	if err != nil {
 		t.Fatalf("failed to marshal bridge.json: %v", err)
@@ -56,11 +56,11 @@ func TestGamesConnectCanReattachUsingBridgeConfigWithoutTrackedProcess(t *testin
 
 	gamesConfig := &config.GamesConfig{
 		Games: map[string]config.GameConfig{
-			"rimworld": {
-				ID:         "rimworld",
-				Name:       "RimWorld",
+			"adventure": {
+				ID:         "adventure",
+				Name:       "AdventureGame",
 				LaunchMode: "DirectPath",
-				Target:     "/Applications/RimWorldMac.app/Contents/MacOS/RimWorld by Ludeon Studios",
+				Target:     "/Applications/AdventureGameMac.app/Contents/MacOS/AdventureGame by ExampleStudio Studios",
 			},
 		},
 	}
@@ -73,11 +73,11 @@ func TestGamesConnectCanReattachUsingBridgeConfigWithoutTrackedProcess(t *testin
 	connectMsg := &Message{
 		JSONRPC: "2.0",
 		Method:  "tools/call",
-		ID:      json.RawMessage(`"reconnect-rimworld"`),
+		ID:      json.RawMessage(`"reconnect-adventure"`),
 		Params: map[string]interface{}{
 			"name": "games.connect",
 			"arguments": map[string]interface{}{
-				"gameId": "rimworld",
+				"gameId": "adventure",
 			},
 		},
 	}
@@ -89,18 +89,18 @@ func TestGamesConnectCanReattachUsingBridgeConfigWithoutTrackedProcess(t *testin
 	if strings.Contains(connectText, `"isError":true`) {
 		t.Fatalf("expected reconnect to succeed, got: %s", connectText)
 	}
-	if !strings.Contains(connectText, "Successfully connected to 'rimworld'") {
+	if !strings.Contains(connectText, "Successfully connected to 'adventure'") {
 		t.Fatalf("unexpected reconnect response: %s", connectText)
 	}
 
 	statusMsg := &Message{
 		JSONRPC: "2.0",
 		Method:  "tools/call",
-		ID:      json.RawMessage(`"status-rimworld"`),
+		ID:      json.RawMessage(`"status-adventure"`),
 		Params: map[string]interface{}{
 			"name": "games.status",
 			"arguments": map[string]interface{}{
-				"gameId": "rimworld",
+				"gameId": "adventure",
 			},
 		},
 	}
@@ -115,11 +115,11 @@ func TestGamesConnectCanReattachUsingBridgeConfigWithoutTrackedProcess(t *testin
 	toolsMsg := &Message{
 		JSONRPC: "2.0",
 		Method:  "tools/call",
-		ID:      json.RawMessage(`"tools-rimworld"`),
+		ID:      json.RawMessage(`"tools-adventure"`),
 		Params: map[string]interface{}{
 			"name": "games.tools",
 			"arguments": map[string]interface{}{
-				"gameId": "rimworld",
+				"gameId": "adventure",
 			},
 		},
 	}
@@ -127,7 +127,7 @@ func TestGamesConnectCanReattachUsingBridgeConfigWithoutTrackedProcess(t *testin
 	toolsResp := server.HandleMessage(toolsMsg)
 	toolsBytes, _ := json.Marshal(toolsResp)
 	toolsText := string(toolsBytes)
-	if !strings.Contains(toolsText, "rimworld.rimbridge.core.ping") {
+	if !strings.Contains(toolsText, "adventure.corebridge.core.ping") {
 		t.Fatalf("expected mirrored tool after reconnect, got: %s", toolsText)
 	}
 
@@ -153,7 +153,7 @@ func TestGamesCallToolFailsFastAndStatusTurnsDisconnectedAfterBridgeDrop(t *test
 	serverDone := make(chan error, 1)
 	go serveTestGabpSessionDisconnectOnToolCall(listener, bridgeToken, serverDone)
 
-	bridgeDir := filepath.Join(tmpDir, "rimworld")
+	bridgeDir := filepath.Join(tmpDir, "adventure")
 	if err := os.MkdirAll(bridgeDir, 0755); err != nil {
 		t.Fatalf("failed to create bridge dir: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestGamesCallToolFailsFastAndStatusTurnsDisconnectedAfterBridgeDrop(t *test
 	bridgeData, err := json.MarshalIndent(config.BridgeJSON{
 		Port:   listener.Addr().(*net.TCPAddr).Port,
 		Token:  bridgeToken,
-		GameId: "rimworld",
+		GameId: "adventure",
 	}, "", "  ")
 	if err != nil {
 		t.Fatalf("failed to marshal bridge.json: %v", err)
@@ -173,11 +173,11 @@ func TestGamesCallToolFailsFastAndStatusTurnsDisconnectedAfterBridgeDrop(t *test
 
 	gamesConfig := &config.GamesConfig{
 		Games: map[string]config.GameConfig{
-			"rimworld": {
-				ID:         "rimworld",
-				Name:       "RimWorld",
+			"adventure": {
+				ID:         "adventure",
+				Name:       "AdventureGame",
 				LaunchMode: "DirectPath",
-				Target:     "/Applications/RimWorldMac.app/Contents/MacOS/RimWorld by Ludeon Studios",
+				Target:     "/Applications/AdventureGameMac.app/Contents/MacOS/AdventureGame by ExampleStudio Studios",
 			},
 		},
 	}
@@ -194,7 +194,7 @@ func TestGamesCallToolFailsFastAndStatusTurnsDisconnectedAfterBridgeDrop(t *test
 		Params: map[string]interface{}{
 			"name": "games.connect",
 			"arguments": map[string]interface{}{
-				"gameId": "rimworld",
+				"gameId": "adventure",
 			},
 		},
 	})
@@ -211,7 +211,7 @@ func TestGamesCallToolFailsFastAndStatusTurnsDisconnectedAfterBridgeDrop(t *test
 		Params: map[string]interface{}{
 			"name": "games.call_tool",
 			"arguments": map[string]interface{}{
-				"tool":    "rimworld.rimbridge.core.ping",
+				"tool":    "adventure.corebridge.core.ping",
 				"timeout": 120,
 			},
 		},
@@ -235,7 +235,7 @@ func TestGamesCallToolFailsFastAndStatusTurnsDisconnectedAfterBridgeDrop(t *test
 		Params: map[string]interface{}{
 			"name": "games.status",
 			"arguments": map[string]interface{}{
-				"gameId": "rimworld",
+				"gameId": "adventure",
 			},
 		},
 	})
@@ -266,7 +266,7 @@ func TestGamesCallToolCanInferGameFromQualifiedName(t *testing.T) {
 	serverDone := make(chan error, 1)
 	go serveTestGabpSessionWithToolCalls(listener, bridgeToken, serverDone)
 
-	bridgeDir := filepath.Join(tmpDir, "rimworld")
+	bridgeDir := filepath.Join(tmpDir, "adventure")
 	if err := os.MkdirAll(bridgeDir, 0755); err != nil {
 		t.Fatalf("failed to create bridge dir: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestGamesCallToolCanInferGameFromQualifiedName(t *testing.T) {
 	bridgeData, err := json.MarshalIndent(config.BridgeJSON{
 		Port:   listener.Addr().(*net.TCPAddr).Port,
 		Token:  bridgeToken,
-		GameId: "rimworld",
+		GameId: "adventure",
 	}, "", "  ")
 	if err != nil {
 		t.Fatalf("failed to marshal bridge.json: %v", err)
@@ -286,11 +286,11 @@ func TestGamesCallToolCanInferGameFromQualifiedName(t *testing.T) {
 
 	gamesConfig := &config.GamesConfig{
 		Games: map[string]config.GameConfig{
-			"rimworld": {
-				ID:         "rimworld",
-				Name:       "RimWorld",
+			"adventure": {
+				ID:         "adventure",
+				Name:       "AdventureGame",
 				LaunchMode: "DirectPath",
-				Target:     "/Applications/RimWorldMac.app/Contents/MacOS/RimWorld by Ludeon Studios",
+				Target:     "/Applications/AdventureGameMac.app/Contents/MacOS/AdventureGame by ExampleStudio Studios",
 			},
 		},
 	}
@@ -303,11 +303,11 @@ func TestGamesCallToolCanInferGameFromQualifiedName(t *testing.T) {
 	connectMsg := &Message{
 		JSONRPC: "2.0",
 		Method:  "tools/call",
-		ID:      json.RawMessage(`"reconnect-rimworld-call-tool"`),
+		ID:      json.RawMessage(`"reconnect-adventure-call-tool"`),
 		Params: map[string]interface{}{
 			"name": "games.connect",
 			"arguments": map[string]interface{}{
-				"gameId": "rimworld",
+				"gameId": "adventure",
 			},
 		},
 	}
@@ -322,11 +322,11 @@ func TestGamesCallToolCanInferGameFromQualifiedName(t *testing.T) {
 	callMsg := &Message{
 		JSONRPC: "2.0",
 		Method:  "tools/call",
-		ID:      json.RawMessage(`"call-rimworld-qualified-tool"`),
+		ID:      json.RawMessage(`"call-adventure-qualified-tool"`),
 		Params: map[string]interface{}{
 			"name": "games.call_tool",
 			"arguments": map[string]interface{}{
-				"tool": "rimworld.rimbridge.core.ping",
+				"tool": "adventure.corebridge.core.ping",
 			},
 		},
 	}
@@ -363,7 +363,7 @@ func TestGamesConnectForceTakeoverCanOverrideSharedOwner(t *testing.T) {
 	serverDone := make(chan error, 1)
 	go serveTestGabpSession(listener, bridgeToken, serverDone)
 
-	bridgeDir := filepath.Join(tmpDir, "rimworld")
+	bridgeDir := filepath.Join(tmpDir, "adventure")
 	if err := os.MkdirAll(bridgeDir, 0755); err != nil {
 		t.Fatalf("failed to create bridge dir: %v", err)
 	}
@@ -371,7 +371,7 @@ func TestGamesConnectForceTakeoverCanOverrideSharedOwner(t *testing.T) {
 	bridgeData, err := json.MarshalIndent(config.BridgeJSON{
 		Port:   listener.Addr().(*net.TCPAddr).Port,
 		Token:  bridgeToken,
-		GameId: "rimworld",
+		GameId: "adventure",
 	}, "", "  ")
 	if err != nil {
 		t.Fatalf("failed to marshal bridge.json: %v", err)
@@ -383,11 +383,11 @@ func TestGamesConnectForceTakeoverCanOverrideSharedOwner(t *testing.T) {
 
 	gamesConfig := &config.GamesConfig{
 		Games: map[string]config.GameConfig{
-			"rimworld": {
-				ID:         "rimworld",
-				Name:       "RimWorld",
+			"adventure": {
+				ID:         "adventure",
+				Name:       "AdventureGame",
 				LaunchMode: "DirectPath",
-				Target:     "/Applications/RimWorldMac.app/Contents/MacOS/RimWorld by Ludeon Studios",
+				Target:     "/Applications/AdventureGameMac.app/Contents/MacOS/AdventureGame by ExampleStudio Studios",
 			},
 		},
 	}
@@ -402,7 +402,7 @@ func TestGamesConnectForceTakeoverCanOverrideSharedOwner(t *testing.T) {
 	joinerServer.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, 1*time.Second)
 
 	staleOwner := process.RuntimeState{
-		GameID:          "rimworld",
+		GameID:          "adventure",
 		Status:          process.RuntimeStateStatusRunning,
 		OwnerPID:        os.Getpid(),
 		OwnerInstanceID: ownerServer.instanceID,
@@ -410,18 +410,18 @@ func TestGamesConnectForceTakeoverCanOverrideSharedOwner(t *testing.T) {
 		StopProcessName: "",
 		UpdatedAt:       time.Now().UTC(),
 	}
-	if err := process.ClaimRuntimeState("rimworld", tmpDir, staleOwner); err != nil {
+	if err := process.ClaimRuntimeState("adventure", tmpDir, staleOwner); err != nil {
 		t.Fatalf("failed to write runtime state: %v", err)
 	}
 
 	connectBlocked := &Message{
 		JSONRPC: "2.0",
 		Method:  "tools/call",
-		ID:      json.RawMessage(`"reconnect-rimworld-no-force"`),
+		ID:      json.RawMessage(`"reconnect-adventure-no-force"`),
 		Params: map[string]interface{}{
 			"name": "games.connect",
 			"arguments": map[string]interface{}{
-				"gameId": "rimworld",
+				"gameId": "adventure",
 			},
 		},
 	}
@@ -439,11 +439,11 @@ func TestGamesConnectForceTakeoverCanOverrideSharedOwner(t *testing.T) {
 	connectForced := &Message{
 		JSONRPC: "2.0",
 		Method:  "tools/call",
-		ID:      json.RawMessage(`"reconnect-rimworld-force"`),
+		ID:      json.RawMessage(`"reconnect-adventure-force"`),
 		Params: map[string]interface{}{
 			"name": "games.connect",
 			"arguments": map[string]interface{}{
-				"gameId":        "rimworld",
+				"gameId":        "adventure",
 				"forceTakeover": true,
 			},
 		},
@@ -459,7 +459,7 @@ func TestGamesConnectForceTakeoverCanOverrideSharedOwner(t *testing.T) {
 		t.Fatalf("expected force takeover success message, got: %s", forcedText)
 	}
 
-	runtimeState, err := process.LoadRuntimeState("rimworld", tmpDir)
+	runtimeState, err := process.LoadRuntimeState("adventure", tmpDir)
 	if err != nil {
 		t.Fatalf("failed to load runtime state: %v", err)
 	}
@@ -493,7 +493,7 @@ func TestGamesCallToolBlocksUntilAttentionIsAcknowledged(t *testing.T) {
 	serverDone := make(chan error, 1)
 	go serveTestGabpSessionWithAttention(listener, bridgeToken, &forwardedToolCalls, serverDone)
 
-	bridgeDir := filepath.Join(tmpDir, "rimworld")
+	bridgeDir := filepath.Join(tmpDir, "adventure")
 	if err := os.MkdirAll(bridgeDir, 0755); err != nil {
 		t.Fatalf("failed to create bridge dir: %v", err)
 	}
@@ -501,7 +501,7 @@ func TestGamesCallToolBlocksUntilAttentionIsAcknowledged(t *testing.T) {
 	bridgeData, err := json.MarshalIndent(config.BridgeJSON{
 		Port:   listener.Addr().(*net.TCPAddr).Port,
 		Token:  bridgeToken,
-		GameId: "rimworld",
+		GameId: "adventure",
 	}, "", "  ")
 	if err != nil {
 		t.Fatalf("failed to marshal bridge.json: %v", err)
@@ -512,11 +512,11 @@ func TestGamesCallToolBlocksUntilAttentionIsAcknowledged(t *testing.T) {
 
 	gamesConfig := &config.GamesConfig{
 		Games: map[string]config.GameConfig{
-			"rimworld": {
-				ID:         "rimworld",
-				Name:       "RimWorld",
+			"adventure": {
+				ID:         "adventure",
+				Name:       "AdventureGame",
 				LaunchMode: "DirectPath",
-				Target:     "/Applications/RimWorldMac.app/Contents/MacOS/RimWorld by Ludeon Studios",
+				Target:     "/Applications/AdventureGameMac.app/Contents/MacOS/AdventureGame by ExampleStudio Studios",
 			},
 		},
 	}
@@ -525,7 +525,7 @@ func TestGamesCallToolBlocksUntilAttentionIsAcknowledged(t *testing.T) {
 	server := NewServerForTesting(log)
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
-	defer server.CleanupGABPConnection("rimworld")
+	defer server.CleanupGABPConnection("adventure")
 
 	connectText := marshalMessage(t, server.HandleMessage(&Message{
 		JSONRPC: "2.0",
@@ -534,7 +534,7 @@ func TestGamesCallToolBlocksUntilAttentionIsAcknowledged(t *testing.T) {
 		Params: map[string]interface{}{
 			"name": "games.connect",
 			"arguments": map[string]interface{}{
-				"gameId": "rimworld",
+				"gameId": "adventure",
 			},
 		},
 	}))
@@ -549,7 +549,7 @@ func TestGamesCallToolBlocksUntilAttentionIsAcknowledged(t *testing.T) {
 		Params: map[string]interface{}{
 			"name": "games.get_attention",
 			"arguments": map[string]interface{}{
-				"gameId": "rimworld",
+				"gameId": "adventure",
 			},
 		},
 	}))
@@ -564,8 +564,8 @@ func TestGamesCallToolBlocksUntilAttentionIsAcknowledged(t *testing.T) {
 		Params: map[string]interface{}{
 			"name": "games.call_tool",
 			"arguments": map[string]interface{}{
-				"gameId": "rimworld",
-				"tool":   "rimworld.rimbridge.core.ping",
+				"gameId": "adventure",
+				"tool":   "adventure.gameplay.apply_action",
 			},
 		},
 	}))
@@ -583,7 +583,7 @@ func TestGamesCallToolBlocksUntilAttentionIsAcknowledged(t *testing.T) {
 		Params: map[string]interface{}{
 			"name": "games.ack_attention",
 			"arguments": map[string]interface{}{
-				"gameId":      "rimworld",
+				"gameId":      "adventure",
 				"attentionId": "attn_42",
 			},
 		},
@@ -599,8 +599,8 @@ func TestGamesCallToolBlocksUntilAttentionIsAcknowledged(t *testing.T) {
 		Params: map[string]interface{}{
 			"name": "games.call_tool",
 			"arguments": map[string]interface{}{
-				"gameId": "rimworld",
-				"tool":   "rimworld.rimbridge.core.ping",
+				"gameId": "adventure",
+				"tool":   "adventure.gameplay.apply_action",
 			},
 		},
 	}))
@@ -612,7 +612,7 @@ func TestGamesCallToolBlocksUntilAttentionIsAcknowledged(t *testing.T) {
 		t.Fatalf("expected exactly one forwarded tool call after acknowledgement, got %d", got)
 	}
 
-	server.CleanupGABPConnection("rimworld")
+	server.CleanupGABPConnection("adventure")
 	if err := <-serverDone; err != nil && !isExpectedTestConnectionClose(err) {
 		t.Fatalf("test GABP server failed: %v", err)
 	}
@@ -636,7 +636,7 @@ func TestMirroredToolCallBlocksWhileAttentionIsOpen(t *testing.T) {
 	serverDone := make(chan error, 1)
 	go serveTestGabpSessionWithAttention(listener, bridgeToken, &forwardedToolCalls, serverDone)
 
-	bridgeDir := filepath.Join(tmpDir, "rimworld")
+	bridgeDir := filepath.Join(tmpDir, "adventure")
 	if err := os.MkdirAll(bridgeDir, 0755); err != nil {
 		t.Fatalf("failed to create bridge dir: %v", err)
 	}
@@ -644,7 +644,7 @@ func TestMirroredToolCallBlocksWhileAttentionIsOpen(t *testing.T) {
 	bridgeData, err := json.MarshalIndent(config.BridgeJSON{
 		Port:   listener.Addr().(*net.TCPAddr).Port,
 		Token:  bridgeToken,
-		GameId: "rimworld",
+		GameId: "adventure",
 	}, "", "  ")
 	if err != nil {
 		t.Fatalf("failed to marshal bridge.json: %v", err)
@@ -655,11 +655,11 @@ func TestMirroredToolCallBlocksWhileAttentionIsOpen(t *testing.T) {
 
 	gamesConfig := &config.GamesConfig{
 		Games: map[string]config.GameConfig{
-			"rimworld": {
-				ID:         "rimworld",
-				Name:       "RimWorld",
+			"adventure": {
+				ID:         "adventure",
+				Name:       "AdventureGame",
 				LaunchMode: "DirectPath",
-				Target:     "/Applications/RimWorldMac.app/Contents/MacOS/RimWorld by Ludeon Studios",
+				Target:     "/Applications/AdventureGameMac.app/Contents/MacOS/AdventureGame by ExampleStudio Studios",
 			},
 		},
 	}
@@ -668,7 +668,7 @@ func TestMirroredToolCallBlocksWhileAttentionIsOpen(t *testing.T) {
 	server := NewServerForTesting(log)
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
-	defer server.CleanupGABPConnection("rimworld")
+	defer server.CleanupGABPConnection("adventure")
 
 	connectText := marshalMessage(t, server.HandleMessage(&Message{
 		JSONRPC: "2.0",
@@ -677,7 +677,7 @@ func TestMirroredToolCallBlocksWhileAttentionIsOpen(t *testing.T) {
 		Params: map[string]interface{}{
 			"name": "games.connect",
 			"arguments": map[string]interface{}{
-				"gameId": "rimworld",
+				"gameId": "adventure",
 			},
 		},
 	}))
@@ -690,7 +690,7 @@ func TestMirroredToolCallBlocksWhileAttentionIsOpen(t *testing.T) {
 		Method:  "tools/call",
 		ID:      json.RawMessage(`"mirrored-blocked"`),
 		Params: map[string]interface{}{
-			"name":      "rimworld.rimbridge.core.ping",
+			"name":      "adventure_gameplay_apply_action",
 			"arguments": map[string]interface{}{},
 		},
 	}))
@@ -701,7 +701,7 @@ func TestMirroredToolCallBlocksWhileAttentionIsOpen(t *testing.T) {
 		t.Fatalf("expected mirrored tool call to be blocked before forwarding, got %d forwarded calls", got)
 	}
 
-	server.CleanupGABPConnection("rimworld")
+	server.CleanupGABPConnection("adventure")
 	if err := <-serverDone; err != nil && !isExpectedTestConnectionClose(err) {
 		t.Fatalf("test GABP server failed: %v", err)
 	}
@@ -725,7 +725,7 @@ func TestDiagnosticsToolCanBypassAttentionGate(t *testing.T) {
 	serverDone := make(chan error, 1)
 	go serveTestGabpSessionWithAttention(listener, bridgeToken, &forwardedToolCalls, serverDone)
 
-	bridgeDir := filepath.Join(tmpDir, "rimworld")
+	bridgeDir := filepath.Join(tmpDir, "adventure")
 	if err := os.MkdirAll(bridgeDir, 0755); err != nil {
 		t.Fatalf("failed to create bridge dir: %v", err)
 	}
@@ -733,7 +733,7 @@ func TestDiagnosticsToolCanBypassAttentionGate(t *testing.T) {
 	bridgeData, err := json.MarshalIndent(config.BridgeJSON{
 		Port:   listener.Addr().(*net.TCPAddr).Port,
 		Token:  bridgeToken,
-		GameId: "rimworld",
+		GameId: "adventure",
 	}, "", "  ")
 	if err != nil {
 		t.Fatalf("failed to marshal bridge.json: %v", err)
@@ -744,11 +744,11 @@ func TestDiagnosticsToolCanBypassAttentionGate(t *testing.T) {
 
 	gamesConfig := &config.GamesConfig{
 		Games: map[string]config.GameConfig{
-			"rimworld": {
-				ID:         "rimworld",
-				Name:       "RimWorld",
+			"adventure": {
+				ID:         "adventure",
+				Name:       "AdventureGame",
 				LaunchMode: "DirectPath",
-				Target:     "/Applications/RimWorldMac.app/Contents/MacOS/RimWorld by Ludeon Studios",
+				Target:     "/Applications/AdventureGameMac.app/Contents/MacOS/AdventureGame by ExampleStudio Studios",
 			},
 		},
 	}
@@ -757,7 +757,7 @@ func TestDiagnosticsToolCanBypassAttentionGate(t *testing.T) {
 	server := NewServerForTesting(log)
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
-	defer server.CleanupGABPConnection("rimworld")
+	defer server.CleanupGABPConnection("adventure")
 
 	connectText := marshalMessage(t, server.HandleMessage(&Message{
 		JSONRPC: "2.0",
@@ -766,7 +766,7 @@ func TestDiagnosticsToolCanBypassAttentionGate(t *testing.T) {
 		Params: map[string]interface{}{
 			"name": "games.connect",
 			"arguments": map[string]interface{}{
-				"gameId": "rimworld",
+				"gameId": "adventure",
 			},
 		},
 	}))
@@ -781,12 +781,15 @@ func TestDiagnosticsToolCanBypassAttentionGate(t *testing.T) {
 		Params: map[string]interface{}{
 			"name": "games.tools",
 			"arguments": map[string]interface{}{
-				"gameId": "rimworld",
+				"gameId": "adventure",
 			},
 		},
 	}))
 	if !strings.Contains(toolsText, "list_logs") {
 		t.Fatalf("expected diagnostics tool to be mirrored after connect, got: %s", toolsText)
+	}
+	if !strings.Contains(toolsText, `"diagnostic"`) || !strings.Contains(toolsText, `"read-only"`) {
+		t.Fatalf("expected diagnostic tags to be surfaced in tool discovery, got: %s", toolsText)
 	}
 
 	cases := []struct {
@@ -796,13 +799,13 @@ func TestDiagnosticsToolCanBypassAttentionGate(t *testing.T) {
 	}{
 		{
 			id:       "diagnostics-bypass",
-			tool:     "rimbridge.list_logs",
+			tool:     "corebridge.list_logs",
 			wantText: `"logs":[]`,
 		},
 		{
 			id:       "long-event-wait-bypass",
-			tool:     "rimbridge.wait_for_long_event_idle",
-			wantText: `"message":"RimWorld is idle."`,
+			tool:     "corebridge.wait_for_long_event_idle",
+			wantText: `"message":"AdventureGame is idle."`,
 		},
 	}
 
@@ -814,7 +817,7 @@ func TestDiagnosticsToolCanBypassAttentionGate(t *testing.T) {
 			Params: map[string]interface{}{
 				"name": "games.call_tool",
 				"arguments": map[string]interface{}{
-					"gameId": "rimworld",
+					"gameId": "adventure",
 					"tool":   tc.tool,
 				},
 			},
@@ -831,7 +834,7 @@ func TestDiagnosticsToolCanBypassAttentionGate(t *testing.T) {
 		t.Fatalf("expected %d forwarded diagnostics tool calls, got %d", len(cases), got)
 	}
 
-	server.CleanupGABPConnection("rimworld")
+	server.CleanupGABPConnection("adventure")
 }
 
 func serveTestGabpSession(listener net.Listener, expectedToken string, done chan<- error) {
@@ -871,9 +874,9 @@ func serveTestGabpSession(listener net.Listener, expectedToken string, done chan
 			}
 
 			response := util.NewGABPResponse(request.ID, gabp.SessionWelcomeResult{
-				AgentID: "rimworld",
+				AgentID: "adventure",
 				App: gabp.AppInfo{
-					Name:    "RimBridgeServer",
+					Name:    "ExampleGameBridge",
 					Version: "0.1.0",
 				},
 				Capabilities: gabp.Capabilities{
@@ -891,7 +894,7 @@ func serveTestGabpSession(listener net.Listener, expectedToken string, done chan
 			response := util.NewGABPResponse(request.ID, map[string]interface{}{
 				"tools": []map[string]interface{}{
 					{
-						"name":        "rimbridge.core/ping",
+						"name":        "corebridge.core/ping",
 						"description": "Connectivity test",
 						"inputSchema": map[string]interface{}{
 							"type":       "object",
@@ -967,9 +970,9 @@ func serveTestGabpSessionWithToolCalls(listener net.Listener, expectedToken stri
 			}
 
 			response := util.NewGABPResponse(request.ID, gabp.SessionWelcomeResult{
-				AgentID: "rimworld",
+				AgentID: "adventure",
 				App: gabp.AppInfo{
-					Name:    "RimBridgeServer",
+					Name:    "ExampleGameBridge",
 					Version: "0.1.0",
 				},
 				Capabilities: gabp.Capabilities{
@@ -987,7 +990,7 @@ func serveTestGabpSessionWithToolCalls(listener net.Listener, expectedToken stri
 			response := util.NewGABPResponse(request.ID, map[string]interface{}{
 				"tools": []map[string]interface{}{
 					{
-						"name":        "rimbridge.core/ping",
+						"name":        "corebridge.core/ping",
 						"description": "Connectivity test",
 						"inputSchema": map[string]interface{}{
 							"type":       "object",
@@ -1009,7 +1012,7 @@ func serveTestGabpSessionWithToolCalls(listener net.Listener, expectedToken stri
 				return
 			}
 			if requestParams, ok := request.Params.(map[string]interface{}); ok {
-				if name, _ := requestParams["name"].(string); name != "rimbridge/core/ping" {
+				if name, _ := requestParams["name"].(string); name != "corebridge/core/ping" {
 					done <- fmt.Errorf("unexpected tools/call target: %q", name)
 					return
 				}
@@ -1068,9 +1071,9 @@ func serveTestGabpSessionDisconnectOnToolCall(listener net.Listener, expectedTok
 			}
 
 			response := util.NewGABPResponse(request.ID, gabp.SessionWelcomeResult{
-				AgentID: "rimworld",
+				AgentID: "adventure",
 				App: gabp.AppInfo{
-					Name:    "RimBridgeServer",
+					Name:    "ExampleGameBridge",
 					Version: "0.1.0",
 				},
 				Capabilities: gabp.Capabilities{
@@ -1088,7 +1091,7 @@ func serveTestGabpSessionDisconnectOnToolCall(listener net.Listener, expectedTok
 			response := util.NewGABPResponse(request.ID, map[string]interface{}{
 				"tools": []map[string]interface{}{
 					{
-						"name":        "rimbridge.core/ping",
+						"name":        "corebridge.core/ping",
 						"description": "Connectivity test",
 						"inputSchema": map[string]interface{}{
 							"type":       "object",
@@ -1184,9 +1187,9 @@ func serveTestGabpSessionWithAttention(listener net.Listener, expectedToken stri
 			}
 
 			response := util.NewGABPResponse(request.ID, gabp.SessionWelcomeResult{
-				AgentID: "rimworld",
+				AgentID: "adventure",
 				App: gabp.AppInfo{
-					Name:    "RimBridgeServer",
+					Name:    "ExampleGameBridge",
 					Version: "0.1.0",
 				},
 				Capabilities: gabp.Capabilities{
@@ -1213,7 +1216,7 @@ func serveTestGabpSessionWithAttention(listener net.Listener, expectedToken stri
 			response := util.NewGABPResponse(request.ID, map[string]interface{}{
 				"tools": []map[string]interface{}{
 					{
-						"name":        "rimbridge.core/ping",
+						"name":        "corebridge.core/ping",
 						"description": "Connectivity test",
 						"inputSchema": map[string]interface{}{
 							"type":       "object",
@@ -1224,8 +1227,8 @@ func serveTestGabpSessionWithAttention(listener net.Listener, expectedToken stri
 						},
 					},
 					{
-						"name":        "rimbridge/list_logs",
-						"description": "Diagnostics log listing",
+						"name":        "gameplay/apply_action",
+						"description": "Apply a game action",
 						"inputSchema": map[string]interface{}{
 							"type":       "object",
 							"properties": map[string]interface{}{},
@@ -1235,8 +1238,21 @@ func serveTestGabpSessionWithAttention(listener net.Listener, expectedToken stri
 						},
 					},
 					{
-						"name":        "rimbridge/wait_for_long_event_idle",
+						"name":        "corebridge/list_logs",
+						"description": "Diagnostics log listing",
+						"tags":        []string{"diagnostic", "read-only"},
+						"inputSchema": map[string]interface{}{
+							"type":       "object",
+							"properties": map[string]interface{}{},
+						},
+						"outputSchema": map[string]interface{}{
+							"type": "object",
+						},
+					},
+					{
+						"name":        "corebridge/wait_for_long_event_idle",
 						"description": "Wait for long events to finish",
+						"tags":        []string{"lifecycle", "read-only"},
 						"inputSchema": map[string]interface{}{
 							"type":       "object",
 							"properties": map[string]interface{}{},
@@ -1303,12 +1319,12 @@ func serveTestGabpSessionWithAttention(listener net.Listener, expectedToken stri
 			}
 		case "tools/call":
 			if requestParams, ok := request.Params.(map[string]interface{}); ok {
-				if name, _ := requestParams["name"].(string); name != "rimbridge/core/ping" && name != "rimbridge/list_logs" && name != "rimbridge/wait_for_long_event_idle" {
+				if name, _ := requestParams["name"].(string); name != "corebridge/core/ping" && name != "gameplay/apply_action" && name != "corebridge/list_logs" && name != "corebridge/wait_for_long_event_idle" {
 					done <- fmt.Errorf("unexpected tools/call target: %q", name)
 					return
 				}
 
-				if name, _ := requestParams["name"].(string); name == "rimbridge/list_logs" {
+				if name, _ := requestParams["name"].(string); name == "corebridge/list_logs" {
 					atomic.AddInt32(forwardedToolCalls, 1)
 					response := util.NewGABPResponse(request.ID, map[string]interface{}{
 						"logs": []map[string]interface{}{},
@@ -1320,11 +1336,11 @@ func serveTestGabpSessionWithAttention(listener net.Listener, expectedToken stri
 					continue
 				}
 
-				if name, _ := requestParams["name"].(string); name == "rimbridge/wait_for_long_event_idle" {
+				if name, _ := requestParams["name"].(string); name == "corebridge/wait_for_long_event_idle" {
 					atomic.AddInt32(forwardedToolCalls, 1)
 					response := util.NewGABPResponse(request.ID, map[string]interface{}{
 						"success": true,
-						"message": "RimWorld is idle.",
+						"message": "AdventureGame is idle.",
 					})
 					if err := writer.WriteJSON(response); err != nil {
 						done <- err

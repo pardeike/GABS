@@ -26,31 +26,31 @@
     }
   },
   "games": {
-    "minecraft": {
-      "id": "minecraft",
-      "name": "Minecraft Server",
+    "factory": {
+      "id": "factory",
+      "name": "Example Game",
       "launchMode": "DirectPath",
-      "target": "/path/to/minecraft/server.jar",
-      "workingDir": "/path/to/minecraft",
+      "target": "/path/to/factory/server.jar",
+      "workingDir": "/path/to/factory",
       "args": ["-Xmx4G", "-Xms2G", "-jar", "server.jar", "nogui"],
-      "description": "Minecraft server with GABP mod for AI control"
+      "description": "FactorySim server with GABP bridge for AI control"
     },
-    "rimworld": {
-      "id": "rimworld",
-      "name": "RimWorld",
+    "adventure": {
+      "id": "adventure",
+      "name": "AdventureGame",
       "launchMode": "SteamAppId",
-      "target": "294100",
-      "stopProcessName": "RimWorldWin64.exe",
-      "description": "RimWorld colony simulation via Steam with GABP mod"
+      "target": "123456",
+      "stopProcessName": "GameName.exe",
+      "description": "AdventureGame sample via Steam with GABP bridge"
     },
-    "valheim": {
-      "id": "valheim",
-      "name": "Valheim Dedicated Server",
+    "adventurearena": {
+      "id": "adventurearena",
+      "name": "AdventureArena Dedicated Server",
       "launchMode": "CustomCommand",
-      "target": "valheim_server.exe -nographics -batchmode -name \"My GABS Server\" -port 2456 -world \"Dedicated\" -password \"mypassword\"",
-      "workingDir": "/path/to/valheim/server",
-      "stopProcessName": "valheim_server.exe",
-      "description": "Valheim dedicated server with custom launch parameters"
+      "target": "adventurearena_server.exe -nographics -batchmode -name \"My GABS Server\" -port 2456 -world \"Dedicated\" -password \"mypassword\"",
+      "workingDir": "/path/to/adventurearena/server",
+      "stopProcessName": "adventurearena_server.exe",
+      "description": "AdventureArena dedicated server with custom launch parameters"
     }
   }
 }

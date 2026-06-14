@@ -347,6 +347,7 @@ type ToolDescriptorRaw struct {
 	Parameters   []ToolParameter        `json:"parameters,omitempty"`
 	OutputSchema map[string]interface{} `json:"outputSchema,omitempty"`
 	RequiresAuth bool                   `json:"requiresAuth,omitempty"`
+	Tags         []string               `json:"tags,omitempty"`
 }
 
 // ToolDescriptor is the normalized format for MCP
@@ -377,6 +378,7 @@ func convertToToolDescriptor(raw ToolDescriptorRaw) ToolDescriptor {
 		Description:  raw.Description,
 		InputSchema:  inputSchema,
 		OutputSchema: raw.OutputSchema,
+		Tags:         raw.Tags,
 	}
 }
 

@@ -66,10 +66,10 @@ func TestToolNamePatternCompliance(t *testing.T) {
 
 	// Register some game-specific tools (simulates what Mirror would register)
 	gameSpecificTools := []Tool{
-		{Name: "minecraft.inventory.get", Description: "Test tool"},
-		{Name: "minecraft.world.place_block", Description: "Test tool"},
-		{Name: "rimworld.inventory.get", Description: "Test tool"},
-		{Name: "rimworld.crafting.build", Description: "Test tool"},
+		{Name: "factory.inventory.get", Description: "Test tool"},
+		{Name: "factory.world.place_block", Description: "Test tool"},
+		{Name: "adventure.inventory.get", Description: "Test tool"},
+		{Name: "adventure.crafting.build", Description: "Test tool"},
 		{Name: "mymod.complex.tool.name.123", Description: "Test tool"},
 		{Name: "game-with-hyphens.tool-name", Description: "Test tool"},
 	}

@@ -20,9 +20,9 @@
   <rect x="220" y="70" width="120" height="60" class="box"/>
   <text x="280" y="100" class="text">GABS</text>
 
-  <!-- Game Mod -->
+  <!-- Game Bridge -->
   <rect x="420" y="70" width="120" height="60" class="box"/>
-  <text x="480" y="100" class="text">Game Mod</text>
+  <text x="480" y="100" class="text">Game Bridge</text>
 
   <!-- Your Game -->
   <rect x="620" y="70" width="120" height="60" class="box"/>

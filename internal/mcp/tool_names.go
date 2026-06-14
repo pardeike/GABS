@@ -12,6 +12,7 @@ const (
 	toolMetaQualifiedGABPName = "qualifiedGABPName"
 	toolMetaLegacyName        = "legacyName"
 	toolMetaAliases           = "aliases"
+	toolMetaTags              = "tags"
 )
 
 type gameToolAlias struct {

@@ -22,15 +22,15 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 
 	configPath := filepath.Join(tempDir, "config.json")
 
-	// Create config with RimWorld game - this mirrors the README example
+	// Create config with AdventureGame game - this mirrors the README example
 	gamesConfig := &config.GamesConfig{
 		Version: "1.0",
 		Games: map[string]config.GameConfig{
-			"rimworld": {
-				ID:         "rimworld",
-				Name:       "RimWorld",
+			"adventure": {
+				ID:         "adventure",
+				Name:       "AdventureGame",
 				LaunchMode: "SteamAppId",
-				Target:     "294100", // This is what AI sees and tries to use as gameId
+				Target:     "123456", // This is what AI sees and tries to use as gameId
 			},
 		},
 	}
@@ -73,12 +73,12 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 		t.Logf("games.list output: %s", responseStr)
 
 		// The output should only contain the game ID
-		if !strings.Contains(responseStr, "rimworld") {
-			t.Error("Expected to see game ID 'rimworld' in output")
+		if !strings.Contains(responseStr, "adventure") {
+			t.Error("Expected to see game ID 'adventure' in output")
 		}
 		// Should NOT contain verbose details like Steam App ID or launch mode
-		if strings.Contains(responseStr, "294100") {
-			t.Error("Output should not contain Steam App ID '294100' - should be simplified")
+		if strings.Contains(responseStr, "123456") {
+			t.Error("Output should not contain Steam App ID '123456' - should be simplified")
 		}
 		if strings.Contains(responseStr, "SteamAppId") {
 			t.Error("Output should not contain launch mode details - should be simplified")
@@ -94,7 +94,7 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 			Params: map[string]interface{}{
 				"name": "games.show",
 				"arguments": map[string]interface{}{
-					"gameId": "rimworld",
+					"gameId": "adventure",
 				},
 			},
 		}
@@ -110,8 +110,8 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 		t.Logf("games.show output: %s", responseStr)
 
 		// The output should contain the game ID and all configuration details
-		if !strings.Contains(responseStr, "rimworld") {
-			t.Error("Expected to see game ID 'rimworld' in output")
+		if !strings.Contains(responseStr, "adventure") {
+			t.Error("Expected to see game ID 'adventure' in output")
 		}
 		// Should contain validation warnings for games missing stopProcessName
 		if !strings.Contains(responseStr, "Missing stopProcessName") {
@@ -122,8 +122,8 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 			t.Error("Expected launch mode to be shown for context")
 		}
 		// Should show Steam App ID in detailed view
-		if !strings.Contains(responseStr, "294100") {
-			t.Error("Expected Steam App ID '294100' to be shown in detailed view")
+		if !strings.Contains(responseStr, "123456") {
+			t.Error("Expected Steam App ID '123456' to be shown in detailed view")
 		}
 	})
 
@@ -136,7 +136,7 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 			Params: map[string]interface{}{
 				"name": "games.start",
 				"arguments": map[string]interface{}{
-					"gameId": "rimworld",
+					"gameId": "adventure",
 				},
 			},
 		}
@@ -149,11 +149,11 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 		// Should not be an error (though may fail to actually start due to no Steam)
 		respBytes, _ := json.Marshal(response)
 		responseStr := string(respBytes)
-		t.Logf("games.start with 'rimworld': %s", responseStr)
+		t.Logf("games.start with 'adventure': %s", responseStr)
 
 		// Should find the game configuration (even if process start fails)
 		if strings.Contains(responseStr, "game not found") || strings.Contains(responseStr, "configuration not found") {
-			t.Error("Should find game 'rimworld'")
+			t.Error("Should find game 'adventure'")
 		}
 	})
 
@@ -166,7 +166,7 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 			Params: map[string]interface{}{
 				"name": "games.start",
 				"arguments": map[string]interface{}{
-					"gameId": "294100", // AI tries this after seeing it in games.list
+					"gameId": "123456", // AI tries this after seeing it in games.list
 				},
 			},
 		}
@@ -178,7 +178,7 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 
 		respBytes, _ := json.Marshal(response)
 		responseStr := string(respBytes)
-		t.Logf("games.start with '294100': %s", responseStr)
+		t.Logf("games.start with '123456': %s", responseStr)
 
 		// After our fix, both the game ID and Steam App ID should work
 		// The command should resolve the Steam App ID to the actual game
@@ -187,7 +187,7 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 		}
 
 		// Should either succeed or fail with game-specific error (not configuration not found)
-		if strings.Contains(responseStr, "294100") && !strings.Contains(responseStr, "game not found") {
+		if strings.Contains(responseStr, "123456") && !strings.Contains(responseStr, "game not found") {
 			t.Log("Steam App ID successfully resolved - this is the fix!")
 		}
 	})
@@ -195,12 +195,12 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 
 func TestGameValidationWarningsForLauncherArgs(t *testing.T) {
 	steamGame := config.GameConfig{
-		ID:              "rimworld",
-		Name:            "RimWorld",
+		ID:              "adventure",
+		Name:            "AdventureGame",
 		LaunchMode:      "SteamAppId",
-		Target:          "294100",
-		Args:            []string{"-savedatafolder=/tmp/rimworld-test"},
-		StopProcessName: "RimWorldWin64.exe",
+		Target:          "123456",
+		Args:            []string{"-savedatafolder=/tmp/adventure-test"},
+		StopProcessName: "GameName.exe",
 	}
 
 	warnings := gameValidationWarnings(steamGame)
@@ -216,7 +216,7 @@ func TestGameValidationWarningsForLauncherArgs(t *testing.T) {
 
 	directGame := steamGame
 	directGame.LaunchMode = "DirectPath"
-	directGame.Target = "/games/RimWorld/RimWorldWin64.exe"
+	directGame.Target = "/games/AdventureGame/GameName.exe"
 	if warnings := gameValidationWarnings(directGame); len(warnings) != 0 {
 		t.Fatalf("direct launch args should not warn, got %#v", warnings)
 	}
@@ -237,17 +237,17 @@ func TestGameIdResolution(t *testing.T) {
 	gamesConfig := &config.GamesConfig{
 		Version: "1.0",
 		Games: map[string]config.GameConfig{
-			"minecraft": {
-				ID:         "minecraft",
-				Name:       "Minecraft Server",
+			"factory": {
+				ID:         "factory",
+				Name:       "Example Game",
 				LaunchMode: "DirectPath",
-				Target:     "/opt/minecraft/start.sh",
+				Target:     "/opt/factory/start.sh",
 			},
-			"rimworld": {
-				ID:         "rimworld",
-				Name:       "RimWorld",
+			"adventure": {
+				ID:         "adventure",
+				Name:       "AdventureGame",
 				LaunchMode: "SteamAppId",
-				Target:     "294100",
+				Target:     "123456",
 			},
 		},
 	}
@@ -275,20 +275,20 @@ func TestGameIdResolution(t *testing.T) {
 	}{
 		{
 			name:           "DirectGameId",
-			gameIdInput:    "rimworld",
-			expectedGameId: "rimworld",
+			gameIdInput:    "adventure",
+			expectedGameId: "adventure",
 			shouldFind:     true,
 		},
 		{
 			name:           "SteamAppIdResolution",
-			gameIdInput:    "294100",
-			expectedGameId: "rimworld",
+			gameIdInput:    "123456",
+			expectedGameId: "adventure",
 			shouldFind:     true,
 		},
 		{
 			name:           "DirectPathResolution",
-			gameIdInput:    "/opt/minecraft/start.sh",
-			expectedGameId: "minecraft",
+			gameIdInput:    "/opt/factory/start.sh",
+			expectedGameId: "factory",
 			shouldFind:     true,
 		},
 		{

@@ -15,7 +15,7 @@ Several AI clients have strict requirements for tool names:
   protocol-specific layer
 
 This causes issues when MCP tools with dotted names such as
-`minecraft.inventory.get` or GABP names such as `inventory/get` are advertised
+`factory.inventory.get` or GABP names such as `inventory/get` are advertised
 directly to those clients.
 
 ## Solution
@@ -60,9 +60,9 @@ With normalization enabled:
 
 | Original MCP Name | Normalized Name | OpenAI Valid |
 |-------------------|-----------------|--------------|
-| `minecraft.inventory.get` | `minecraft_inventory_get` | ✅ |
-| `rimworld.crafting.build` | `rimworld_crafting_build` | ✅ |
-| `rimworld/rimbridge/ping` | `rimworld_rimbridge_ping` | ✅ |
+| `factory.inventory.get` | `factory_inventory_get` | ✅ |
+| `adventure.crafting.build` | `adventure_crafting_build` | ✅ |
+| `adventure/core/ping` | `adventure_core_ping` | ✅ |
 | `game.player@stats#get!` | `game_player_stats_get` | ✅ |
 | `very.long.tool.name.that.exceeds.limit` | `very_long_tool_name_that_exceeds` | ✅ |
 | `123.invalid.start` | `tool_123_invalid_start` | ✅ |
@@ -72,10 +72,10 @@ With normalization enabled:
 When normalization is applied and `preserveOriginalName` is enabled:
 
 1. **Metadata**: Original name stored in `_meta.originalName`
-2. **Description**: Original name appended to description (e.g., "Get inventory items (Original: minecraft.inventory.get)")
+2. **Description**: Original name appended to description (e.g., "Get inventory items (Original: factory.inventory.get)")
 
 Mirrored game tools also include their canonical GABP name in metadata as
-`_meta.gabpName`, for example `rimbridge/ping`.
+`_meta.gabpName`, for example `core/ping`.
 
 ## Backward Compatibility
 
@@ -90,7 +90,7 @@ Mirrored game tools also include their canonical GABP name in metadata as
 
 The normalization process:
 
-1. **Replace unsafe separators** with underscores: `minecraft.inventory.get` -> `minecraft_inventory_get`
+1. **Replace unsafe separators** with underscores: `factory.inventory.get` -> `factory_inventory_get`
 2. **Clean special characters**: Replace invalid characters with underscores
 3. **Remove consecutive underscores**: `tool___name` → `tool_name`
 4. **Trim underscores**: Remove leading/trailing underscores
@@ -103,7 +103,7 @@ The normalization process:
 GABS automatically detects when normalization might be needed and logs the transformations:
 
 ```
-DEBUG normalized tool name for OpenAI compatibility original=minecraft.inventory.get normalized=minecraft_inventory_get
+DEBUG normalized tool name for OpenAI compatibility original=factory.inventory.get normalized=factory_inventory_get
 ```
 
 This helps with debugging and understanding what transformations are being applied.

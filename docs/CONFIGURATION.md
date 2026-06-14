@@ -8,7 +8,7 @@ fields mean.
 For most users, this is the only command you need:
 
 ```bash
-gabs games add minecraft
+gabs games add factory
 ```
 
 GABS will ask a few questions and save the result to your local config file.
@@ -18,13 +18,13 @@ GABS will ask a few questions and save the result to your local config file.
 When you run `gabs games add <game-id>`, GABS asks for:
 
 ### 1. Game Name
-A friendly label such as `Minecraft Server` or `RimWorld`.
+A friendly label such as `Example Game` or `AdventureGame`.
 
 ### 2. Launch Mode
 How GABS should start the game:
 
 - **DirectPath**: a local executable or script
-- **SteamAppId**: a Steam App ID such as `294100` for RimWorld
+- **SteamAppId**: a Steam App ID such as `123456` for AdventureGame
 - **EpicAppId**: Use Epic Games Store ID
 - **CustomCommand**: Use a custom command with arguments
 
@@ -32,7 +32,7 @@ How GABS should start the game:
 The executable path, App ID, or command for the selected launch mode:
 
 - For DirectPath: `/path/to/game.exe`
-- For Steam: `294100` (the App ID)
+- For Steam: `123456` (the App ID)
 - For Epic: The Epic App ID
 - For Custom: Your complete command
 
@@ -46,8 +46,8 @@ This is required for Steam and Epic launch modes. Without it, GABS can launch
 the game but cannot stop the actual game process reliably.
 
 Examples:
-- For RimWorld: `RimWorldWin64.exe` (Windows) or `RimWorld` (Linux/macOS)
-- For Minecraft with Java: `java`
+- For AdventureGame: `GameName.exe` (Windows) or `AdventureGame` (Linux/macOS)
+- For FactorySim with Java: `java`
 - For Unity games: often the game name with `.exe` extension
 
 ### 6. Save and verify
@@ -56,33 +56,37 @@ After setup, verify the saved config:
 
 ```bash
 gabs games list
-gabs games show minecraft
+gabs games show factory
 ```
 
 ## What Most Users Need To Know
 
 - GABS stores your games in `~/.gabs/config.json`
 - GABS starts games using the launch data you entered above
-- If the game also has a GABP-compatible mod, GABS can connect to that mod and
+- If the game also has a GABP-compatible bridge, GABS can connect to that bridge and
   mirror game-specific tools into MCP
 
-## Optional: How GABS Talks To Your Mod
+## Optional: How GABS Talks To Your Game Bridge
 
 Most users can skip this section.
 
 GABS uses local-only GABP communication for security and simplicity.
 
-When you start a game, GABS passes bridge configuration to the mod through:
+When you start a game, GABS passes bridge configuration to the game-side bridge through:
 
 1. Environment variables: `GABP_SERVER_PORT`, `GABP_TOKEN`, `GABS_GAME_ID`
 2. A bridge file fallback: `~/.gabs/{gameId}/bridge.json`
 
-In the GABP layer, your game mod listens for the connection and GABS connects
+The environment variables are authoritative when present. `bridge.json` is a
+fallback/debug artifact for reconnects and diagnostics; game-side bridge code
+should not let a stale bridge file override fresh `GABP_*` environment values.
+
+In the GABP layer, your game-side bridge listens for the connection and GABS connects
 to it.
 
 GABS also keeps an internal ownership record at `~/.gabs/{gameId}/runtime.json`
 so separate GABS sessions do not accidentally launch or attach to the same game
-at the same time. Mods should ignore `runtime.json`; it is for GABS itself.
+at the same time. Game integrations should ignore `runtime.json`; it is for GABS itself.
 
 ## Managing Your Games
 
@@ -94,13 +98,13 @@ Shows all configured games and their current status.
 
 ### View Game Details
 ```bash
-gabs games show minecraft
+gabs games show factory
 ```
 Shows complete configuration for one game.
 
 ### Remove a Game
 ```bash
-gabs games remove minecraft
+gabs games remove factory
 ```
 Removes the game from your configuration.
 
@@ -129,21 +133,21 @@ the GABP wire version.
     }
   },
   "games": {
-    "minecraft": {
-      "id": "minecraft",
-      "name": "Minecraft Server",
+    "factory": {
+      "id": "factory",
+      "name": "Example Game",
       "launchMode": "DirectPath",
-      "target": "/opt/minecraft/start.sh",
-      "workingDir": "/opt/minecraft",
+      "target": "/opt/factory/start.sh",
+      "workingDir": "/opt/factory",
       "stopProcessName": "java",
-      "description": "Main Minecraft server"
+      "description": "Main FactorySim server"
     },
-    "rimworld": {
-      "id": "rimworld", 
-      "name": "RimWorld",
+    "adventure": {
+      "id": "adventure",
+      "name": "AdventureGame",
       "launchMode": "SteamAppId",
-      "target": "294100",
-      "stopProcessName": "RimWorldWin64.exe"
+      "target": "123456",
+      "stopProcessName": "GameName.exe"
     }
   }
 }
@@ -156,8 +160,8 @@ Best for custom game installs, scripts, and local test setups.
 ```json
 {
   "launchMode": "DirectPath",
-  "target": "/home/user/games/minecraft/start.sh",
-  "workingDir": "/home/user/games/minecraft"
+  "target": "/home/user/games/factory/start.sh",
+  "workingDir": "/home/user/games/factory"
 }
 ```
 
@@ -165,9 +169,9 @@ Best for custom game installs, scripts, and local test setups.
 Best for games installed through Steam.
 ```json
 {
-  "launchMode": "SteamAppId", 
-  "target": "294100",
-  "stopProcessName": "RimWorldWin64.exe"
+  "launchMode": "SteamAppId",
+  "target": "123456",
+  "stopProcessName": "GameName.exe"
 }
 ```
 You can find the App ID in the game's Steam store URL. `stopProcessName` is
@@ -177,6 +181,13 @@ GABS starts Steam games through the platform launcher URL. Configured `args` are
 not passed to the game in this mode. Put launch options such as
 `-savedatafolder=...` in Steam's own launch options, or use `DirectPath` /
 `CustomCommand` when GABS must control the process arguments directly.
+
+In launcher-driven setups, an already-running platform launcher process can
+prevent GABS from proving that new environment variables reached the real game
+process. `games_status` reports this as bridge-state diagnostics, including
+stale launcher environment when the process `GABP_*` values disagree with
+`bridge.json`. For deterministic env and argument control, use `DirectPath` or
+`CustomCommand`.
 
 ### EpicAppId
 Best for games installed through Epic Games Store.
@@ -199,18 +210,18 @@ Best for complex launch setups or special requirements.
 {
   "launchMode": "CustomCommand",
   "target": "java -Xmx4G -jar server.jar --nogui",
-  "workingDir": "/opt/minecraft"
+  "workingDir": "/opt/factory"
 }
 ```
 
 ## GABP Communication Reference
 
-This section is mainly useful if you are writing or debugging a mod bridge.
+This section is mainly useful if you are writing or debugging a game-side bridge.
 
 GABS uses local-only GABP communication.
 
 ### Local Communication (Current Implementation)
-- GABS connects to game mods on localhost (`127.0.0.1`) only
+- GABS connects to game integrations on localhost (`127.0.0.1`) only
 - Each game gets a unique port and token
 - Bridge configuration is also written to `~/.gabs/{gameId}/bridge.json`
 
@@ -221,11 +232,11 @@ When you start a game, GABS creates a bridge configuration file that looks like 
 {
   "port": 49234,
   "token": "a1b2c3d4e5f6...",
-  "gameId": "minecraft"
+  "gameId": "factory"
 }
 ```
 
-Mods can read this file, but environment variables remain the preferred source.
+Game integrations can read this file, but environment variables remain the preferred source.
 
 ## Shared Runtime Ownership
 
@@ -263,8 +274,8 @@ old dotted MCP names in `tools/list`.
 
 **Example transformations:**
 - `games.call_tool` -> `games_call_tool`
-- `minecraft.inventory.get` -> `minecraft_inventory_get`
-- GABP `rimbridge/ping` for game `rimworld` -> `rimworld_rimbridge_ping`
+- `factory.inventory.get` -> `factory_inventory_get`
+- GABP `core/ping` for game `adventure` -> `adventure_core_ping`
 
 Call aliases remain backward compatible: `games_call_tool`, `games.call_tool`,
 qualified slash names, qualified dotted names, and discovered strict-safe names
@@ -314,7 +325,7 @@ tool metadata, including output schema information, remains available through
 ## Startup Timeout Configuration
 
 If your game takes longer to appear in the process list or longer for its GABP
-mod bridge to start listening, you can override the startup waits in
+game-side bridge to start listening, you can override the startup waits in
 `~/.gabs/config.json`.
 
 ### Startup Timeout Options
@@ -326,10 +337,10 @@ The `timeouts.startup` section supports these options:
 - **`gabpConnectSeconds`** (integer): How long `games.start` waits for the
   game's GABP server to become available before returning control to you
   (default: `60`). You can also pass a one-off `timeout` argument to
-  `games_start` for unusually slow mod-heavy launches without changing the
+  `games_start` for unusually slow bridge startup without changing the
   saved configuration.
 
-`games_start` only waits for the GABP handshake. Mirroring the connected mod's
+`games_start` only waits for the GABP handshake. Mirroring the connected bridge's
 full tool list can continue briefly in the background. The public `tools/list`
 response stays stable, and known startup commands can be sent immediately
 through `games_call_tool` while discovery tools refresh.
@@ -371,9 +382,9 @@ The process finding works across platforms:
 
 | Game | Platform | Process Name |
 |------|----------|-------------|
-| RimWorld | Windows | `RimWorldWin64.exe` |
-| RimWorld | macOS/Linux | `RimWorld` |
-| Minecraft (Java) | All | `java` |
+| AdventureGame | Windows | `GameName.exe` |
+| AdventureGame | macOS/Linux | `AdventureGame` |
+| FactorySim (Java) | All | `java` |
 | Unity Games | Windows | `GameName.exe` |
 | Steam Games | All | Check game's install directory |
 
@@ -382,14 +393,14 @@ The process finding works across platforms:
 ```json
 {
   "games": {
-    "rimworld-steam": {
+    "adventure-steam": {
       "launchMode": "SteamAppId",
-      "target": "294100", 
-      "stopProcessName": "RimWorldWin64.exe"
+      "target": "123456",
+      "stopProcessName": "GameName.exe"
     },
-    "minecraft-server": {
+    "factory-server": {
       "launchMode": "DirectPath",
-      "target": "/opt/minecraft/start.sh",
+      "target": "/opt/factory/start.sh",
       "stopProcessName": "java"
     },
     "epic-game": {
@@ -411,11 +422,14 @@ mandatory.
 2. Make sure the game is installed
 3. Try running the launch command manually first
 
-### "Can't connect to game mod"
-1. Make sure your game mod supports GABP
-2. Check that the mod is listening on the right port
-3. Verify the mod is using `GABP_SERVER_PORT`, `GABP_TOKEN`, and `GABS_GAME_ID`
+### "Can't connect to game-side bridge"
+1. Make sure your game-side bridge supports GABP
+2. Check that the game-side bridge is listening on the right port
+3. Verify the game-side bridge is using `GABP_SERVER_PORT`, `GABP_TOKEN`, and `GABS_GAME_ID`
    from the environment or `bridge.json`
+4. Run `games_status` and inspect `diagnostics.code`, `diagnostics.message`,
+   and `nextActions`; it can identify stale runtime state, stale bridge files,
+   passively detected orphan listeners, and launcher environment mismatches.
 
 ### "Configuration not found"
 The config file is created automatically when you add your first game. If it's missing, run `gabs games add` to create a new one.

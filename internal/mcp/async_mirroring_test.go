@@ -23,33 +23,33 @@ func TestDelimitedGABPToolNameCandidates(t *testing.T) {
 		expected  []string
 	}{
 		{
-			name:      "mirrored rimworld tool",
-			gameID:    "rimworld",
-			requested: "rimworld.rimworld.start_debug_game_ready",
-			expected:  []string{"rimworld/rimworld/start_debug_game_ready", "rimworld/start_debug_game_ready"},
+			name:      "mirrored adventure tool",
+			gameID:    "adventure",
+			requested: "adventure.adventure.start_debug_game_ready",
+			expected:  []string{"adventure/adventure/start_debug_game_ready", "adventure/start_debug_game_ready"},
 		},
 		{
-			name:      "local rimworld tool with explicit game",
-			gameID:    "rimworld",
-			requested: "rimworld.start_debug_game_ready",
-			expected:  []string{"rimworld/start_debug_game_ready", "start_debug_game_ready"},
+			name:      "local adventure tool with explicit game",
+			gameID:    "adventure",
+			requested: "adventure.start_debug_game_ready",
+			expected:  []string{"adventure/start_debug_game_ready", "start_debug_game_ready"},
 		},
 		{
 			name:      "plain gabp tool",
-			gameID:    "rimworld",
-			requested: "rimbridge.core.ping",
-			expected:  []string{"rimbridge/core/ping"},
+			gameID:    "adventure",
+			requested: "corebridge.core.ping",
+			expected:  []string{"corebridge/core/ping"},
 		},
 		{
 			name:      "duplicates are removed",
-			gameID:    "rimworld",
-			requested: "rimworld/rimbridge/core/ping",
-			expected:  []string{"rimworld/rimbridge/core/ping", "rimbridge/core/ping"},
+			gameID:    "adventure",
+			requested: "adventure/corebridge/core/ping",
+			expected:  []string{"adventure/corebridge/core/ping", "corebridge/core/ping"},
 		},
 		{
 			name:      "strict-safe tool names are descriptor resolved, not guessed",
-			gameID:    "rimworld",
-			requested: "rimworld_rimbridge_core_ping",
+			gameID:    "adventure",
+			requested: "adventure_corebridge_core_ping",
 			expected:  nil,
 		},
 	}
@@ -72,7 +72,7 @@ func TestAsyncConnectorAllowsGamesCallToolBeforeMirroring(t *testing.T) {
 	defer cancel()
 
 	connectStarted := time.Now()
-	if err := connector.AttemptConnection(ctx, "rimworld", port, bridgeToken); err != nil {
+	if err := connector.AttemptConnection(ctx, "adventure", port, bridgeToken); err != nil {
 		t.Fatalf("expected async connector to connect: %v", err)
 	}
 	if elapsed := time.Since(connectStarted); elapsed > 150*time.Millisecond {
@@ -86,8 +86,8 @@ func TestAsyncConnectorAllowsGamesCallToolBeforeMirroring(t *testing.T) {
 		Params: map[string]interface{}{
 			"name": "games.call_tool",
 			"arguments": map[string]interface{}{
-				"gameId": "rimworld",
-				"tool":   "rimworld.rimbridge.core.ping",
+				"gameId": "adventure",
+				"tool":   "adventure.corebridge.core.ping",
 			},
 		},
 	}))
@@ -103,7 +103,7 @@ func TestGamesToolNamesForcesInitialMirrorSync(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	if err := connector.AttemptConnection(ctx, "rimworld", port, bridgeToken); err != nil {
+	if err := connector.AttemptConnection(ctx, "adventure", port, bridgeToken); err != nil {
 		t.Fatalf("expected async connector to connect: %v", err)
 	}
 
@@ -114,7 +114,7 @@ func TestGamesToolNamesForcesInitialMirrorSync(t *testing.T) {
 		Params: map[string]interface{}{
 			"name": "games.tool_names",
 			"arguments": map[string]interface{}{
-				"gameId": "rimworld",
+				"gameId": "adventure",
 				"brief":  true,
 				"query":  "ping",
 			},
@@ -124,7 +124,7 @@ func TestGamesToolNamesForcesInitialMirrorSync(t *testing.T) {
 	if strings.Contains(namesText, `"isError":true`) {
 		t.Fatalf("expected discovery to succeed before async mirror, got: %s", namesText)
 	}
-	if !strings.Contains(namesText, "rimworld_rimbridge_core_ping") {
+	if !strings.Contains(namesText, "adventure_corebridge_core_ping") {
 		t.Fatalf("expected discovery to force initial mirror sync, got: %s", namesText)
 	}
 	assertAsyncMirroringServerDone(t, serverDone)
@@ -137,7 +137,7 @@ func TestUnmirroredDirectMCPToolCallUsesGABPFallback(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	if err := connector.AttemptConnection(ctx, "rimworld", port, bridgeToken); err != nil {
+	if err := connector.AttemptConnection(ctx, "adventure", port, bridgeToken); err != nil {
 		t.Fatalf("expected async connector to connect: %v", err)
 	}
 
@@ -146,7 +146,7 @@ func TestUnmirroredDirectMCPToolCallUsesGABPFallback(t *testing.T) {
 		Method:  "tools/call",
 		ID:      json.RawMessage(`"unmirrored-direct"`),
 		Params: map[string]interface{}{
-			"name":      "rimworld.rimbridge.core.ping",
+			"name":      "adventure.corebridge.core.ping",
 			"arguments": map[string]interface{}{},
 		},
 	}))
@@ -162,7 +162,7 @@ func TestUnmirroredStrictSafeDirectMCPToolCallUsesDescriptorAliasFallback(t *tes
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	if err := connector.AttemptConnection(ctx, "rimworld", port, bridgeToken); err != nil {
+	if err := connector.AttemptConnection(ctx, "adventure", port, bridgeToken); err != nil {
 		t.Fatalf("expected async connector to connect: %v", err)
 	}
 
@@ -171,7 +171,7 @@ func TestUnmirroredStrictSafeDirectMCPToolCallUsesDescriptorAliasFallback(t *tes
 		Method:  "tools/call",
 		ID:      json.RawMessage(`"unmirrored-normalized-direct"`),
 		Params: map[string]interface{}{
-			"name":      "rimworld_rimbridge_core_ping",
+			"name":      "adventure_corebridge_core_ping",
 			"arguments": map[string]interface{}{},
 		},
 	}))
@@ -197,11 +197,11 @@ func newAsyncMirroringDescriptorAliasTestServer(t *testing.T) (*Server, int, str
 
 	gamesConfig := &config.GamesConfig{
 		Games: map[string]config.GameConfig{
-			"rimworld": {
-				ID:         "rimworld",
-				Name:       "RimWorld",
+			"adventure": {
+				ID:         "adventure",
+				Name:       "AdventureGame",
 				LaunchMode: "DirectPath",
-				Target:     "/Applications/RimWorldMac.app/Contents/MacOS/RimWorld by Ludeon Studios",
+				Target:     "/Applications/AdventureGameMac.app/Contents/MacOS/AdventureGame by ExampleStudio Studios",
 			},
 		},
 	}
@@ -230,11 +230,11 @@ func newAsyncMirroringTestServer(t *testing.T) (*Server, int, string, <-chan err
 
 	gamesConfig := &config.GamesConfig{
 		Games: map[string]config.GameConfig{
-			"rimworld": {
-				ID:         "rimworld",
-				Name:       "RimWorld",
+			"adventure": {
+				ID:         "adventure",
+				Name:       "AdventureGame",
 				LaunchMode: "DirectPath",
-				Target:     "/Applications/RimWorldMac.app/Contents/MacOS/RimWorld by Ludeon Studios",
+				Target:     "/Applications/AdventureGameMac.app/Contents/MacOS/AdventureGame by ExampleStudio Studios",
 			},
 		},
 	}
@@ -263,11 +263,11 @@ func newAsyncMirroringDiscoveryTestServer(t *testing.T) (*Server, int, string, <
 
 	gamesConfig := &config.GamesConfig{
 		Games: map[string]config.GameConfig{
-			"rimworld": {
-				ID:         "rimworld",
-				Name:       "RimWorld",
+			"adventure": {
+				ID:         "adventure",
+				Name:       "AdventureGame",
 				LaunchMode: "DirectPath",
-				Target:     "/Applications/RimWorldMac.app/Contents/MacOS/RimWorld by Ludeon Studios",
+				Target:     "/Applications/AdventureGameMac.app/Contents/MacOS/AdventureGame by ExampleStudio Studios",
 			},
 		},
 	}
@@ -339,9 +339,9 @@ func serveTestGabpSessionExpectToolCallBeforeList(listener net.Listener, expecte
 			}
 
 			response := util.NewGABPResponse(request.ID, gabp.SessionWelcomeResult{
-				AgentID: "rimworld",
+				AgentID: "adventure",
 				App: gabp.AppInfo{
-					Name:    "RimBridgeServer",
+					Name:    "ExampleGameBridge",
 					Version: "0.1.0",
 				},
 				Capabilities: gabp.Capabilities{
@@ -366,12 +366,12 @@ func serveTestGabpSessionExpectToolCallBeforeList(listener net.Listener, expecte
 			}
 
 			switch name, _ := requestParams["name"].(string); name {
-			case "rimworld/rimbridge/core/ping":
+			case "adventure/corebridge/core/ping":
 				if err := writer.WriteJSON(util.NewGABPError(request.ID, 404, "tool not found: "+name, nil)); err != nil {
 					done <- err
 					return
 				}
-			case "rimbridge/core/ping":
+			case "corebridge/core/ping":
 				response := util.NewGABPResponse(request.ID, map[string]interface{}{
 					"text":    "pong",
 					"message": "pong",
@@ -433,9 +433,9 @@ func serveTestGabpSessionExpectListBeforeSafeToolCall(listener net.Listener, exp
 			}
 
 			response := util.NewGABPResponse(request.ID, gabp.SessionWelcomeResult{
-				AgentID: "rimworld",
+				AgentID: "adventure",
 				App: gabp.AppInfo{
-					Name:    "RimBridgeServer",
+					Name:    "ExampleGameBridge",
 					Version: "0.1.0",
 				},
 				Capabilities: gabp.Capabilities{
@@ -454,7 +454,7 @@ func serveTestGabpSessionExpectListBeforeSafeToolCall(listener net.Listener, exp
 			response := util.NewGABPResponse(request.ID, map[string]interface{}{
 				"tools": []map[string]interface{}{
 					{
-						"name":        "rimbridge/core/ping",
+						"name":        "corebridge/core/ping",
 						"description": "Ping bridge",
 						"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
 					},
@@ -475,7 +475,7 @@ func serveTestGabpSessionExpectListBeforeSafeToolCall(listener net.Listener, exp
 				return
 			}
 
-			if name, _ := requestParams["name"].(string); name != "rimbridge/core/ping" {
+			if name, _ := requestParams["name"].(string); name != "corebridge/core/ping" {
 				done <- fmt.Errorf("expected descriptor-resolved tool name, got %q", name)
 				return
 			}
@@ -534,9 +534,9 @@ func serveTestGabpSessionExpectListForDiscovery(listener net.Listener, expectedT
 			}
 
 			response := util.NewGABPResponse(request.ID, gabp.SessionWelcomeResult{
-				AgentID: "rimworld",
+				AgentID: "adventure",
 				App: gabp.AppInfo{
-					Name:    "RimBridgeServer",
+					Name:    "ExampleGameBridge",
 					Version: "0.1.0",
 				},
 				Capabilities: gabp.Capabilities{
@@ -554,7 +554,7 @@ func serveTestGabpSessionExpectListForDiscovery(listener net.Listener, expectedT
 			response := util.NewGABPResponse(request.ID, map[string]interface{}{
 				"tools": []map[string]interface{}{
 					{
-						"name":        "rimbridge/core/ping",
+						"name":        "corebridge/core/ping",
 						"description": "Ping bridge",
 						"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
 					},

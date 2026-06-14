@@ -115,8 +115,6 @@ func GetBridgeConfigPath(gameID string) string {
 	return cp.GetBridgeConfigPath(gameID)
 }
 
-
-
 // generateToken creates a random 64-character hex token
 func generateToken() (string, error) {
 	bytes := make([]byte, 32) // 32 bytes = 64 hex chars
@@ -144,7 +142,7 @@ func assignPortWithConfig(gamesConfig *GamesConfig) (int, error) {
 	// Ranges are chosen to avoid common conflicts and work across different systems
 	portRanges := [][]int{
 		{49152, 65535}, // Default Windows/IANA ephemeral range
-		{32768, 49151}, // Linux ephemeral range 
+		{32768, 49151}, // Linux ephemeral range
 		{8000, 8999},   // Common HTTP alternate ports (8000-8999)
 		{9000, 9999},   // Common application ports (9000-9999)
 		{10000, 19999}, // Registered/dynamic range subset
@@ -164,7 +162,6 @@ func findAvailablePortWithFallback() (int, error) {
 	return assignPortWithConfig(nil)
 }
 
-
 // Global port offset counter to reduce concurrent allocation collisions
 var (
 	portOffsetMutex sync.Mutex
@@ -178,17 +175,13 @@ func assignPortFromRange(minPort, maxPort int) int {
 	// Get a small offset to reduce collision probability in concurrent scenarios
 	// This is deterministic but different for each call
 	portOffsetMutex.Lock()
-	offset := portOffset % 10  // Small offset to avoid excessive range scanning
+	offset := portOffset % 10 // Small offset to avoid excessive range scanning
 	portOffset++
 	portOffsetMutex.Unlock()
 
 	rangeSize := maxPort - minPort + 1
-	
+
 	// Assign port deterministically with offset to avoid collisions
 	port := minPort + (offset % rangeSize)
 	return port
 }
-
-
-
-

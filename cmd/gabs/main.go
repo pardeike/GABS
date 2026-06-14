@@ -204,7 +204,7 @@ Examples:
   gabs server --http localhost:8080
   
   # Add a new game configuration
-  gabs games add minecraft
+  gabs games add factory
   
   # List configured games (shows only game IDs)
   gabs games list
@@ -410,7 +410,7 @@ func addGame(log util.Logger, gameID string, configDir string) int {
 		for stopProcessName == "" {
 			fmt.Printf("⚠️  Stop Process Name is required for %s games to enable proper game termination.\n", game.LaunchMode)
 			fmt.Printf("   Without it, GABS can only stop the launcher process, not the actual game.\n")
-			fmt.Printf("   Examples: 'RimWorldWin64.exe' for RimWorld, 'java' for Minecraft\n")
+			fmt.Printf("   Examples: 'GameName.exe' for AdventureGame, 'java' for FactorySim\n")
 			stopProcessName = promptString(fmt.Sprintf("Stop Process Name (REQUIRED for %s games)", game.LaunchMode), "")
 		}
 	} else {
@@ -504,9 +504,9 @@ func showGamesUsage() {
 
 Examples:
   gabs games list               # See game IDs only (AI-friendly)
-  gabs games add minecraft      # Add a new game called 'minecraft'
-  gabs games show minecraft     # View configuration for 'minecraft'
-  gabs games remove minecraft   # Remove the 'minecraft' configuration
+  gabs games add factory      # Add a new game called 'factory'
+  gabs games show factory     # View configuration for 'factory'
+  gabs games remove factory   # Remove the 'factory' configuration
 `)
 }
 

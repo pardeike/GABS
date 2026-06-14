@@ -17,14 +17,14 @@ by default; older dotted names remain accepted as call aliases.
 
 - **`games_list`** - Show configured game IDs
 - **`games_show`** - Show configuration and validation details for one game
-- **`games_start`** - Start a game: `{"gameId": "minecraft"}`
-- **`games_stop`** - Stop a game gracefully: `{"gameId": "minecraft"}`
-- **`games_kill`** - Force quit a game: `{"gameId": "minecraft"}`
-- **`games_status`** - Check if games are running: `{"gameId": "minecraft"}` or all games
+- **`games_start`** - Start a game: `{"gameId": "factory"}`
+- **`games_stop`** - Stop a game gracefully: `{"gameId": "factory"}`
+- **`games_kill`** - Force quit a game: `{"gameId": "factory"}`
+- **`games_status`** - Check if games are running: `{"gameId": "factory"}` or all games
 - **`games_tool_names`** - Discover compact mirrored tool names
 - **`games_tool_detail`** - Inspect one mirrored tool's schema
 - **`games_tools`** - Fetch the richer compatibility listing of mirrored tools
-- **`games_connect`** - Attach to a running game's GABP server after the mod loads or after a GABS restart
+- **`games_connect`** - Attach to a running game's GABP server after the bridge loads or after a GABS restart
 - **`games_get_attention`** - Inspect a game's current blocking attention item
 - **`games_ack_attention`** - Acknowledge the current blocking attention item and resume normal calls
 - **`games_call_tool`** - Call a mirrored game tool through the stable core surface
@@ -33,7 +33,7 @@ Mirrored game tools are intentionally not advertised in the public `tools/list`
 response. Discover them with `games_tool_names`, inspect one with
 `games_tool_detail`, and call it through `games_call_tool`.
 
-**Pro tip**: You can use either the game ID (`"rimworld"`) or the launch target (`"294100"` for Steam) in any tool.
+**Pro tip**: You can use either the game ID (`"adventure"`) or the launch target (`"123456"` for Steam) in any tool.
 
 ## Ownership and Reconnect Behavior
 
@@ -44,13 +44,15 @@ running or starting game:
 - `games_connect` returns quickly instead of waiting on a competing bridge
   connection
 - `games_status` may report that another GABS session owns the process
+- `games_status` also reports bridge-state diagnostics when runtime files,
+  bridge files, passive listener evidence, or process environment disagree
 
 If you intentionally want the current GABS session to take ownership of a
 running game, call:
 
 ```json
 {
-  "gameId": "rimworld",
+  "gameId": "adventure",
   "forceTakeover": true
 }
 ```
@@ -71,11 +73,12 @@ reviewed and acknowledged. The recovery flow is:
 3. Call `games_ack_attention` with the returned `attentionId`
 4. Retry the original game call
 
-GABS still allows bridge diagnostics and lifecycle observation tools through the
-gate so an agent can understand the failure without disturbing the game further.
-For RimBridgeServer this includes status, operation journal, log journal,
-operation wait, game-loaded wait, and long-event idle wait tools. Mutating
-gameplay and load/steer calls remain blocked until attention is acknowledged.
+GABS still allows diagnostic and lifecycle observation tools through the gate so
+an agent can understand the failure without disturbing the game further. Bridge
+tools can opt into that behavior with generic `tools/list` tags such as
+`diagnostic`, `health`, `lifecycle`, `observation`, `read-only`, `status`,
+`telemetry`, or `attention-bypass`. Mutating gameplay and steering calls remain
+blocked until attention is acknowledged.
 
 ## Setting Up AI Assistants
 
@@ -94,8 +97,8 @@ Strict-safe tool name normalization is enabled by default when
 }
 ```
 
-This converts tool names like `minecraft.inventory.get` to
-`minecraft_inventory_get` for client compatibility. See
+This converts tool names like `factory.inventory.get` to
+`factory_inventory_get` for client compatibility. See
 [Tool Normalization Guide](OPENAI_TOOL_NORMALIZATION.md) for complete details.
 
 Some clients also reject `outputSchema` fields in `tools/list`. If Claude Code
@@ -125,7 +128,7 @@ Add this to your Claude Desktop MCP settings:
 
 Then you can ask Claude:
 - "List all my configured games"
-- "Start minecraft and check its status"
+- "Start factory and check its status"
 - "Stop all running games"
 
 ### Codex CLI
@@ -157,11 +160,11 @@ games = client.call_tool("games_list", {})
 print("Available games:", games)
 
 # Start a specific game
-result = client.call_tool("games_start", {"gameId": "minecraft"})
+result = client.call_tool("games_start", {"gameId": "factory"})
 print("Start result:", result)
 
 # Check status
-status = client.call_tool("games_status", {"gameId": "minecraft"})
+status = client.call_tool("games_status", {"gameId": "factory"})
 print("Game status:", status)
 ```
 
@@ -172,8 +175,8 @@ Perfect when your AI and games run on the same computer:
 
 ```bash
 # 1. Configure your games
-gabs games add minecraft
-gabs games add rimworld
+gabs games add factory
+gabs games add adventure
 
 # 2. Start GABS MCP server
 gabs server
@@ -189,13 +192,13 @@ local machine:
 **On the machine running GABS and the games:**
 ```bash
 # 1. Add games normally
-gabs games add minecraft
+gabs games add factory
 
 # 2. Start GABS in HTTP mode
 gabs server --http :8080
 ```
 
-GABP itself remains local-only. Your game mod still listens on
+GABP itself remains local-only. Your game-side bridge still listens on
 `127.0.0.1:GABP_SERVER_PORT`; only the MCP HTTP surface is exposed remotely.
 
 **Configure your remote AI client:**
@@ -220,10 +223,10 @@ Let AI manage multiple game servers:
 
 ```bash
 # Configure multiple servers
-gabs games add minecraft-survival
-gabs games add minecraft-creative
-gabs games add rimworld-colony1
-gabs games add rimworld-colony2
+gabs games add factory-survival
+gabs games add factory-creative
+gabs games add adventure-a
+gabs games add adventure-b
 
 # Start GABS
 gabs server
@@ -260,12 +263,12 @@ curl -X POST http://localhost:8080/mcp \
 Here are some examples of what you can ask your AI once GABS is set up:
 
 **Starting games:**
-- "Start my Minecraft server"
-- "Launch RimWorld and check if it started correctly"
+- "Start my FactorySim server"
+- "Launch AdventureGame and check if it started correctly"
 - "Start all my configured games"
 
 **Managing games:**
-- "Stop the Minecraft server gracefully"
+- "Stop the FactorySim server gracefully"
 - "Kill any frozen games"
 - "Show me the status of all my games"
 
@@ -287,9 +290,9 @@ Here are some examples of what you can ask your AI once GABS is set up:
 3. Make sure the path to GABS binary is correct
 
 ### "Game won't start from AI"
-1. Test the game manually first: `gabs games start minecraft`
-2. Check that your game configuration is working: `gabs games show minecraft`
-3. Make sure your game mod supports GABP
+1. Test the game manually first: `gabs games start factory`
+2. Check that your game configuration is working: `gabs games show factory`
+3. Make sure your game-side bridge supports GABP
 
 ### "HTTP mode not working"
 1. Check if the port is already in use

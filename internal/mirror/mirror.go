@@ -64,6 +64,10 @@ func (m *Mirror) SyncTools() error {
 			Description:  fmt.Sprintf("%s (Game: %s)", tool.Description, m.gameId),
 			InputSchema:  tool.InputSchema,
 			OutputSchema: tool.OutputSchema,
+			Meta: map[string]interface{}{
+				"gabpName": tool.Name,
+				"tags":     append([]string(nil), tool.Tags...),
+			},
 		}
 
 		// Create handler that forwards to GABP with original tool name
@@ -218,7 +222,7 @@ func (m *Mirror) ExposeResources() error {
 			"gameId":      m.gameId,
 			"streamType":  "gabp-events",
 			"status":      "available",
-			"description": "Real-time GABP events will appear here when the game mod supports event streaming",
+			"description": "Real-time GABP events will appear here when the game bridge supports event streaming",
 			"channels":    capabilities.Events, // Available event channels
 			"note":        "Use GABP client event subscription to receive real-time updates",
 		}
