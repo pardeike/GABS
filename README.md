@@ -117,9 +117,10 @@ If your client disconnects after `tools/list` because it rejects a public tool's
 [Configuration Guide](docs/CONFIGURATION.md). Mirrored game tools are discovered
 through `games_tool_names` and are not advertised in the public `tools/list`
 response.
-If a game or bridge starts slowly, you can also tune startup waits with the
-`timeouts.startup` section described in the
-[Configuration Guide](docs/CONFIGURATION.md).
+If a game or bridge starts slowly, tune the total background connection budget
+with the `timeouts.startup` section described in the
+[Configuration Guide](docs/CONFIGURATION.md). `games_start` still returns after a
+bounded initial wait so MCP clients do not time out while the game keeps loading.
 
 ### 4. Try these prompts
 
@@ -136,14 +137,23 @@ If you want a download-to-working walkthrough, use the
 - **Steam/Epic stopping**: use the real game process name, not the launcher
   name.
 - **More than one AI session**: that is fine. GABS coordinates ownership per
-  game so two live sessions do not both launch or attach to the same game by
-  accident.
-- **Game bridge cannot find bridge config**: the game-side bridge should first read
-  `GABP_SERVER_PORT`, `GABP_TOKEN`, and `GABS_GAME_ID`, and only fall back to
-  `GABS_BRIDGE_PATH` or `~/.gabs/<gameId>/bridge.json`.
+  game with a short active-owner lease. You can hop between live sessions:
+  `games_connect` takes over naturally after the previous session goes idle,
+  while active game-bound calls are still protected from competing sessions.
+- **Game bridge cannot find GABP configuration**: the game-side bridge should read
+  `GABP_SERVER_PORT`, `GABP_TOKEN`, and `GABS_GAME_ID` from its process
+  environment. The `bridge.json` file is GABS' endpoint cache/debug artifact,
+  not runtime input for game-side bridge code.
+- **Stopped game still has `bridge.json`**: this is normal. Treat it as an
+  endpoint cache/debug artifact, not a recovery target.
+- **Start says the endpoint cache port is already in use**: use
+  `games_connect` if an existing game-side bridge owns that endpoint. Use
+  `games_start` with `resetEndpoint: true` only after confirming the cache
+  should be rotated for a new process.
 - **Confusing bridge state**: start with `games_status`. It compares the
-  runtime file, bridge file, passive listener evidence, and process environment
-  where the OS allows it, then returns diagnosis details and next actions.
+  runtime state and process environment where the OS allows it. If a launcher
+  reused old GABP environment, GABS can connect through the running process
+  endpoint with `games_connect`.
 
 ## How It Works
 
@@ -229,10 +239,8 @@ Want your game to work with GABS? Add GABP support to your game-side bridge:
    - `GABS_GAME_ID` - Your game's identifier
    - `GABP_SERVER_PORT` - Port your game-side bridge should listen on
    - `GABP_TOKEN` - Authentication token for GABS connections
-   - `GABS_BRIDGE_PATH` - Optional `bridge.json` fallback/debug path
-   Environment values are authoritative when present. `bridge.json` is a
-   fallback/debug file so agents can recover or inspect state, not an override
-   for fresh `GABP_*` values.
+   The `bridge.json` file is GABS' endpoint cache/debug artifact. Do not read
+   it as game-side runtime configuration.
 2. **Start a local GABP server** to listen for GABS connections (your game-side bridge = server, GABS = client)
 3. **Implement the current GABP runtime methods** (`session/hello`, `tools/list`, `tools/call`) or use the official `gabp-runtime` library so your schemas match what GABS expects
    - For GABP v1.1 bridges, advertise optional attention support through capabilities before exposing `attention/current`, `attention/ack`, and the attention lifecycle channels

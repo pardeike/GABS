@@ -89,7 +89,7 @@ func TestGamesStartShortCircuitsAcrossServers(t *testing.T) {
 	if strings.Contains(connect, `"isError":true`) {
 		t.Fatalf("expected duplicate connect to short-circuit cleanly, got %s", connect)
 	}
-	if !strings.Contains(connect, "another live GABS session") {
+	if !strings.Contains(connect, "another active GABS session") {
 		t.Fatalf("expected duplicate connect guard, got %s", connect)
 	}
 

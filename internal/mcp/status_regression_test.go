@@ -110,29 +110,29 @@ func TestGamesStatusReportsAndCleansStaleSharedRuntimeState(t *testing.T) {
 	if !strings.Contains(statusText, "stale-runtime-cleaned") {
 		t.Fatalf("expected stale runtime cleanup diagnosis, got: %s", statusText)
 	}
-	if !strings.Contains(statusText, "fresh bridge and runtime state") {
-		t.Fatalf("expected fresh-start next action, got: %s", statusText)
+	if strings.Contains(statusText, "durable bridge endpoint") || strings.Contains(statusText, "bridge.json") {
+		t.Fatalf("status should not surface bridge-file recovery language, got: %s", statusText)
 	}
 	if state, err := process.LoadRuntimeState(game.ID, tmpDir); err != nil {
 		t.Fatalf("failed to inspect runtime state: %v", err)
 	} else if state != nil {
 		t.Fatalf("expected stale runtime state to be removed, got %#v", state)
 	}
-	if _, err := os.Stat(bridgePath); !os.IsNotExist(err) {
-		t.Fatalf("expected stale bridge file to be removed, stat err: %v", err)
+	if _, err := os.Stat(bridgePath); err != nil {
+		t.Fatalf("expected durable bridge file to remain, stat err: %v", err)
 	}
 }
 
-func TestGamesStatusReportsStaleBridgeFile(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "gabs-status-stale-bridge")
+func TestGamesStatusTreatsClosedBridgeFileAsIdleDurableEndpoint(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "gabs-status-idle-bridge")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tmpDir)
 
 	game := config.GameConfig{
-		ID:         "stale-bridge",
-		Name:       "Stale Bridge",
+		ID:         "idle-bridge",
+		Name:       "Idle Bridge",
 		LaunchMode: "DirectPath",
 		Target:     "/bin/sleep",
 	}
@@ -152,9 +152,9 @@ func TestGamesStatusReportsStaleBridgeFile(t *testing.T) {
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
-	statusText := marshalMessage(t, server.HandleMessage(toolCallMessage("status-stale-bridge", "games.status", game.ID)))
-	if !strings.Contains(statusText, `"code":"stale-bridge-file"`) {
-		t.Fatalf("expected stale bridge diagnosis, got: %s", statusText)
+	statusText := marshalMessage(t, server.HandleMessage(toolCallMessage("status-idle-bridge", "games.status", game.ID)))
+	if !strings.Contains(statusText, `"code":"healthy"`) {
+		t.Fatalf("expected healthy idle bridge diagnosis, got: %s", statusText)
 	}
 	if strings.Contains(statusText, "stale-bridge-token") {
 		t.Fatalf("raw bridge token leaked in status response: %s", statusText)
@@ -229,7 +229,7 @@ func TestGamesStatusDoesNotConsumeAcceptOnceBridgeBeforeConnect(t *testing.T) {
 	}
 }
 
-func TestGamesStatusReportsUnverifiedBridgeFileWhenPassiveListenerCheckUnavailable(t *testing.T) {
+func TestGamesStatusTreatsUnverifiedStoppedBridgeFileAsIdleDurableEndpoint(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "gabs-status-unverified-bridge")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
@@ -255,18 +255,15 @@ func TestGamesStatusReportsUnverifiedBridgeFileWhenPassiveListenerCheckUnavailab
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
 	statusText := marshalMessage(t, server.HandleMessage(toolCallMessage("status-unverified-bridge", "games.status", game.ID)))
-	if !strings.Contains(statusText, `"code":"unverified-bridge-file"`) {
-		t.Fatalf("expected unverified bridge diagnosis, got: %s", statusText)
+	if !strings.Contains(statusText, `"code":"healthy"`) {
+		t.Fatalf("expected healthy idle bridge diagnosis, got: %s", statusText)
 	}
-	if !strings.Contains(statusText, "status does not open a probe connection") {
-		t.Fatalf("expected non-probing connect guidance, got: %s", statusText)
-	}
-	if !strings.Contains(statusText, "If connect fails because the bridge file is stale") {
-		t.Fatalf("expected stale bridge fallback guidance, got: %s", statusText)
+	if strings.Contains(statusText, "unverified-bridge-token") {
+		t.Fatalf("raw bridge token leaked in status response: %s", statusText)
 	}
 }
 
-func TestGamesStatusReportsLauncherEnvironmentMismatch(t *testing.T) {
+func TestGamesStatusIgnoresBridgeFileMismatchWhenProcessEnvironmentIsReadable(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("process environment inspection is not supported on Windows")
 	}
@@ -324,11 +321,11 @@ func TestGamesStatusReportsLauncherEnvironmentMismatch(t *testing.T) {
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
 	statusText := marshalMessage(t, server.HandleMessage(toolCallMessage("status-launcher-env", "games.status", game.ID)))
-	if !strings.Contains(statusText, `"code":"stale-launcher-environment"`) {
-		t.Fatalf("expected launcher environment mismatch diagnosis, got: %s", statusText)
+	if !strings.Contains(statusText, `"code":"healthy"`) {
+		t.Fatalf("expected bridge-file mismatch to stay out of user-facing diagnostics, got: %s", statusText)
 	}
-	if !strings.Contains(statusText, "launcher likely reused stale environment") {
-		t.Fatalf("expected launcher explanation, got: %s", statusText)
+	if strings.Contains(statusText, "bridge.json") || strings.Contains(statusText, "launcher likely reused stale environment") || strings.Contains(statusText, bridgePath) {
+		t.Fatalf("status should not surface bridge-file mismatch details, got: %s", statusText)
 	}
 	if strings.Contains(statusText, "process-token") || strings.Contains(statusText, "bridge-token") {
 		t.Fatalf("raw token leaked in status response: %s", statusText)

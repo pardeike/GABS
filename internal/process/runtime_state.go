@@ -24,6 +24,8 @@ type RuntimeState struct {
 	Status          string    `json:"status"`
 	OwnerPID        int       `json:"ownerPid"`
 	OwnerInstanceID string    `json:"ownerInstanceId,omitempty"`
+	OwnerLeaseUntil time.Time `json:"ownerLeaseUntil,omitempty"`
+	OwnerLastActive time.Time `json:"ownerLastActive,omitempty"`
 	GamePID         int       `json:"gamePid,omitempty"`
 	StopProcessName string    `json:"stopProcessName,omitempty"`
 	UpdatedAt       time.Time `json:"updatedAt"`
@@ -31,12 +33,14 @@ type RuntimeState struct {
 
 // NewRuntimeState creates a shared runtime record for the given launch spec.
 func NewRuntimeState(spec LaunchSpec, status string) RuntimeState {
+	now := time.Now().UTC()
 	return RuntimeState{
 		GameID:          spec.GameId,
 		Status:          status,
 		OwnerPID:        os.Getpid(),
 		StopProcessName: spec.StopProcessName,
-		UpdatedAt:       time.Now().UTC(),
+		OwnerLastActive: now,
+		UpdatedAt:       now,
 	}
 }
 
@@ -172,6 +176,74 @@ func RuntimeStateOwnedByAnotherLiveOwner(state *RuntimeState, currentPID int, cu
 	}
 
 	return isProcessAlive(state.OwnerPID)
+}
+
+// RuntimeStateOwnedByAnotherActiveOwner reports whether another live GABS
+// owner still holds an unexpired runtime lease.
+func RuntimeStateOwnedByAnotherActiveOwner(state *RuntimeState, currentPID int, currentInstanceID string, leaseDuration time.Duration, now time.Time) bool {
+	if !RuntimeStateOwnedByAnotherLiveOwner(state, currentPID, currentInstanceID) {
+		return false
+	}
+	return RuntimeOwnerLeaseActive(state, leaseDuration, now)
+}
+
+// RefreshRuntimeOwnerLease updates the runtime owner and extends its activity lease.
+func RefreshRuntimeOwnerLease(state RuntimeState, ownerPID int, ownerInstanceID string, leaseDuration time.Duration, now time.Time) RuntimeState {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	state.OwnerPID = ownerPID
+	state.OwnerInstanceID = ownerInstanceID
+	state.OwnerLastActive = now
+	if leaseDuration > 0 {
+		state.OwnerLeaseUntil = now.Add(leaseDuration)
+	} else {
+		state.OwnerLeaseUntil = time.Time{}
+	}
+	return state
+}
+
+// RuntimeOwnerLeaseActive reports whether the current owner lease should still
+// be treated as active. Older runtime.json files without explicit lease fields
+// fall back to UpdatedAt plus the configured lease duration.
+func RuntimeOwnerLeaseActive(state *RuntimeState, leaseDuration time.Duration, now time.Time) bool {
+	if state == nil {
+		return false
+	}
+	expiresAt := RuntimeOwnerLeaseExpiresAt(state, leaseDuration)
+	if expiresAt.IsZero() {
+		return true
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	return now.Before(expiresAt)
+}
+
+// RuntimeOwnerLeaseExpiresAt resolves the effective lease expiration time for
+// both current and pre-lease runtime.json files.
+func RuntimeOwnerLeaseExpiresAt(state *RuntimeState, leaseDuration time.Duration) time.Time {
+	if state == nil {
+		return time.Time{}
+	}
+	if !state.OwnerLeaseUntil.IsZero() {
+		return state.OwnerLeaseUntil
+	}
+	if leaseDuration <= 0 {
+		return time.Time{}
+	}
+	base := state.OwnerLastActive
+	if base.IsZero() {
+		base = state.UpdatedAt
+	}
+	if base.IsZero() {
+		return time.Time{}
+	}
+	return base.Add(leaseDuration)
 }
 
 func marshalRuntimeState(state RuntimeState) ([]byte, error) {

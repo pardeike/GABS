@@ -72,21 +72,23 @@ Most users can skip this section.
 
 GABS uses local-only GABP communication for security and simplicity.
 
-When you start a game, GABS passes bridge configuration to the game-side bridge through:
+When you start a game, GABS passes GABP connection data to the game-side bridge through:
 
 1. Environment variables: `GABP_SERVER_PORT`, `GABP_TOKEN`, `GABS_GAME_ID`
-2. A bridge file fallback: `~/.gabs/{gameId}/bridge.json`
 
-The environment variables are authoritative when present. `bridge.json` is a
-fallback/debug artifact for reconnects and diagnostics; game-side bridge code
-should not let a stale bridge file override fresh `GABP_*` environment values.
+The `bridge.json` file is GABS' endpoint cache/debug artifact. Game-side bridge
+code should not read it as runtime configuration or use it as a fallback for
+missing `GABP_*` environment values.
 
 In the GABP layer, your game-side bridge listens for the connection and GABS connects
 to it.
 
 GABS also keeps an internal ownership record at `~/.gabs/{gameId}/runtime.json`
-so separate GABS sessions do not accidentally launch or attach to the same game
-at the same time. Game integrations should ignore `runtime.json`; it is for GABS itself.
+so separate GABS sessions do not accidentally launch or drive the same game at
+the same time. Ownership is an expiring active-use lease, so you can hop
+between live AI sessions by using `games_connect` after the previous session
+goes idle. Game integrations should ignore `runtime.json`; it is for GABS
+itself.
 
 ## Managing Your Games
 
@@ -184,9 +186,8 @@ not passed to the game in this mode. Put launch options such as
 
 In launcher-driven setups, an already-running platform launcher process can
 prevent GABS from proving that new environment variables reached the real game
-process. `games_status` reports this as bridge-state diagnostics, including
-stale launcher environment when the process `GABP_*` values disagree with
-`bridge.json`. For deterministic env and argument control, use `DirectPath` or
+process. `games_status` reports whether the real game process environment is
+readable. For deterministic env and argument control, use `DirectPath` or
 `CustomCommand`.
 
 ### EpicAppId
@@ -223,35 +224,40 @@ GABS uses local-only GABP communication.
 ### Local Communication (Current Implementation)
 - GABS connects to game integrations on localhost (`127.0.0.1`) only
 - Each game gets a unique port and token
-- Bridge configuration is also written to `~/.gabs/{gameId}/bridge.json`
+- GABS may write `~/.gabs/{gameId}/bridge.json` as an endpoint cache/debug artifact
 
 ### Bridge Configuration
-When you start a game, GABS creates a bridge configuration file that looks like this:
+When you start a game, GABS sends GABP configuration through environment
+variables:
 
-```json
-{
-  "port": 49234,
-  "token": "a1b2c3d4e5f6...",
-  "gameId": "factory"
-}
-```
+- `GABP_SERVER_PORT`
+- `GABP_TOKEN`
+- `GABS_GAME_ID`
 
-Game integrations can read this file, but environment variables remain the preferred source.
+Game integrations should read these environment variables directly.
 
 ## Shared Runtime Ownership
 
 When a game is already starting or running, GABS writes a per-game
-`runtime.json` file so other live GABS sessions can see that the game already
-has an owner.
+`runtime.json` file so other live GABS sessions can see whether the game
+currently has an active owner.
 
 - A second `games.start` returns immediately with "already starting" or
   "already running" instead of launching a second copy
-- A second `games.connect` also returns immediately instead of waiting for a
-  competing bridge connection
-- `games.status` can report that another GABS session owns the process
+- `games.connect` takes ownership naturally once the previous owner's lease is
+  idle
+- `games.connect` returns immediately with an active-owner result when another
+  session is still inside its lease
+- game-bound tool calls also check the lease before touching the bridge
+- `games.status` reports the runtime owner, lease expiry, and bridge diagnostics
 
-If you intentionally want a different GABS session to take over a running game,
-use `games.connect` with `forceTakeover: true`.
+If you intentionally want a different GABS session to take over before the
+active lease expires, use `games.connect` with `forceTakeover: true`.
+
+If `games.start` reports `endpoint_cache_in_use`, the cached port is already
+listening. Use `games.connect` if an already-running bridge owns that endpoint.
+Use `games.start` with `resetEndpoint: true` only after confirming the cached
+endpoint should be rotated for a new process.
 
 ## Tool Normalization Configuration
 
@@ -325,8 +331,8 @@ tool metadata, including output schema information, remains available through
 ## Startup Timeout Configuration
 
 If your game takes longer to appear in the process list or longer for its GABP
-game-side bridge to start listening, you can override the startup waits in
-`~/.gabs/config.json`.
+game-side bridge to start listening, you can override the startup process wait
+and connection budget in `~/.gabs/config.json`.
 
 ### Startup Timeout Options
 
@@ -334,16 +340,27 @@ The `timeouts.startup` section supports these options:
 
 - **`processStartSeconds`** (integer): How long GABS waits for the launched game
   process to become detectable in the OS process list (default: `10`)
-- **`gabpConnectSeconds`** (integer): How long `games.start` waits for the
-  game's GABP server to become available before returning control to you
-  (default: `60`). You can also pass a one-off `timeout` argument to
-  `games_start` for unusually slow bridge startup without changing the
-  saved configuration.
+- **`gabpConnectSeconds`** (integer): The total connection budget for the game
+  GABP server to become available (default: `60`). `games_start` waits only for
+  a bounded initial slice of that budget, returns before MCP clients hit their
+  own tool-call timeout, and continues connecting in the background. You can
+  also pass a one-off `timeout` argument to `games_start` for unusually slow
+  bridge startup without changing the saved configuration.
 
-`games_start` only waits for the GABP handshake. Mirroring the connected bridge's
-full tool list can continue briefly in the background. The public `tools/list`
-response stays stable, and known startup commands can be sent immediately
-through `games_call_tool` while discovery tools refresh.
+The `timeouts.session` section supports:
+
+- **`ownerLeaseSeconds`** (integer): How long an idle GABS session remains the
+  active runtime owner after a normal game-bound action (default: `30`). Long
+  game-bound calls extend the lease to cover their requested timeout plus a
+  small safety margin, so this value controls roaming between idle sessions,
+  not the maximum duration of a running command.
+
+`games_start` only waits for an initial GABP handshake window. If the game is
+still loading, GABS keeps trying in the background for the remaining startup
+budget. Mirroring the connected bridge's full tool list can continue briefly in
+the background. The public `tools/list` response stays stable, and known startup
+commands can be sent immediately through `games_call_tool` while discovery tools
+refresh.
 
 ### Example Configuration
 
@@ -354,6 +371,9 @@ through `games_call_tool` while discovery tools refresh.
     "startup": {
       "processStartSeconds": 20,
       "gabpConnectSeconds": 120
+    },
+    "session": {
+      "ownerLeaseSeconds": 30
     }
   },
   "games": {
@@ -426,10 +446,10 @@ mandatory.
 1. Make sure your game-side bridge supports GABP
 2. Check that the game-side bridge is listening on the right port
 3. Verify the game-side bridge is using `GABP_SERVER_PORT`, `GABP_TOKEN`, and `GABS_GAME_ID`
-   from the environment or `bridge.json`
+   from the environment
 4. Run `games_status` and inspect `diagnostics.code`, `diagnostics.message`,
-   and `nextActions`; it can identify stale runtime state, stale bridge files,
-   passively detected orphan listeners, and launcher environment mismatches.
+   and `nextActions`; it can identify stale runtime state, runtime ownership,
+   and whether the real game process environment is readable.
 
 ### "Configuration not found"
 The config file is created automatically when you add your first game. If it's missing, run `gabs games add` to create a new one.

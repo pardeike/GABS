@@ -2,9 +2,9 @@
 
 > Historical note: this document summarizes the original process-management
 > refactor. Current GABS also maintains a lightweight shared `runtime.json`
-> ownership record per game so multiple live GABS sessions can avoid duplicate
-> launches and support explicit takeover with `games.connect {"forceTakeover":
-> true}`.
+> active-owner lease per game so multiple live GABS sessions can avoid
+> duplicate launches, roam naturally with `games_connect` after idle, and still
+> support explicit active takeover with `games.connect {"forceTakeover": true}`.
 
 ## Problem Analysis
 

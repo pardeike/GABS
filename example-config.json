@@ -23,6 +23,9 @@
     "startup": {
       "processStartSeconds": 10,
       "gabpConnectSeconds": 60
+    },
+    "session": {
+      "ownerLeaseSeconds": 30
     }
   },
   "games": {

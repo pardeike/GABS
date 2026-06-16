@@ -55,16 +55,20 @@ AdventureGame-Specific Tools (if adventure also starts):
 - adventure_quest_progress  - Check quest status
 ```
 
-GABS can also have multiple live sessions. If another session already owns a
-running game, `games.start` and `games.connect` return quickly instead of
-hanging, and `games.connect {"forceTakeover": true}` can intentionally move
-ownership to the current session.
+GABS can also have multiple live sessions. Runtime ownership is a short
+active-owner lease, not a permanent lock on an AI client session. If another session is
+actively using a running game, `games.start`, `games.connect`, and game-bound
+tool calls return quickly instead of competing. Once that lease goes idle,
+`games.connect` naturally moves ownership to the current session. Use
+`games.connect {"forceTakeover": true}` only when intentionally overriding an
+active owner immediately.
 
 When a game is not connecting cleanly, call `games_status` first. Its structured
-diagnostics compare GABS runtime ownership, `bridge.json`, passive listener
-evidence, and the game process environment where available. Follow
-`nextActions` rather than assuming whether `bridge.json` or the process
-environment is stale.
+diagnostics report GABS runtime ownership and the game process environment
+where available. Follow `nextActions` rather than inspecting or editing
+`bridge.json`; that file is GABS' endpoint cache/debug artifact. If
+`games_start` reports `endpoint_cache_in_use`, use `games_connect` to attach or
+`resetEndpoint: true` only after confirming the cache should be rotated.
 
 For low-latency startup loops, `games_start` returns after the GABP handshake
 instead of waiting for full tool mirroring. The mirror refresh runs in the
@@ -73,9 +77,11 @@ background, the public `tools/list` response remains stable, and
 game tool immediately. Use `games_tool_names` when you need discovery; skip it
 when the next command name is already known.
 
-For games with slow bridge startup, pass a larger `timeout` to `games_start` or configure
-`timeouts.startup.gabpConnectSeconds` so startup waits for the bridge instead of
-forcing a later manual connect step.
+For games with slow bridge startup, pass a larger `timeout` to `games_start` or
+configure `timeouts.startup.gabpConnectSeconds` to increase the total connection
+budget. `games_start` still returns after a bounded initial wait; GABS keeps
+trying in the background and `games_connect` can adopt a running process
+environment if a launcher reused older GABP values.
 
 ## AI Discovery Strategies
 
@@ -276,8 +282,9 @@ async function intelligentGameManagement(request) {
 3. **Don't try to use generic tool names** like `inventory.get`
 4. **Don't overwhelm users** with massive detailed tool dumps - group and filter intelligently
 5. **Don't treat duplicate starts as success signals** - if another live GABS
-   session already owns the game, expect `games_start` or `games_connect` to
-   return a quick "already running/owned" style message
+   session is actively using the game, expect `games_start`, `games_connect`,
+   or game-bound calls to return a quick active-owner message. If the previous
+   session is idle, `games_connect` can take ownership naturally.
 
 ## GABS Design Advantages for AI
 

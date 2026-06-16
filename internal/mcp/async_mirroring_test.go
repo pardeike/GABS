@@ -208,6 +208,7 @@ func newAsyncMirroringDescriptorAliasTestServer(t *testing.T) (*Server, int, str
 
 	log := util.NewLogger("error")
 	server := NewServerForTesting(log)
+	server.SetConfigDir(t.TempDir())
 	server.RegisterGameManagementTools(gamesConfig, 5*time.Millisecond, 10*time.Millisecond)
 
 	return server, listener.Addr().(*net.TCPAddr).Port, bridgeToken, serverDone
@@ -241,6 +242,7 @@ func newAsyncMirroringTestServer(t *testing.T) (*Server, int, string, <-chan err
 
 	log := util.NewLogger("error")
 	server := NewServerForTesting(log)
+	server.SetConfigDir(t.TempDir())
 	server.RegisterGameManagementTools(gamesConfig, 5*time.Millisecond, 10*time.Millisecond)
 
 	return server, listener.Addr().(*net.TCPAddr).Port, bridgeToken, serverDone
@@ -274,6 +276,7 @@ func newAsyncMirroringDiscoveryTestServer(t *testing.T) (*Server, int, string, <
 
 	log := util.NewLogger("error")
 	server := NewServerForTesting(log)
+	server.SetConfigDir(t.TempDir())
 	server.RegisterGameManagementTools(gamesConfig, 5*time.Millisecond, 10*time.Millisecond)
 
 	return server, listener.Addr().(*net.TCPAddr).Port, bridgeToken, serverDone

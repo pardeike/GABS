@@ -24,8 +24,11 @@ Use GABS as the stable control surface for a local game-development loop. GABS s
 - Use `gameId` values from `games_list`; do not guess from display names.
 - Use `games_show` when a game fails to start or stop, especially for Steam/Epic `stopProcessName` validation.
 - Use `games_connect` after a game is already open, after a GABS restart, or when `games_start` says the process is running but GABP was not ready.
-- Use `games_connect` with `forceTakeover: true` only when intentionally moving ownership from another live GABS session.
-- For games with slow bridge startup, pass a larger `timeout` to `games_start` or configure `timeouts.startup.gabpConnectSeconds` so startup waits for the GABP bridge instead of returning early.
+- Use normal `games_connect` to continue from a different live session after the previous session goes idle; GABS runtime ownership is a short active-use lease, not a permanent session lock.
+- Use `games_connect` with `forceTakeover: true` only when intentionally moving ownership away from another active GABS session before its lease expires.
+- For games with slow bridge startup, pass a larger `timeout` to `games_start` or configure `timeouts.startup.gabpConnectSeconds` to increase the total background connection budget. `games_start` still returns after a bounded initial wait; use `games_status` or `games_connect` while GABS keeps trying.
+- Do not inspect, edit, or base recovery on `bridge.json`; it is GABS' endpoint cache/debug artifact. Game-side bridge runtime configuration should come from `GABP_SERVER_PORT`, `GABP_TOKEN`, and `GABS_GAME_ID`.
+- If `games_start` reports `endpoint_cache_in_use`, use `games_connect` to attach to the already-listening endpoint. Use `games_start` with `resetEndpoint: true` only after confirming the cached endpoint should be rotated for a new process.
 
 ## Discovery
 
@@ -45,6 +48,7 @@ Use GABS as the stable control surface for a local game-development loop. GABS s
 - Fully qualified slash or dotted GABP names can be sent through `games_call_tool` before direct mirrored MCP tools appear.
 - If a call is blocked by attention, use `games_get_attention`, decide what to do, then acknowledge with `games_ack_attention` when appropriate.
 - While attention is open, diagnostic and lifecycle observation tools may still be callable through `games_call_tool`; use them to inspect bridge status, operations, logs, game-loaded state, or long-event idle state before acknowledging.
+- If a call is blocked by `blocked_by_active_runtime_owner`, use `games_status` to inspect the owner lease and retry `games_connect` after the active session goes idle. Use `forceTakeover` only for deliberate immediate handoff.
 - Bridge authors should mark such tools with generic tags like `diagnostic`, `read-only`, `status`, `health`, `lifecycle`, or `attention-bypass`; do not rely on bridge-specific tool names.
 
 ## Recovery

@@ -138,8 +138,9 @@ args = ["server"]
 On Windows, use the full path to `gabs.exe`.
 
 Each live Codex session starts its own stdio GABS process. That is normal.
-GABS coordinates ownership per game so two live AI sessions do not both launch
-or attach to the same game by accident.
+GABS coordinates ownership per game with a short active-owner lease. You can
+hop between live sessions: `games_connect` takes over once the previous session
+is idle, while active game-bound calls are protected from competing sessions.
 
 ### Generic MCP Clients
 
@@ -231,9 +232,9 @@ Once your AI client is connected, try prompts like:
 - "Show the status of all games"
 - "Reconnect to AdventureGame and list its tools"
 
-If you have more than one live GABS session, the second session will not launch
-or connect to the same game again by default. To intentionally move ownership
-to the current session, use:
+If you have more than one live GABS session, use `games_connect` in the session
+you want to continue from. It will take ownership when the previous session's
+active lease is idle. To override an actively owned game immediately, use:
 
 ```json
 {
@@ -257,15 +258,17 @@ Per-game runtime files live under:
 - `~/.gabs/<gameId>/bridge.json`
 - `~/.gabs/<gameId>/runtime.json`
 
-`bridge.json` is fallback/debug bridge metadata. The game-side bridge should prefer
-`GABP_SERVER_PORT`, `GABP_TOKEN`, and `GABS_GAME_ID` from its process
-environment when those values exist. `runtime.json` is internal ownership
-tracking used by GABS itself.
+`bridge.json` is GABS' endpoint cache/debug artifact. The game-side bridge
+should read `GABP_SERVER_PORT`, `GABP_TOKEN`, and `GABS_GAME_ID` from its
+process environment. `runtime.json` is internal ownership tracking used by GABS
+itself.
 
 If these files look confusing, call `games_status` before editing them by hand.
-The structured `diagnostics` field reports stale runtime files, stale bridge
-files, passively detected orphan listeners, missing bridge files, and launcher
-environment mismatches, with `nextActions` for recovery.
+The structured `diagnostics` field reports runtime ownership and process
+environment readability with `nextActions` for recovery. Do not inspect or edit
+`bridge.json` as a recovery step; use `games_connect` for an already-running
+endpoint or `games_start` with `resetEndpoint: true` only after confirming the
+endpoint cache should be rotated.
 
 ## Troubleshooting
 
@@ -286,20 +289,13 @@ gabs games show <game-id>
 Launcher-based games such as Steam and Epic titles need the actual game process
 name, not just the launcher.
 
-### A Bridge Cannot Find `bridge.json`
+### A Bridge Cannot Find Configuration
 
-Make sure the game-side bridge first checks the environment variables:
+Make sure the game-side bridge checks the environment variables:
 
 - `GABP_SERVER_PORT`
 - `GABP_TOKEN`
 - `GABS_GAME_ID`
 
-and only falls back to:
-
-- `~/.gabs/<gameId>/bridge.json`
-
-or the `GABS_BRIDGE_PATH` environment variable when present.
-
-Do not patch game-side bridge code to prefer `bridge.json` over present `GABP_*`
-environment variables. That can make an old bridge file win over the actual
-running process state.
+Do not patch game-side bridge code to read `bridge.json`. That can make GABS'
+endpoint cache win over the actual running process state.

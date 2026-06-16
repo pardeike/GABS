@@ -2,6 +2,8 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -417,76 +419,117 @@ func TestWriteBridgeJSONWithConfig(t *testing.T) {
 	}
 }
 
-// TestDeterministicPortSelection tests that port assignment is deterministic and repeatable
-func TestDeterministicPortSelection(t *testing.T) {
-	// Test that the port assignment approach is deterministic within the same process
-
-	// First, find what port would be assigned in a small range
-	minPort := 8000
-	maxPort := 8010
-
-	// Reset the global offset to ensure deterministic behavior
-	portOffsetMutex.Lock()
-	originalOffset := portOffset
-	portOffset = 0
-	portOffsetMutex.Unlock()
-
-	// Restore offset after test
-	defer func() {
-		portOffsetMutex.Lock()
-		portOffset = originalOffset
-		portOffsetMutex.Unlock()
-	}()
-
-	// Get first assigned port with reset offset
-	port1 := assignPortFromRange(minPort, maxPort)
-
-	// Verify it's in the expected range
-	if port1 < minPort || port1 > maxPort {
-		t.Errorf("Port %d not in range [%d, %d]", port1, minPort, maxPort)
+func TestPortSelectionSkipsBusyPorts(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to reserve busy port: %v", err)
 	}
+	defer listener.Close()
 
-	// With offset=0, it should be the first port in range (minPort)
-	expectedPort := minPort
-
-	if port1 != expectedPort {
-		t.Errorf("Expected deterministic port %d, got %d", expectedPort, port1)
+	busyPort := listener.Addr().(*net.TCPAddr).Port
+	port, err := findAvailablePortInRange(busyPort, busyPort)
+	if err == nil {
+		t.Fatalf("expected single busy-port range to fail, got port %d", port)
+	}
+	if !strings.Contains(err.Error(), "no available ports") {
+		t.Fatalf("expected no available ports error, got %v", err)
 	}
 }
 
-// TestPortAssignmentDeterminism tests that ports are assigned deterministically with offset
-func TestPortAssignmentDeterminism(t *testing.T) {
-	// Test that port assignment uses offset to avoid collisions
-	minPort := 9000
-	maxPort := 9005
+func TestEnsureBridgeJSONReusesExistingEndpoint(t *testing.T) {
+	tempDir := t.TempDir()
+	gameID := "durable-game"
+	originalPort := 23456
+	originalToken := "existing-token"
 
-	var assignedPorts []int
-
-	// Assign ports multiple times and verify they use offset
-	for i := 0; i < 3; i++ {
-		port := assignPortFromRange(minPort, maxPort)
-
-		// Verify it's in the expected range
-		if port < minPort || port > maxPort {
-			t.Errorf("Port %d not in range [%d, %d]", port, minPort, maxPort)
-		}
-
-		assignedPorts = append(assignedPorts, port)
+	if _, err := WriteBridgeJSONWithEndpoint(gameID, tempDir, originalPort, originalToken); err != nil {
+		t.Fatalf("failed to write existing bridge endpoint: %v", err)
 	}
 
-	// Verify ports are different due to offset mechanism
-	if len(assignedPorts) >= 2 {
-		allSame := true
-		for i := 1; i < len(assignedPorts); i++ {
-			if assignedPorts[i] != assignedPorts[0] {
-				allSame = false
-				break
-			}
-		}
-		if allSame {
-			t.Logf("All ports were the same (%d) - this is possible but offset should provide variation", assignedPorts[0])
-		} else {
-			t.Logf("Port assignment used offset correctly: %v", assignedPorts)
-		}
+	port, token, _, reused, err := EnsureBridgeJSONWithConfig(gameID, tempDir, nil)
+	if err != nil {
+		t.Fatalf("EnsureBridgeJSONWithConfig failed: %v", err)
+	}
+	if !reused {
+		t.Fatal("expected existing bridge endpoint to be reused")
+	}
+	if port != originalPort || token != originalToken {
+		t.Fatalf("expected endpoint %d/%s, got %d/%s", originalPort, originalToken, port, token)
+	}
+}
+
+func TestEnsureBridgeJSONReplacesInvalidEndpoint(t *testing.T) {
+	tempDir := t.TempDir()
+	gameID := "invalid-game"
+	bridgeDir := filepath.Join(tempDir, gameID)
+	if err := os.MkdirAll(bridgeDir, 0755); err != nil {
+		t.Fatalf("failed to create bridge dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bridgeDir, "bridge.json"), []byte(`{"port":0,"token":"","gameId":"invalid-game"}`), 0644); err != nil {
+		t.Fatalf("failed to seed invalid bridge file: %v", err)
+	}
+
+	port, token, _, reused, err := EnsureBridgeJSONWithConfig(gameID, tempDir, nil)
+	if err != nil {
+		t.Fatalf("EnsureBridgeJSONWithConfig failed: %v", err)
+	}
+	if reused {
+		t.Fatal("invalid bridge endpoint should not be reused")
+	}
+	if port <= 0 || token == "" {
+		t.Fatalf("expected replacement endpoint, got port=%d token=%q", port, token)
+	}
+}
+
+func TestPrepareBridgeEndpointForStartRejectsOccupiedEndpointCache(t *testing.T) {
+	tempDir := t.TempDir()
+	gameID := "occupied-endpoint"
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to reserve endpoint port: %v", err)
+	}
+	defer listener.Close()
+
+	occupiedPort := listener.Addr().(*net.TCPAddr).Port
+	if _, err := WriteBridgeJSONWithEndpoint(gameID, tempDir, occupiedPort, "existing-token"); err != nil {
+		t.Fatalf("failed to write existing bridge endpoint: %v", err)
+	}
+
+	_, _, path, _, err := PrepareBridgeEndpointForStart(gameID, tempDir, nil, false)
+	if err == nil {
+		t.Fatal("expected occupied endpoint cache to be rejected")
+	}
+	var endpointErr *BridgeEndpointInUseError
+	if !errors.As(err, &endpointErr) {
+		t.Fatalf("expected BridgeEndpointInUseError, got %T %v", err, err)
+	}
+	if endpointErr.Port != occupiedPort || endpointErr.ConfigPath != path {
+		t.Fatalf("unexpected endpoint error details: %#v, path %q", endpointErr, path)
+	}
+}
+
+func TestPrepareBridgeEndpointForStartCanResetOccupiedEndpointCache(t *testing.T) {
+	tempDir := t.TempDir()
+	gameID := "reset-endpoint"
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to reserve endpoint port: %v", err)
+	}
+	defer listener.Close()
+
+	occupiedPort := listener.Addr().(*net.TCPAddr).Port
+	if _, err := WriteBridgeJSONWithEndpoint(gameID, tempDir, occupiedPort, "existing-token"); err != nil {
+		t.Fatalf("failed to write existing bridge endpoint: %v", err)
+	}
+
+	port, token, _, reused, err := PrepareBridgeEndpointForStart(gameID, tempDir, nil, true)
+	if err != nil {
+		t.Fatalf("expected reset endpoint to succeed: %v", err)
+	}
+	if reused {
+		t.Fatal("reset endpoint should not report reused cache")
+	}
+	if port == occupiedPort || token == "existing-token" {
+		t.Fatalf("expected reset endpoint to rotate away from occupied endpoint, got port=%d token=%q", port, token)
 	}
 }

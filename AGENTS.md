@@ -27,7 +27,7 @@ variables first:
 - `GABP_SERVER_PORT`
 - `GABP_TOKEN`
 - `GABS_GAME_ID`
-- `GABS_BRIDGE_PATH` as fallback/debug metadata only
+- `GABS_BRIDGE_PATH` as endpoint-cache/debug metadata only
 
 `runtime.json` belongs to GABS ownership coordination. Game-side bridge code
 must ignore it.

@@ -59,21 +59,21 @@ GABS currently uses **local-only communication** for security and simplicity:
 During game configuration:
 - Bridge connections use localhost (127.0.0.1) only
 - Unique ports and tokens generated automatically
-- Game integrations should prefer `GABP_SERVER_PORT`, `GABP_TOKEN`, and
-  `GABS_GAME_ID`; `bridge.json` remains a fallback/debug path through
-  `GABS_BRIDGE_PATH`
+- Game integrations should read `GABP_SERVER_PORT`, `GABP_TOKEN`, and
+  `GABS_GAME_ID` from their process environment
 - Maximum security with no network exposure
 
-GABS writes bridge metadata to `~/.gabs/{gameId}/bridge.json`, but current
-game integrations should usually read the environment variables first and use that file only
-as a fallback.
+GABS may write `~/.gabs/{gameId}/bridge.json` as an endpoint cache/debug
+artifact, but game integrations should not read it as runtime configuration.
 
 GABS also writes `~/.gabs/{gameId}/runtime.json` for ownership and lifecycle
-coordination between live GABS sessions. Game integrations must ignore
+coordination between live GABS sessions. Runtime ownership is an expiring
+active-use lease so live sessions can hand off naturally with `games_connect`
+after the previous session goes idle. Game integrations must ignore
 `runtime.json`. When state looks wrong, `games_status` is the supported first
-diagnostic step: it reports stale runtime files, stale bridge files, missing
-bridge files, passively detected orphan listeners, and launcher/process
-environment mismatches with structured `diagnostics` and `nextActions`.
+diagnostic step: it reports stale runtime files, active-owner lease state,
+and whether the real game process environment is readable with structured
+`diagnostics` and `nextActions`.
 
 ## Common Deployment Scenarios
 
@@ -154,7 +154,7 @@ gabs server --http :8080
 All GABP connections use token authentication. Tokens are:
 - 64-character random hex strings
 - Generated fresh for each session
-- Stored in `bridge.json`
+- Passed to the game-side bridge through `GABP_TOKEN`
 - Required for all GABP protocol messages
 
 ### Network Security
@@ -188,17 +188,14 @@ Game integrations should:
    - Check that the game-side bridge is running and listening on
      `127.0.0.1:GABP_SERVER_PORT`
    - Ensure `GABP_TOKEN` matches between GABS and the game-side bridge
-   - Verify the game-side bridge is reading the environment variables GABS provides, or
-     using `bridge.json` only as a fallback
+   - Verify the game-side bridge is reading the environment variables GABS provides
    - Check game logs to confirm the game-side bridge finished starting its GABP server
 
-2. **"failed to read bridge.json"** 
-   - Ensure GABS launched or reattached the game first; GABS is the component
-     that writes `bridge.json`
-   - Prefer reading the environment variables that GABS injects, and use
-     `~/.gabs/{gameId}/bridge.json` or `GABS_BRIDGE_PATH` only as a fallback
-   - Check file permissions on config directory
-   - Verify gameId matches between GABS and bridge
+2. **"configuration not found"**
+   - Verify GABS launched the game process so `GABP_SERVER_PORT`, `GABP_TOKEN`,
+     and `GABS_GAME_ID` are present in the process environment
+   - Do not repair this by reading `bridge.json`; that file is GABS' endpoint
+     cache/debug artifact and can be stale relative to a launcher-owned process
 
 3. **Connection timeout**
    - Check that the game-side bridge has actually started its GABP server yet
@@ -226,7 +223,7 @@ Game integrations should:
 
 1. **Read bridge settings on bridge startup:**
    ```csharp
-   var config = ReadBridgeConfig(); // Prefer env vars, fall back to GABS_BRIDGE_PATH or ~/.gabs/{gameId}/bridge.json
+   var config = ReadBridgeConfigFromEnvironment();
    var server = new GABPServer("127.0.0.1", config.Port, config.Token);
    ```
 
@@ -268,7 +265,7 @@ Potential improvements being considered:
 
 ## Configuration Reference
 
-### bridge.json Format
+### Endpoint Cache Debug Format
 
 ```json
 {
@@ -278,9 +275,10 @@ Potential improvements being considered:
 }
 ```
 
-`bridge.json` mirrors the same port/token/game ID used for the local bridge.
-It is intentionally secondary to `GABP_SERVER_PORT`, `GABP_TOKEN`, and
-`GABS_GAME_ID` when those environment variables are present.
+This file stores GABS' cached endpoint for the game. Game-side bridge
+integrations should not read it as runtime configuration; use
+`GABP_SERVER_PORT`, `GABP_TOKEN`, and `GABS_GAME_ID` from the process
+environment instead.
 
 ### Command Line Options
 
@@ -301,13 +299,15 @@ It is intentionally secondary to `GABP_SERVER_PORT`, `GABP_TOKEN`, and
 
 **GABP Bridge (Set by GABS for Game Bridges):**
 - `GABS_GAME_ID`: Game identifier passed to bridge
-- `GABS_BRIDGE_PATH`: Path to bridge.json configuration file
 - `GABP_SERVER_PORT`: Port number for bridge to listen on
 - `GABP_TOKEN`: Authentication token for GABS connection
 
 Launcher modes such as `SteamAppId` start through the platform launcher. If the
 launcher is already running, the real game process may inherit older `GABP_*`
-values than the newest `bridge.json`. In that case, do not make the game-side
-bridge prefer the bridge file; use `games_status` to diagnose the mismatch,
-then stop/restart or use `DirectPath`/`CustomCommand` when deterministic
+values than a newly launched supervisor environment. In that case, do not make
+the game-side bridge read `bridge.json`; use `games_connect` so GABS can prefer
+the running process environment. If `games_start` reports
+`endpoint_cache_in_use`, attach with `games_connect` or use
+`resetEndpoint: true` only after confirming the cached endpoint should be
+rotated. Stop/restart or use `DirectPath`/`CustomCommand` when deterministic
 environment injection is required.

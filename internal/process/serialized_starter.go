@@ -15,6 +15,8 @@ type ProcessStartResult struct {
 	ProcessExitedDuringGABP bool // Process died before GABP became available
 	GABPConnectError        error
 	GABPConnectWait         time.Duration
+	BackgroundGABPConnect   bool
+	BackgroundGABPWait      time.Duration
 	Error                   error
 }
 

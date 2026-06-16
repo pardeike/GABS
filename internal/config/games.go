@@ -51,9 +51,15 @@ type StartupTimeoutsConfig struct {
 	GABPConnectSeconds  int `json:"gabpConnectSeconds,omitempty"`
 }
 
+// SessionTimeoutsConfig configures cross-session coordination windows.
+type SessionTimeoutsConfig struct {
+	OwnerLeaseSeconds int `json:"ownerLeaseSeconds,omitempty"`
+}
+
 // TimeoutsConfig groups configurable timeout settings.
 type TimeoutsConfig struct {
 	Startup *StartupTimeoutsConfig `json:"startup,omitempty"`
+	Session *SessionTimeoutsConfig `json:"session,omitempty"`
 }
 
 // GamesConfig represents the main GABS configuration
@@ -70,6 +76,7 @@ type GamesConfig struct {
 const (
 	defaultProcessStartTimeoutSeconds = 10
 	defaultGABPConnectTimeoutSeconds  = 60
+	defaultOwnerLeaseSeconds          = 30
 )
 
 // LoadGamesConfig loads the games configuration from the standard location
@@ -133,12 +140,19 @@ func LoadGamesConfigFromPath(configPath string) (*GamesConfig, error) {
 	}
 
 	// Initialize timeout defaults for explicitly configured timeout sections.
-	if config.Timeouts != nil && config.Timeouts.Startup != nil {
-		if config.Timeouts.Startup.ProcessStartSeconds <= 0 {
-			config.Timeouts.Startup.ProcessStartSeconds = defaultProcessStartTimeoutSeconds
+	if config.Timeouts != nil {
+		if config.Timeouts.Startup != nil {
+			if config.Timeouts.Startup.ProcessStartSeconds <= 0 {
+				config.Timeouts.Startup.ProcessStartSeconds = defaultProcessStartTimeoutSeconds
+			}
+			if config.Timeouts.Startup.GABPConnectSeconds <= 0 {
+				config.Timeouts.Startup.GABPConnectSeconds = defaultGABPConnectTimeoutSeconds
+			}
 		}
-		if config.Timeouts.Startup.GABPConnectSeconds <= 0 {
-			config.Timeouts.Startup.GABPConnectSeconds = defaultGABPConnectTimeoutSeconds
+		if config.Timeouts.Session != nil {
+			if config.Timeouts.Session.OwnerLeaseSeconds <= 0 {
+				config.Timeouts.Session.OwnerLeaseSeconds = defaultOwnerLeaseSeconds
+			}
 		}
 	} else {
 		config.Timeouts = nil
@@ -291,6 +305,12 @@ func defaultStartupTimeoutsConfig() *StartupTimeoutsConfig {
 	}
 }
 
+func defaultSessionTimeoutsConfig() *SessionTimeoutsConfig {
+	return &SessionTimeoutsConfig{
+		OwnerLeaseSeconds: defaultOwnerLeaseSeconds,
+	}
+}
+
 // GetStartupTimeouts returns startup timeout settings with defaults applied.
 func (c *GamesConfig) GetStartupTimeouts() (time.Duration, time.Duration) {
 	startup := defaultStartupTimeoutsConfig()
@@ -305,4 +325,16 @@ func (c *GamesConfig) GetStartupTimeouts() (time.Duration, time.Duration) {
 
 	return time.Duration(startup.ProcessStartSeconds) * time.Second,
 		time.Duration(startup.GABPConnectSeconds) * time.Second
+}
+
+// GetSessionOwnerLease returns the runtime-owner idle lease with defaults applied.
+func (c *GamesConfig) GetSessionOwnerLease() time.Duration {
+	session := defaultSessionTimeoutsConfig()
+	if c != nil && c.Timeouts != nil && c.Timeouts.Session != nil {
+		if c.Timeouts.Session.OwnerLeaseSeconds > 0 {
+			session.OwnerLeaseSeconds = c.Timeouts.Session.OwnerLeaseSeconds
+		}
+	}
+
+	return time.Duration(session.OwnerLeaseSeconds) * time.Second
 }

@@ -49,28 +49,14 @@ When GABS starts your game, it passes GABP server configuration via environment 
 - `GABP_SERVER_PORT` - Port number your game-side bridge should listen on (e.g., 12345)
 - `GABP_TOKEN` - Authentication token for GABS connections
 
-### Optional Environment Variables
-
-- `GABS_BRIDGE_PATH` - Path to bridge.json file (for debugging/fallback only)
-
 **Why Environment Variables?**
 - ✅ Works reliably in concurrent game launches (each gets unique port)
 - ✅ No file I/O required for essential configuration
 - ✅ No permission or path issues
 - ✅ Atomic - all info available instantly when game starts
 
-### Bridge File (Optional Fallback)
-
-If present, `GABS_BRIDGE_PATH` points to a JSON file with the same information:
-```json
-{
-  "port": 12345,
-  "token": "secret-auth-token", 
-  "gameId": "your-game-id"
-}
-```
-
-**Note:** The bridge file is primarily for debugging. Always prioritize environment variables.
+The `bridge.json` file is GABS' endpoint cache/debug artifact. Do not use it as
+game-side runtime configuration.
 
 ## Step 2: Acting as GABP Server
 
@@ -122,7 +108,6 @@ Real-time notifications about what's happening:
 ### C#
 ```csharp
 using System;
-using System.IO;
 using System.Net;
 using System.Threading;
 using Newtonsoft.Json;
@@ -132,7 +117,7 @@ public class GABPBridge {
     
     public void Start() 
     {
-        // Read the bridge config
+        // Read GABP environment configuration
         var config = ReadBridgeConfig();
         
         // Start GABP server
@@ -151,7 +136,7 @@ public class GABPBridge {
     
     private BridgeConfig ReadBridgeConfig()
     {
-        // Method 1: Use environment variables (recommended)
+        // Use environment variables provided by GABS.
         var gameId = Environment.GetEnvironmentVariable("GABS_GAME_ID");
         var portStr = Environment.GetEnvironmentVariable("GABP_SERVER_PORT");
         var token = Environment.GetEnvironmentVariable("GABP_TOKEN");
@@ -166,28 +151,7 @@ public class GABPBridge {
                 GameId = gameId ?? "unknown"
             };
         }
-        
-        // Method 2: Use bridge file path (fallback for debugging)
-        var bridgePath = Environment.GetEnvironmentVariable("GABS_BRIDGE_PATH");
-        if (!string.IsNullOrEmpty(bridgePath) && File.Exists(bridgePath))
-        {
-            var json = File.ReadAllText(bridgePath);
-            return JsonConvert.DeserializeObject<BridgeConfig>(json);
-        }
-        
-        // Legacy fallback methods for backwards compatibility
-        if (!string.IsNullOrEmpty(gameId))
-        {
-            var homeDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            var configPath = Path.Combine(homeDir, ".gabs", gameId, "bridge.json");
-            if (File.Exists(configPath))
-            {
-                var json = File.ReadAllText(configPath);
-                return JsonConvert.DeserializeObject<BridgeConfig>(json);
-            }
-        }
-        
-        throw new Exception("GABP server config not found. Ensure GABS is running and game was started via GABS.");
+        throw new Exception("GABP server config not found in environment. Ensure GABS launched the game process.");
     }
     
     private object GetPlayerInventory(object args)
@@ -237,7 +201,7 @@ public class GABPBridge {
     
     public void onServerStart() {
         try {
-            // Read bridge config
+            // Read GABP environment configuration
             BridgeConfig config = readBridgeConfig();
             
             // Start GABP server
@@ -258,7 +222,7 @@ public class GABPBridge {
     }
     
     private BridgeConfig readBridgeConfig() throws IOException {
-        // Method 1: Use environment variables (recommended)
+        // Use environment variables provided by GABS.
         String gameId = System.getenv("GABS_GAME_ID");
         String portStr = System.getenv("GABP_SERVER_PORT");
         String token = System.getenv("GABP_TOKEN");
@@ -272,31 +236,11 @@ public class GABPBridge {
                 config.gameId = gameId != null ? gameId : "unknown";
                 return config;
             } catch (NumberFormatException e) {
-                // Fall through to file-based methods
+                throw new IOException("Invalid GABP_SERVER_PORT: " + portStr, e);
             }
         }
-        
-        // Method 2: Use bridge file path (fallback for debugging)
-        String bridgePath = System.getenv("GABS_BRIDGE_PATH");
-        if (bridgePath != null && !bridgePath.isEmpty()) {
-            Path path = Paths.get(bridgePath);
-            if (Files.exists(path)) {
-                String json = Files.readString(path);
-                return new Gson().fromJson(json, BridgeConfig.class);
-            }
-        }
-        
-        // Legacy fallback methods for backwards compatibility
-        if (gameId != null && !gameId.isEmpty()) {
-            String homeDir = System.getProperty("user.home");
-            Path configPath = Paths.get(homeDir, ".gabs", gameId, "bridge.json");
-            if (Files.exists(configPath)) {
-                String json = Files.readString(configPath);
-                return new Gson().fromJson(json, BridgeConfig.class);
-            }
-        }
-        
-        throw new IOException("GABP server config not found. Ensure GABS is running and game was started via GABS.");
+
+        throw new IOException("GABP server config not found in environment. Ensure GABS launched the game process.");
     }
     
     private Object getInventory(Object args) {
@@ -332,14 +276,13 @@ import json
 import os
 import socket
 import threading
-from pathlib import Path
 
 class GABPBridge:
     def __init__(self):
         self.server = None
         
     def start(self):
-        # Read bridge config
+        # Read GABP environment configuration
         config = self.read_bridge_config()
         
         # Start GABP server
@@ -354,7 +297,7 @@ class GABPBridge:
         print(f"GABP server started on 127.0.0.1:{config['port']}")
         
     def read_bridge_config(self):
-        # Method 1: Use environment variables (recommended)
+        # Use environment variables provided by GABS.
         game_id = os.environ.get('GABS_GAME_ID')
         port_str = os.environ.get('GABP_SERVER_PORT')
         token = os.environ.get('GABP_TOKEN')
@@ -368,24 +311,9 @@ class GABPBridge:
                     'gameId': game_id or 'unknown'
                 }
             except ValueError:
-                # Fall through to file-based methods
-                pass
-        
-        # Method 2: Use bridge file path (fallback for debugging)
-        bridge_path = os.environ.get('GABS_BRIDGE_PATH')
-        if bridge_path and os.path.exists(bridge_path):
-            with open(bridge_path, 'r') as f:
-                return json.load(f)
-        
-        # Legacy fallback methods for backwards compatibility
-        if game_id:
-            home_dir = Path.home()
-            config_path = home_dir / '.gabs' / game_id / 'bridge.json'
-            if config_path.exists():
-                with open(config_path, 'r') as f:
-                    return json.load(f)
-        
-        raise FileNotFoundError("GABP server config not found. Ensure GABS is running and game was started via GABS.")
+                raise ValueError(f"Invalid GABP_SERVER_PORT: {port_str}")
+
+        raise RuntimeError("GABP server config not found in environment. Ensure GABS launched the game process.")
             
     def get_inventory(self, args):
         """Return current player inventory"""
@@ -548,7 +476,7 @@ GABP v1.1 is additive on top of `gabp/1`. If your bridge supports attention:
 
 ## Testing Your Implementation
 
-1. **Test config reading**: Make sure your game-side bridge can read the bridge config from the correct location using the environment variables
+1. **Test config reading**: Make sure your game-side bridge reads `GABP_SERVER_PORT`, `GABP_TOKEN`, and `GABS_GAME_ID` from the process environment
 2. **Test server startup**: Verify your bridge starts a server on the right port
 3. **Test with GABS**: Run `gabs games start your-game` and see if GABS can connect
 4. **Test tools**: Use AI to call your tools and verify they work
@@ -561,7 +489,6 @@ When GABS starts your game, it sets these environment variables for GABP server 
 - `GABS_GAME_ID`: The game ID used by GABS (e.g., "factory", "adventure")
 - `GABP_SERVER_PORT`: Port number your game-side bridge should listen on as GABP server
 - `GABP_TOKEN`: Authentication token for validating GABS connections
-- `GABS_BRIDGE_PATH`: Path to bridge.json file (for debugging/compatibility only)
 
 **Key Points:**
 - Your game-side bridge listens on `127.0.0.1:GABP_SERVER_PORT` 

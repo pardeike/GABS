@@ -37,18 +37,24 @@ response. Discover them with `games_tool_names`, inspect one with
 
 ## Ownership and Reconnect Behavior
 
-GABS coordinates live sessions per game. If one GABS session already owns a
-running or starting game:
+GABS coordinates live sessions per game with a short active-owner lease. If one
+GABS session is actively using a running or starting game:
 
 - `games_start` returns quickly instead of launching a duplicate copy
-- `games_connect` returns quickly instead of waiting on a competing bridge
-  connection
-- `games_status` may report that another GABS session owns the process
-- `games_status` also reports bridge-state diagnostics when runtime files,
-  bridge files, passive listener evidence, or process environment disagree
+- `games_connect` returns quickly with an active-owner result instead of waiting
+  on a competing bridge connection
+- game-bound tool calls are blocked before they touch the bridge
+- `games_status` may report that another GABS session owns the process and show
+  the lease expiry
+- `games_status` also reports runtime ownership and process-environment
+  diagnostics without making `bridge.json` a recovery target
+- if `games_start` reports `endpoint_cache_in_use`, use `games_connect` to
+  attach to the already-listening endpoint or `resetEndpoint: true` only after
+  confirming the cached endpoint should be rotated
 
-If you intentionally want the current GABS session to take ownership of a
-running game, call:
+Once the previous session is idle, `games_connect` naturally moves ownership to
+the current session. If you intentionally want the current GABS session to take
+ownership before the active lease expires, call:
 
 ```json
 {

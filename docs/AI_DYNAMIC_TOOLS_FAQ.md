@@ -188,21 +188,31 @@ console.log("Here are all available tools..."); // Group by game instead!
 3. **Discovery APIs**: `games_tool_names` and `games_tool_detail` provide structured exploration
 4. **Status Awareness**: AI can check game state before tool usage
 5. **Mirror System**: Automatic GABP→MCP tool conversion
-6. **Session Ownership Guardrails**: Duplicate `games_start` and `games_connect`
-   requests return quickly instead of racing a second live GABS session
+6. **Session Ownership Guardrails**: Duplicate `games_start`, active
+   `games_connect`, and game-bound calls return quickly instead of racing a
+   second live GABS session
 
 ## What About Multiple GABS Sessions?
 
 This matters in the real world because developers often have more than one AI
 session open.
 
-- If one live GABS session already owns a running or starting game,
+- If one live GABS session actively owns a running or starting game,
   `games_start` returns quickly instead of launching a duplicate process
 - `games_connect` also returns quickly instead of hanging on a competing bridge
-  connection
-- `games_status` can report that another GABS session owns the process
-- If takeover is intentional, `games_connect {"gameId": "adventure",
-  "forceTakeover": true}` moves ownership to the current session
+  connection while the active owner lease is still open
+- once the previous session is idle, `games_connect` moves ownership to the
+  current session without `forceTakeover`
+- game-bound calls from old sessions are blocked while another active owner
+  holds the lease
+- `games_status` can report that another GABS session owns the process and show
+  the lease expiry
+- if `games_start` reports `endpoint_cache_in_use`, use `games_connect` to
+  attach to the already-listening endpoint or `resetEndpoint: true` only after
+  confirming the endpoint cache should be rotated
+- if takeover is intentional before the active lease expires,
+  `games_connect {"gameId": "adventure", "forceTakeover": true}` moves
+  ownership to the current session
 
 ### Current State
 - **Stable public tool list is live**: mirrored game tools no longer require

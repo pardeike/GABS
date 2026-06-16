@@ -214,6 +214,30 @@ func TestGamesConfigStartupTimeoutDefaults(t *testing.T) {
 	})
 }
 
+func TestGamesConfigSessionOwnerLeaseDefaults(t *testing.T) {
+	t.Run("MissingTimeoutConfigUsesDefaultOwnerLease", func(t *testing.T) {
+		cfg := &GamesConfig{}
+
+		if ownerLease := cfg.GetSessionOwnerLease(); ownerLease != 30*time.Second {
+			t.Fatalf("expected default owner lease 30s, got %v", ownerLease)
+		}
+	})
+
+	t.Run("ConfiguredOwnerLeaseOverridesDefault", func(t *testing.T) {
+		cfg := &GamesConfig{
+			Timeouts: &TimeoutsConfig{
+				Session: &SessionTimeoutsConfig{
+					OwnerLeaseSeconds: 7,
+				},
+			},
+		}
+
+		if ownerLease := cfg.GetSessionOwnerLease(); ownerLease != 7*time.Second {
+			t.Fatalf("expected configured owner lease 7s, got %v", ownerLease)
+		}
+	})
+}
+
 func TestNewGabsDirectoryStructure(t *testing.T) {
 	t.Run("ConfigPathUsesHomeGabsDirectory", func(t *testing.T) {
 		cp, err := NewConfigPaths("")

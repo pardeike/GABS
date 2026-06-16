@@ -7,7 +7,9 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -129,6 +131,93 @@ func TestGamesConnectCanReattachUsingBridgeConfigWithoutTrackedProcess(t *testin
 	toolsText := string(toolsBytes)
 	if !strings.Contains(toolsText, "adventure.corebridge.core.ping") {
 		t.Fatalf("expected mirrored tool after reconnect, got: %s", toolsText)
+	}
+
+	if err := <-serverDone; err != nil {
+		t.Fatalf("test GABP server failed: %v", err)
+	}
+}
+
+func TestGamesConnectPrefersReadableProcessEnvironmentOverBridgeFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process environment inspection is not supported on Windows")
+	}
+
+	tmpDir := t.TempDir()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer listener.Close()
+
+	processToken := "process-env-token"
+	serverDone := make(chan error, 1)
+	go serveTestGabpSession(listener, processToken, serverDone)
+
+	writeBridgeJSONForTest(t, tmpDir, "adventure", unusedLocalPort(t), "bridge-file-token")
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("failed to locate helper executable: %v", err)
+	}
+	cmd := exec.Command(exe, "-test.run=TestSharedRuntimeStateHelperProcess")
+	cmd.Env = append(os.Environ(),
+		"GABS_HELPER_PROCESS=1",
+		fmt.Sprintf("GABP_SERVER_PORT=%d", listener.Addr().(*net.TCPAddr).Port),
+		"GABP_TOKEN="+processToken,
+		"GABS_GAME_ID=adventure",
+	)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to start helper process: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	}()
+
+	runtimeState := process.RuntimeState{
+		GameID:   "adventure",
+		Status:   process.RuntimeStateStatusRunning,
+		OwnerPID: os.Getpid(),
+		GamePID:  cmd.Process.Pid,
+	}
+	if err := process.SaveRuntimeState("adventure", tmpDir, runtimeState); err != nil {
+		t.Fatalf("failed to write runtime state: %v", err)
+	}
+
+	gamesConfig := &config.GamesConfig{
+		Games: map[string]config.GameConfig{
+			"adventure": {
+				ID:         "adventure",
+				Name:       "AdventureGame",
+				LaunchMode: "DirectPath",
+				Target:     "/Applications/AdventureGameMac.app/Contents/MacOS/AdventureGame by ExampleStudio Studios",
+			},
+		},
+	}
+
+	server := NewServerForTesting(util.NewLogger("error"))
+	server.SetConfigDir(tmpDir)
+	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
+
+	connectText := marshalMessage(t, server.HandleMessage(&Message{
+		JSONRPC: "2.0",
+		Method:  "tools/call",
+		ID:      json.RawMessage(`"connect-process-env-first"`),
+		Params: map[string]interface{}{
+			"name": "games.connect",
+			"arguments": map[string]interface{}{
+				"gameId":  "adventure",
+				"timeout": 2,
+			},
+		},
+	}))
+
+	if strings.Contains(connectText, `"isError":true`) {
+		t.Fatalf("expected connect to use process env endpoint, got: %s", connectText)
+	}
+	if !strings.Contains(connectText, fmt.Sprintf("port %d", listener.Addr().(*net.TCPAddr).Port)) {
+		t.Fatalf("expected connect response to use process env port, got: %s", connectText)
 	}
 
 	if err := <-serverDone; err != nil {
@@ -432,7 +521,7 @@ func TestGamesConnectForceTakeoverCanOverrideSharedOwner(t *testing.T) {
 	if strings.Contains(blockedText, `"isError":true`) {
 		t.Fatalf("expected non-error response for blocked connect, got: %s", blockedText)
 	}
-	if !strings.Contains(blockedText, "another live GABS session") {
+	if !strings.Contains(blockedText, "another active GABS session") {
 		t.Fatalf("expected ownership block message, got: %s", blockedText)
 	}
 

@@ -4,8 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -30,14 +28,13 @@ type bridgeFileDiagnostic struct {
 }
 
 type processEnvDiagnostic struct {
-	PID        int
-	Present    bool
-	Readable   bool
-	Port       int
-	Token      string
-	GameID     string
-	BridgePath string
-	Error      string
+	PID      int
+	Present  bool
+	Readable bool
+	Port     int
+	Token    string
+	GameID   string
+	Error    string
 }
 
 type bridgeListenerDiagnostic struct {
@@ -50,13 +47,7 @@ type bridgeListenerDiagnostic struct {
 var passiveBridgeListenerStatusFunc = passiveBridgeListenerStatus
 
 func (s *Server) gameStateDiagnostics(game config.GameConfig, status string) map[string]interface{} {
-	bridge := s.readBridgeFileDiagnostic(game.ID)
 	runtimeState, runtimeErr := process.LoadRuntimeState(game.ID, s.configDir)
-	listener := bridgeListenerDiagnostic{}
-	if bridge.Present && bridge.Port > 0 {
-		listener = passiveBridgeListenerStatusFunc(bridge.Port)
-	}
-
 	processEnv := s.inspectGameBridgeEnvironment(game, runtimeState)
 	code := "healthy"
 	severity := "info"
@@ -70,36 +61,7 @@ func (s *Server) gameStateDiagnostics(game config.GameConfig, status string) map
 	} else if status == "stale-runtime-cleaned" {
 		code = "stale-runtime-cleaned"
 		severity = "warning"
-		message = "Stale runtime and bridge state were removed; start the game again to create fresh bridge state."
-	} else if bridge.Error != "" {
-		code = "bridge-file-error"
-		severity = "warning"
-		message = fmt.Sprintf("Could not read bridge.json: %s", bridge.Error)
-	} else if bridge.Present && processEnv.Present && bridgeProcessEnvironmentMismatch(bridge, processEnv) {
-		if game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId" {
-			code = "stale-launcher-environment"
-			message = fmt.Sprintf("The running game process has GABP port %d but bridge.json has port %d; the launcher likely reused stale environment.", processEnv.Port, bridge.Port)
-		} else {
-			code = "bridge-process-env-mismatch"
-			message = fmt.Sprintf("The running game process has GABP port %d but bridge.json has port %d.", processEnv.Port, bridge.Port)
-		}
-		severity = "warning"
-	} else if bridge.Present && status == "stopped" && listener.Checked && !listener.Open {
-		code = "stale-bridge-file"
-		severity = "warning"
-		message = "bridge.json exists, but no runtime state or passive listener evidence was found on its port; the file is stale."
-	} else if bridge.Present && status == "stopped" && listener.Checked && listener.Open {
-		code = "orphan-bridge-listener"
-		severity = "warning"
-		message = "bridge.json points at an open local port, but GABS has no runtime owner for this game."
-	} else if bridge.Present && status == "stopped" {
-		code = "unverified-bridge-file"
-		severity = "warning"
-		message = "bridge.json exists, but GABS has no runtime owner and could not passively verify whether its port is listening."
-	} else if runtimeState != nil && !bridge.Present && status != "stopped" && status != "stale-runtime-cleaned" {
-		code = "missing-bridge-file"
-		severity = "warning"
-		message = "runtime.json says the game is running, but bridge.json is missing."
+		message = "Stale runtime state was removed."
 	}
 
 	if (game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId") && status != "stopped" && status != "stale-runtime-cleaned" && !processEnv.Present {
@@ -110,8 +72,6 @@ func (s *Server) gameStateDiagnostics(game config.GameConfig, status string) map
 		"code":               code,
 		"severity":           severity,
 		"message":            message,
-		"bridge":             bridge.structured(),
-		"listener":           listener.structured(),
 		"processEnvironment": processEnv.structured(),
 	}
 	if runtimeErr != nil {
@@ -120,7 +80,7 @@ func (s *Server) gameStateDiagnostics(game config.GameConfig, status string) map
 			"error":   runtimeErr.Error(),
 		}
 	} else {
-		diagnostics["runtime"] = runtimeStateStructured(runtimeState)
+		diagnostics["runtime"] = runtimeStateStructured(runtimeState, s.runtimeOwnerLeaseDuration())
 	}
 	if len(warnings) > 0 {
 		diagnostics["warnings"] = warnings
@@ -134,37 +94,7 @@ func nextActionsForGameStateDiagnostics(game config.GameConfig, diagnostics map[
 		return fallback
 	}
 
-	code, _ := diagnostics["code"].(string)
-	gameArg := map[string]interface{}{"gameId": game.ID}
-	switch code {
-	case "stale-launcher-environment", "bridge-process-env-mismatch":
-		if game.StopProcessName != "" {
-			return []map[string]interface{}{
-				mcpNextAction("games_stop", gameArg, "Stop the running game so the launcher cannot keep using stale bridge environment."),
-				mcpNextAction("games_start", gameArg, "Start the game again to write fresh bridge state and inject matching GABP environment."),
-			}
-		}
-		return []map[string]interface{}{
-			mcpNextAction("games_show", gameArg, "Check launch configuration; add stopProcessName or switch to DirectPath/CustomCommand for deterministic recovery."),
-			mcpNextAction("games_start", gameArg, "Start only after manually closing the existing game and launcher state."),
-		}
-	case "orphan-bridge-listener":
-		return []map[string]interface{}{
-			mcpNextAction("games_connect", gameArg, "Try attaching to the open bridge listener from bridge.json."),
-			mcpNextAction("games_status", gameArg, "Refresh status after connect or manual cleanup."),
-		}
-	case "unverified-bridge-file":
-		return []map[string]interface{}{
-			mcpNextAction("games_connect", gameArg, "Try the authenticated GABP connection from bridge.json; status does not open a probe connection."),
-			mcpNextAction("games_start", gameArg, "If connect fails because the bridge file is stale, start the game again to write fresh bridge/runtime state."),
-		}
-	case "stale-bridge-file", "missing-bridge-file":
-		return []map[string]interface{}{
-			mcpNextAction("games_start", gameArg, "Write fresh bridge/runtime state by starting the game through GABS."),
-		}
-	default:
-		return fallback
-	}
+	return fallback
 }
 
 func gameStateDiagnosticMessage(statusItem map[string]interface{}) string {
@@ -210,7 +140,6 @@ func (p processEnvDiagnostic) structured() map[string]interface{} {
 	if p.Present {
 		item["port"] = p.Port
 		item["gameId"] = p.GameID
-		item["bridgePath"] = p.BridgePath
 		item["tokenFingerprint"] = tokenFingerprint(p.Token)
 	}
 	return item
@@ -230,10 +159,11 @@ func (l bridgeListenerDiagnostic) structured() map[string]interface{} {
 	return item
 }
 
-func runtimeStateStructured(state *process.RuntimeState) map[string]interface{} {
+func runtimeStateStructured(state *process.RuntimeState, ownerLease time.Duration) map[string]interface{} {
 	if state == nil {
 		return map[string]interface{}{"present": false}
 	}
+	leaseUntil := process.RuntimeOwnerLeaseExpiresAt(state, ownerLease)
 	item := map[string]interface{}{
 		"present":         true,
 		"gameId":          state.GameID,
@@ -245,37 +175,15 @@ func runtimeStateStructured(state *process.RuntimeState) map[string]interface{} 
 		"updatedAt":       state.UpdatedAt.Format(time.RFC3339),
 		"resolvedStatus":  process.ResolveRuntimeStateStatus(state),
 	}
+	if !state.OwnerLastActive.IsZero() {
+		item["ownerLastActive"] = state.OwnerLastActive.Format(time.RFC3339)
+	}
+	if !leaseUntil.IsZero() {
+		item["ownerLeaseUntil"] = leaseUntil.Format(time.RFC3339)
+		item["ownerLeaseActive"] = process.RuntimeOwnerLeaseActive(state, ownerLease, time.Now().UTC())
+		item["ownerLeaseRemainingMs"] = time.Until(leaseUntil).Milliseconds()
+	}
 	return item
-}
-
-func (s *Server) readBridgeFileDiagnostic(gameID string) bridgeFileDiagnostic {
-	paths, err := config.NewConfigPaths(s.configDir)
-	if err != nil {
-		return bridgeFileDiagnostic{Error: err.Error()}
-	}
-
-	path := paths.GetBridgeConfigPath(gameID)
-	diagnostic := bridgeFileDiagnostic{Path: path}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return diagnostic
-		}
-		diagnostic.Error = err.Error()
-		return diagnostic
-	}
-
-	var bridge config.BridgeJSON
-	if err := json.Unmarshal(data, &bridge); err != nil {
-		diagnostic.Error = err.Error()
-		return diagnostic
-	}
-
-	diagnostic.Present = true
-	diagnostic.Port = bridge.Port
-	diagnostic.Token = bridge.Token
-	diagnostic.GameID = bridge.GameId
-	return diagnostic
 }
 
 func (s *Server) inspectGameBridgeEnvironment(game config.GameConfig, runtimeState *process.RuntimeState) processEnvDiagnostic {
@@ -305,14 +213,13 @@ func (s *Server) inspectGameBridgeEnvironment(game config.GameConfig, runtimeSta
 		}
 
 		diagnostic := processEnvDiagnostic{
-			PID:        pid,
-			Readable:   true,
-			Port:       parseInt(env["GABP_SERVER_PORT"]),
-			Token:      env["GABP_TOKEN"],
-			GameID:     env["GABS_GAME_ID"],
-			BridgePath: env["GABS_BRIDGE_PATH"],
+			PID:      pid,
+			Readable: true,
+			Port:     parseInt(env["GABP_SERVER_PORT"]),
+			Token:    env["GABP_TOKEN"],
+			GameID:   env["GABS_GAME_ID"],
 		}
-		diagnostic.Present = diagnostic.Port > 0 || diagnostic.Token != "" || diagnostic.GameID != "" || diagnostic.BridgePath != ""
+		diagnostic.Present = diagnostic.Port > 0 || diagnostic.Token != "" || diagnostic.GameID != ""
 		if diagnostic.Present {
 			return diagnostic
 		}
@@ -363,29 +270,13 @@ func readPsProcessEnvironment(pid int) (map[string]string, bool, error) {
 }
 
 func addBridgeEnvironmentValue(env map[string]string, value string) {
-	for _, key := range []string{"GABP_SERVER_PORT", "GABP_TOKEN", "GABS_GAME_ID", "GABS_BRIDGE_PATH"} {
+	for _, key := range []string{"GABP_SERVER_PORT", "GABP_TOKEN", "GABS_GAME_ID"} {
 		prefix := key + "="
 		if strings.HasPrefix(value, prefix) {
 			env[key] = strings.TrimPrefix(value, prefix)
 			return
 		}
 	}
-}
-
-func bridgeProcessEnvironmentMismatch(bridgeFile bridgeFileDiagnostic, processEnv processEnvDiagnostic) bool {
-	if !bridgeFile.Present || !processEnv.Present {
-		return false
-	}
-	if processEnv.Port > 0 && bridgeFile.Port > 0 && processEnv.Port != bridgeFile.Port {
-		return true
-	}
-	if processEnv.Token != "" && bridgeFile.Token != "" && processEnv.Token != bridgeFile.Token {
-		return true
-	}
-	if processEnv.GameID != "" && bridgeFile.GameID != "" && processEnv.GameID != bridgeFile.GameID {
-		return true
-	}
-	return false
 }
 
 func passiveBridgeListenerStatus(port int) bridgeListenerDiagnostic {
