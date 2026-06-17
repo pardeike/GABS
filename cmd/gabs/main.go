@@ -21,6 +21,7 @@ import (
 
 	"github.com/pardeike/gabs/internal/config"
 	"github.com/pardeike/gabs/internal/mcp"
+	"github.com/pardeike/gabs/internal/steam"
 	"github.com/pardeike/gabs/internal/util"
 	"github.com/pardeike/gabs/internal/version"
 )
@@ -190,6 +191,8 @@ Game management:
   gabs games add <id>           Add a new game configuration (interactive)
   gabs games remove <id>        Remove a game configuration
   gabs games show <id>          Show details for a game
+  gabs games doctor <id>        Diagnose one game configuration
+  gabs games repair <id>        Apply safe repairs for one game configuration
 
 Examples:
   # Start GABS MCP server (stdio)
@@ -305,6 +308,18 @@ func manageGames(ctx context.Context, log util.Logger, opts options, args []stri
 			return 2
 		}
 		return showGame(log, args[1], opts.configDir)
+	case "doctor":
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "games doctor requires a game ID\n")
+			return 2
+		}
+		return doctorGame(log, args[1], opts.configDir)
+	case "repair":
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "games repair requires a game ID\n")
+			return 2
+		}
+		return repairGame(log, args[1], opts.configDir)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown games action: %s\n", action)
 		return 2
@@ -370,18 +385,21 @@ func addGame(log util.Logger, gameID string, configDir string) int {
 	game := config.GameConfig{
 		ID:         gameID,
 		Name:       promptString("Game Name", gameID),
-		LaunchMode: promptChoice("Launch Mode", "DirectPath", []string{"DirectPath", "SteamAppId", "EpicAppId", "CustomCommand"}),
+		LaunchMode: promptChoice("Launch Mode", "DirectPath", []string{"DirectPath", "SteamManaged", "SteamAppId", "EpicAppId", "CustomCommand"}),
 	}
 
 	// Enhance target prompt for DirectPath mode with platform-specific help
 	var targetPrompt string
-	if game.LaunchMode == "DirectPath" {
+	switch game.LaunchMode {
+	case "DirectPath":
 		if runtime.GOOS == "darwin" {
 			targetPrompt = "Target (executable path or .app bundle)"
 		} else {
 			targetPrompt = "Target (executable path)"
 		}
-	} else {
+	case "SteamManaged", "SteamAppId":
+		targetPrompt = "Target (Steam App ID)"
+	default:
 		targetPrompt = "Target (path/id)"
 	}
 
@@ -395,7 +413,7 @@ func addGame(log util.Logger, gameID string, configDir string) int {
 		}
 	}
 
-	if game.LaunchMode == "DirectPath" || game.LaunchMode == "CustomCommand" {
+	if game.LaunchMode == "DirectPath" || game.LaunchMode == "SteamManaged" || game.LaunchMode == "CustomCommand" {
 		workingDir := promptString("Working Directory (optional)", "")
 		if workingDir != "" {
 			game.WorkingDir = workingDir
@@ -486,11 +504,131 @@ func showGame(log util.Logger, gameID string, configDir string) int {
 	if game.StopProcessName != "" {
 		fmt.Printf("  Stop Process Name: %s\n", game.StopProcessName)
 	}
+	if game.GABPMode != "" {
+		fmt.Printf("  GABP Mode: %s\n", game.GABPMode)
+	}
 	if game.Description != "" {
 		fmt.Printf("  Description: %s\n", game.Description)
 	}
 
 	return 0
+}
+
+func doctorGame(log util.Logger, gameID string, configDir string) int {
+	gamesConfig, err := config.LoadGamesConfigFromDir(configDir)
+	if err != nil {
+		log.Errorw("failed to load games config", "error", err)
+		return 1
+	}
+
+	game, exists := gamesConfig.GetGame(gameID)
+	if !exists {
+		fmt.Printf("Game '%s' not found.\n", gameID)
+		return 1
+	}
+
+	fmt.Printf("Game: %s\n", game.ID)
+	fmt.Printf("Launch Mode: %s\n", game.LaunchMode)
+	if game.Target != "" {
+		fmt.Printf("Target: %s\n", game.Target)
+	}
+
+	if err := game.Validate(); err != nil {
+		fmt.Printf("Configuration: invalid (%v)\n", err)
+	} else {
+		fmt.Println("Configuration: valid")
+	}
+
+	switch game.LaunchMode {
+	case "SteamAppId":
+		fmt.Println("Steam launch: launcher URL mode")
+		fmt.Println("Bridge environment: not guaranteed on the real game process")
+		app, err := steam.ResolveApp(game.Target)
+		if err != nil {
+			fmt.Printf("Managed Steam readiness: failed (%v)\n", err)
+			return 1
+		}
+		printSteamAppResolution(app)
+		fmt.Printf("Recommended repair: gabs games repair %s\n", game.ID)
+	case "SteamManaged":
+		fmt.Println("Steam launch: managed executable mode")
+		app, err := steam.ResolveApp(game.Target)
+		if err != nil {
+			fmt.Printf("Managed Steam readiness: failed (%v)\n", err)
+			return 1
+		}
+		printSteamAppResolution(app)
+		ok, content, err := steam.CheckAppIDFile(app)
+		if err != nil {
+			fmt.Printf("Steam app id file: unreadable (%v)\n", err)
+			return 1
+		}
+		if ok {
+			fmt.Printf("Steam app id file: ready (%s)\n", app.AppIDFilePath)
+		} else if content == "" {
+			fmt.Printf("Steam app id file: missing (%s)\n", app.AppIDFilePath)
+			fmt.Printf("Recommended repair: gabs games repair %s\n", game.ID)
+		} else {
+			fmt.Printf("Steam app id file: wrong id %q at %s\n", content, app.AppIDFilePath)
+			return 1
+		}
+	default:
+		if game.Target != "" {
+			if _, err := os.Stat(game.Target); err != nil {
+				fmt.Printf("Target path: not found (%v)\n", err)
+				return 1
+			}
+			fmt.Println("Target path: found")
+		}
+	}
+
+	return 0
+}
+
+func repairGame(log util.Logger, gameID string, configDir string) int {
+	gamesConfig, err := config.LoadGamesConfigFromDir(configDir)
+	if err != nil {
+		log.Errorw("failed to load games config", "error", err)
+		return 1
+	}
+
+	game, exists := gamesConfig.GetGame(gameID)
+	if !exists {
+		fmt.Printf("Game '%s' not found.\n", gameID)
+		return 1
+	}
+
+	switch game.LaunchMode {
+	case "SteamAppId", "SteamManaged":
+		app, err := steam.ResolveApp(game.Target)
+		if err != nil {
+			fmt.Printf("Steam repair failed: %v\n", err)
+			return 1
+		}
+		if err := steam.EnsureAppIDFile(app); err != nil {
+			fmt.Printf("Steam app id repair failed: %v\n", err)
+			return 1
+		}
+		if game.LaunchMode == "SteamAppId" {
+			game.LaunchMode = "SteamManaged"
+			gamesConfig.Games[game.ID] = *game
+			if err := backupGamesConfig(configDir); err != nil {
+				fmt.Printf("Failed to back up config: %v\n", err)
+				return 1
+			}
+			if err := config.SaveGamesConfigToDir(gamesConfig, configDir); err != nil {
+				log.Errorw("failed to save games config", "error", err)
+				return 1
+			}
+			fmt.Printf("Updated '%s' from SteamAppId to SteamManaged.\n", game.ID)
+		}
+		fmt.Printf("Steam app id file ready: %s\n", app.AppIDFilePath)
+		printSteamAppResolution(app)
+		return 0
+	default:
+		fmt.Printf("No automatic repair available for launch mode %s.\n", game.LaunchMode)
+		return 0
+	}
 }
 
 // === Helper Functions ===
@@ -501,13 +639,42 @@ func showGamesUsage() {
   gabs games add <id>           Add a new game configuration (interactive)
   gabs games remove <id>        Remove a game configuration
   gabs games show <id>          Show details for a game
+  gabs games doctor <id>        Diagnose one game configuration
+  gabs games repair <id>        Apply safe repairs for one game configuration
 
 Examples:
   gabs games list               # See game IDs only (AI-friendly)
   gabs games add factory      # Add a new game called 'factory'
   gabs games show factory     # View configuration for 'factory'
+  gabs games doctor factory   # Diagnose launch configuration
+  gabs games repair factory   # Apply safe launch repairs
   gabs games remove factory   # Remove the 'factory' configuration
 `)
+}
+
+func printSteamAppResolution(app steam.App) {
+	fmt.Printf("Steam app: %s", app.AppID)
+	if app.Name != "" {
+		fmt.Printf(" (%s)", app.Name)
+	}
+	fmt.Println()
+	fmt.Printf("Install path: %s\n", app.InstallPath)
+	fmt.Printf("Executable: %s\n", app.Executable)
+	fmt.Printf("Working directory: %s\n", app.WorkingDir)
+}
+
+func backupGamesConfig(configDir string) error {
+	cp, err := config.NewConfigPaths(configDir)
+	if err != nil {
+		return err
+	}
+	configPath := cp.GetMainConfigPath()
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return err
+	}
+	backupPath := fmt.Sprintf("%s.bak.%s", configPath, time.Now().Format("20060102-150405"))
+	return os.WriteFile(backupPath, data, 0644)
 }
 
 // isInteractive checks if the program is running in an interactive terminal

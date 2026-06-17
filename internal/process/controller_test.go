@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/pardeike/gabs/internal/steam"
 )
 
 func TestBridgePathGeneration(t *testing.T) {
@@ -108,6 +110,103 @@ func TestEnvironmentVariables(t *testing.T) {
 	t.Logf("GABP_TOKEN would be set to: %s", controller.bridgeInfo.Token)
 }
 
+func TestSteamManagedStartUsesResolvedExecutableAndBridgeEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test creates Unix executable permissions")
+	}
+
+	tempDir := t.TempDir()
+	library := filepath.Join(tempDir, "Steam")
+	steamapps := filepath.Join(library, "steamapps")
+	install := filepath.Join(steamapps, "common", "ExampleGame")
+	exe := filepath.Join(install, "ExampleGame")
+
+	writeTestFile(t, filepath.Join(steamapps, "libraryfolders.vdf"), `
+		"libraryfolders"
+		{
+			"0" { "path" "`+library+`" }
+		}
+	`, 0644)
+	writeTestFile(t, filepath.Join(steamapps, "appmanifest_123456.acf"), `
+		"AppState"
+		{
+			"appid" "123456"
+			"name" "Example Game"
+			"installdir" "ExampleGame"
+		}
+	`, 0644)
+	writeTestFile(t, exe, "#!/bin/sh\nsleep 30\n", 0755)
+
+	t.Setenv("GABS_STEAM_LIBRARYFOLDERS", filepath.Join(steamapps, "libraryfolders.vdf"))
+	restoreSteamControl := steam.SetClientControlForTesting(
+		func() (string, []string, error) {
+			return os.Args[0], []string{"-test.run=TestSteamClientStartHelper", "--"}, nil
+		},
+		func() bool { return true },
+		0,
+		0,
+	)
+	t.Cleanup(restoreSteamControl)
+
+	controller := &Controller{}
+	spec := LaunchSpec{
+		GameId:   "steam-managed-test",
+		Mode:     "SteamManaged",
+		PathOrId: "123456",
+	}
+	if err := controller.Configure(spec); err != nil {
+		t.Fatalf("Configure failed: %v", err)
+	}
+	controller.SetBridgeInfo(43210, "managed-token")
+
+	if err := controller.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = controller.Kill()
+	})
+
+	if controller.cmd == nil {
+		t.Fatal("expected command to be started")
+	}
+	if controller.cmd.Path != exe {
+		t.Fatalf("expected managed executable %s, got %s", exe, controller.cmd.Path)
+	}
+	if controller.cmd.Dir != install {
+		t.Fatalf("expected working dir %s, got %s", install, controller.cmd.Dir)
+	}
+
+	wantEnv := []string{
+		"GABS_GAME_ID=steam-managed-test",
+		"GABP_SERVER_PORT=43210",
+		"GABP_TOKEN=managed-token",
+		"SteamAppId=123456",
+		"SteamGameId=123456",
+	}
+	for _, want := range wantEnv {
+		if !containsEnv(controller.cmd.Env, want) {
+			t.Fatalf("expected env %s in %#v", want, controller.cmd.Env)
+		}
+	}
+
+	appIDPath := filepath.Join(install, "steam_appid.txt")
+	data, err := os.ReadFile(appIDPath)
+	if err != nil {
+		t.Fatalf("expected app id file: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "123456" {
+		t.Fatalf("unexpected app id file content %q", string(data))
+	}
+}
+
+func TestSteamClientStartHelper(t *testing.T) {
+	for _, arg := range os.Args {
+		if arg == "--" {
+			return
+		}
+	}
+}
+
 func TestLauncherWaitForProcessStartUsesStopProcessName(t *testing.T) {
 	controller := &Controller{}
 	spec := LaunchSpec{
@@ -142,6 +241,25 @@ func TestLauncherWaitForProcessStartUsesStopProcessName(t *testing.T) {
 	}
 	if findCalls == 0 {
 		t.Fatal("expected launcher startup wait to inspect the configured game process name")
+	}
+}
+
+func containsEnv(env []string, want string) bool {
+	for _, item := range env {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
+func writeTestFile(t *testing.T, path string, content string, mode os.FileMode) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+		t.Fatal(err)
 	}
 }
 

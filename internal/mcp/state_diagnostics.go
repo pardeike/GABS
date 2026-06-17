@@ -65,7 +65,11 @@ func (s *Server) gameStateDiagnostics(game config.GameConfig, status string) map
 	}
 
 	if (game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId") && status != "stopped" && status != "stale-runtime-cleaned" && !processEnv.Present {
-		warnings = append(warnings, fmt.Sprintf("Could not verify GABP environment on the real game process; %s launchers can reuse stale environment from an already-running launcher.", game.LaunchMode))
+		if game.LaunchMode == "SteamAppId" {
+			warnings = append(warnings, "Could not verify GABP environment on the real game process; SteamAppId launcher URL mode can reuse stale environment from an already-running launcher. Run 'gabs games repair "+game.ID+"' to switch to managed Steam launch.")
+		} else {
+			warnings = append(warnings, fmt.Sprintf("Could not verify GABP environment on the real game process; %s launchers can reuse stale environment from an already-running launcher.", game.LaunchMode))
+		}
 	}
 
 	diagnostics := map[string]interface{}{
@@ -92,6 +96,14 @@ func (s *Server) gameStateDiagnostics(game config.GameConfig, status string) map
 func nextActionsForGameStateDiagnostics(game config.GameConfig, diagnostics map[string]interface{}, fallback []map[string]interface{}) []map[string]interface{} {
 	if diagnostics == nil {
 		return fallback
+	}
+	if game.LaunchMode == "SteamAppId" {
+		status, _ := diagnostics["processEnvironment"].(map[string]interface{})
+		if present, _ := status["present"].(bool); !present {
+			return append([]map[string]interface{}{
+				mcpNextAction("games_show", map[string]interface{}{"gameId": game.ID}, "Review this config; run 'gabs games repair "+game.ID+"' from a shell to switch Steam launcher URL mode to managed executable launch."),
+			}, fallback...)
+		}
 	}
 
 	return fallback

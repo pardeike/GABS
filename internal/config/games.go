@@ -13,11 +13,12 @@ import (
 type GameConfig struct {
 	ID              string   `json:"id"`
 	Name            string   `json:"name"`
-	LaunchMode      string   `json:"launchMode"` // DirectPath|SteamAppId|EpicAppId|CustomCommand
+	LaunchMode      string   `json:"launchMode"` // DirectPath|SteamAppId|SteamManaged|EpicAppId|CustomCommand
 	Target          string   `json:"target"`     // path or id
 	Args            []string `json:"args,omitempty"`
 	WorkingDir      string   `json:"workingDir,omitempty"`
 	StopProcessName string   `json:"stopProcessName,omitempty"` // Optional process name for stopping the game
+	GABPMode        string   `json:"gabpMode,omitempty"`
 	Description     string   `json:"description,omitempty"`
 }
 
@@ -246,7 +247,7 @@ func (g *GameConfig) Validate() error {
 	}
 
 	// Validate launch mode
-	validModes := []string{"DirectPath", "SteamAppId", "EpicAppId", "CustomCommand"}
+	validModes := []string{"DirectPath", "SteamAppId", "SteamManaged", "EpicAppId", "CustomCommand"}
 	isValidMode := false
 	for _, mode := range validModes {
 		if g.LaunchMode == mode {
@@ -258,7 +259,9 @@ func (g *GameConfig) Validate() error {
 		return fmt.Errorf("invalid launch mode '%s', must be one of: %s", g.LaunchMode, strings.Join(validModes, ", "))
 	}
 
-	// For launcher-based games (Steam/Epic), require stopProcessName for proper game control
+	// For launcher-based games (Steam/Epic), require stopProcessName for proper game control.
+	// SteamManaged launches the resolved game executable directly, so it can be
+	// tracked like DirectPath while still using the Steam app id for discovery.
 	if g.LaunchMode == "SteamAppId" || g.LaunchMode == "EpicAppId" {
 		if g.StopProcessName == "" {
 			return fmt.Errorf("stopProcessName is required for %s games to enable proper game termination. Without it, GABS can only stop the launcher process, not the actual game", g.LaunchMode)

@@ -477,6 +477,38 @@ func TestStopProcessNameConfiguration(t *testing.T) {
 			t.Errorf("Expected StopProcessName 'TestGame.exe', got '%s'", unmarshaled.StopProcessName)
 		}
 	})
+
+	t.Run("GameConfigPreservesGABPMode", func(t *testing.T) {
+		config := &GamesConfig{
+			Version: "1.0",
+			Games: map[string]GameConfig{
+				"bridgegame": {
+					ID:         "bridgegame",
+					Name:       "Bridge Game",
+					LaunchMode: "SteamManaged",
+					Target:     "123456",
+					GABPMode:   "local",
+				},
+			},
+		}
+
+		configPath3 := filepath.Join(tempDir, "config3.json")
+		if err := SaveGamesConfigToPath(config, configPath3); err != nil {
+			t.Fatalf("Failed to save config: %v", err)
+		}
+
+		loadedConfig, err := LoadGamesConfigFromPath(configPath3)
+		if err != nil {
+			t.Fatalf("Failed to load config: %v", err)
+		}
+		game, exists := loadedConfig.GetGame("bridgegame")
+		if !exists {
+			t.Fatal("Game not found after loading")
+		}
+		if game.GABPMode != "local" {
+			t.Errorf("Expected GABPMode 'local', got %q", game.GABPMode)
+		}
+	})
 }
 
 func TestGameConfigValidation(t *testing.T) {
@@ -504,6 +536,19 @@ func TestGameConfigValidation(t *testing.T) {
 
 		if err := game.Validate(); err != nil {
 			t.Errorf("Expected valid Steam game to pass validation, got: %v", err)
+		}
+	})
+
+	t.Run("ValidSteamManagedGameWithoutStopProcess", func(t *testing.T) {
+		game := GameConfig{
+			ID:         "adventure",
+			Name:       "AdventureGame",
+			LaunchMode: "SteamManaged",
+			Target:     "123456",
+		}
+
+		if err := game.Validate(); err != nil {
+			t.Errorf("Expected SteamManaged game to pass without stopProcessName, got: %v", err)
 		}
 	})
 

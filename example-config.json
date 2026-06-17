@@ -41,10 +41,9 @@
     "adventure": {
       "id": "adventure",
       "name": "AdventureGame",
-      "launchMode": "SteamAppId",
+      "launchMode": "SteamManaged",
       "target": "123456",
-      "stopProcessName": "GameName.exe",
-      "description": "AdventureGame sample via Steam with GABP bridge"
+      "description": "AdventureGame sample via managed Steam launch with GABP bridge"
     },
     "adventurearena": {
       "id": "adventurearena",

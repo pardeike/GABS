@@ -5,6 +5,9 @@
 > active-owner lease per game so multiple live GABS sessions can avoid
 > duplicate launches, roam naturally with `games_connect` after idle, and still
 > support explicit active takeover with `games.connect {"forceTakeover": true}`.
+> Current Steam bridge games should use `SteamManaged`, which resolves the
+> installed Steam app executable and launches it directly with GABP environment.
+> `SteamAppId` remains as a legacy launcher URL mode.
 
 ## Problem Analysis
 
@@ -39,7 +42,7 @@ The issue requested fixes for critical process management problems in GABS that 
 
 ```go
 func (c *Controller) IsRunning() bool {
-    // For Steam/Epic launchers, check actual game process by name
+    // For legacy Steam/Epic launchers, check actual game process by name
     if c.spec.Mode == "SteamAppId" || c.spec.Mode == "EpicAppId" {
         if c.spec.StopProcessName != "" {
             pids, err := findProcessesByName(c.spec.StopProcessName)
@@ -146,11 +149,13 @@ type ProcessError struct {
 - ✅ **Stateless queries**: Each status check reflects actual system state
 - ✅ **Serialized starting**: Only one process starting at a time
 - ✅ **Error handling**: Structured errors with context
-- ✅ **Steam/Epic games**: Proper launcher vs game process distinction
+- ✅ **Steam/Epic games**: Proper legacy launcher vs directly managed process distinction
+- ✅ **SteamManaged games**: Steam apps can be launched as resolved executables with deterministic GABP environment injection
 
 **Status Reporting Examples**:
 - **With tracking**: "running (GABS is tracking the game process)"
-- **Without tracking**: "launched via SteamAppId (GABS cannot track the game process - no stopProcessName configured)"
+- **Legacy launcher modes**: "launched via SteamAppId (GABS cannot track the game process - no stopProcessName configured)"
+- **SteamManaged games**: "running (GABS controls the process)"
 - **Direct games**: "running (GABS controls the process)"
 
 ## Impact

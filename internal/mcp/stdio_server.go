@@ -2395,6 +2395,9 @@ func gameConfigStructured(game config.GameConfig) map[string]interface{} {
 	if game.StopProcessName != "" {
 		item["stopProcessName"] = game.StopProcessName
 	}
+	if game.GABPMode != "" {
+		item["gabpMode"] = game.GABPMode
+	}
 	return item
 }
 
@@ -2404,7 +2407,11 @@ func gameValidationWarnings(game config.GameConfig) []string {
 		warnings = append(warnings, fmt.Sprintf("%s games need stopProcessName for reliable games_stop and games_kill.", game.LaunchMode))
 	}
 	if launcherModeIgnoresConfiguredArgs(game) {
-		warnings = append(warnings, fmt.Sprintf("%s launch mode does not pass configured args to the game; use DirectPath, CustomCommand, or the game launcher's own launch options for arguments such as -savedatafolder=...", game.LaunchMode))
+		if game.LaunchMode == "SteamAppId" {
+			warnings = append(warnings, fmt.Sprintf("%s launcher URL mode does not pass configured args to the game; run 'gabs games repair %s' to switch to managed Steam launch, or use DirectPath/CustomCommand for custom launchers and arguments such as -savedatafolder=...", game.LaunchMode, game.ID))
+		} else {
+			warnings = append(warnings, fmt.Sprintf("%s launch mode does not pass configured args to the game; use DirectPath, CustomCommand, or the game launcher's own launch options for arguments such as -savedatafolder=...", game.LaunchMode))
+		}
 	}
 	return warnings
 }

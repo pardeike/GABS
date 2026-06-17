@@ -302,12 +302,12 @@ environment instead.
 - `GABP_SERVER_PORT`: Port number for bridge to listen on
 - `GABP_TOKEN`: Authentication token for GABS connection
 
-Launcher modes such as `SteamAppId` start through the platform launcher. If the
-launcher is already running, the real game process may inherit older `GABP_*`
-values than a newly launched supervisor environment. In that case, do not make
-the game-side bridge read `bridge.json`; use `games_connect` so GABS can prefer
-the running process environment. If `games_start` reports
-`endpoint_cache_in_use`, attach with `games_connect` or use
-`resetEndpoint: true` only after confirming the cached endpoint should be
-rotated. Stop/restart or use `DirectPath`/`CustomCommand` when deterministic
-environment injection is required.
+Launcher URL modes such as `SteamAppId` start through the platform launcher. If
+the launcher is already running, the real game process may inherit older
+`GABP_*` values than a newly launched supervisor environment. In that case, do
+not make the game-side bridge read `bridge.json`; use `games_connect` so GABS
+can prefer the running process environment. If `games_start` reports
+`endpoint_cache_in_use`, attach with `games_connect` or use `resetEndpoint:
+true` only after confirming the cached endpoint should be rotated. For Steam
+games that need deterministic environment injection, use `SteamManaged` or run
+`gabs games repair <id>` to convert an older `SteamAppId` config.

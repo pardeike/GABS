@@ -17,7 +17,7 @@ to real games.
 - Configure games once with `gabs games add`
 - Keep everything local by default
 - Work with Claude Desktop, Codex CLI, and other MCP clients
-- Support direct executables, Steam App IDs, Epic App IDs, and custom commands
+- Support direct executables, managed Steam games, Epic App IDs, and custom commands
 - Mirror game-specific tools into MCP when the bridge connects
 
 ## Quick Start
@@ -70,13 +70,15 @@ gabs games show factory
 The setup is interactive. In most cases you only need to answer:
 
 - **Game name**: a label you recognize
-- **Launch mode**: direct path, Steam App ID, Epic App ID, or custom command
+- **Launch mode**: direct path, managed Steam, Epic App ID, or custom command
 - **Target**: the executable path or store App ID
 - **Stop process name**: the real game process name used by `games.stop` and
   `games.kill`
 
-For Steam and Epic games, `stopProcessName` is required. Example values:
-`GameName.exe`, `AdventureGame`, or `java`.
+For `SteamManaged`, GABS resolves the Steam app to the installed executable and
+starts Steam if needed. For launcher URL modes such as `SteamAppId` and
+`EpicAppId`, `stopProcessName` is required. Example values: `GameName.exe`,
+`AdventureGame`, or `java`.
 
 ### 3. Add GABS to your AI client
 
@@ -136,6 +138,11 @@ If you want a download-to-working walkthrough, use the
 
 - **Steam/Epic stopping**: use the real game process name, not the launcher
   name.
+- **Steam bridge games**: prefer `SteamManaged` launch. It resolves the Steam
+  app manifest to the installed game executable, starts Steam if needed, and
+  launches the real game process with GABP environment variables. Use
+  `gabs games doctor <id>` to inspect a config and `gabs games repair <id>` to
+  convert an older `SteamAppId` launcher URL config.
 - **More than one AI session**: that is fine. GABS coordinates ownership per
   game with a short active-owner lease. You can hop between live sessions:
   `games_connect` takes over naturally after the previous session goes idle,
@@ -151,9 +158,9 @@ If you want a download-to-working walkthrough, use the
   `games_start` with `resetEndpoint: true` only after confirming the cache
   should be rotated for a new process.
 - **Confusing bridge state**: start with `games_status`. It compares the
-  runtime state and process environment where the OS allows it. If a launcher
-  reused old GABP environment, GABS can connect through the running process
-  endpoint with `games_connect`.
+  runtime state and process environment where the OS allows it. If a Steam
+  launcher URL config reused old GABP environment, run
+  `gabs games repair <id>` to switch to managed Steam launch.
 
 ## How It Works
 

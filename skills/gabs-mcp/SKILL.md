@@ -29,6 +29,10 @@ Use GABS as the stable control surface for a local game-development loop. GABS s
 - For games with slow bridge startup, pass a larger `timeout` to `games_start` or configure `timeouts.startup.gabpConnectSeconds` to increase the total background connection budget. `games_start` still returns after a bounded initial wait; use `games_status` or `games_connect` while GABS keeps trying.
 - Do not inspect, edit, or base recovery on `bridge.json`; it is GABS' endpoint cache/debug artifact. Game-side bridge runtime configuration should come from `GABP_SERVER_PORT`, `GABP_TOKEN`, and `GABS_GAME_ID`.
 - If `games_start` reports `endpoint_cache_in_use`, use `games_connect` to attach to the already-listening endpoint. Use `games_start` with `resetEndpoint: true` only after confirming the cached endpoint should be rotated for a new process.
+- If a Steam game is configured with `SteamAppId` launcher URL mode and the
+  bridge environment does not reach the real game process, run
+  `gabs games doctor <gameId>` and `gabs games repair <gameId>` from a shell to
+  switch it to managed Steam launch.
 
 ## Discovery
 

@@ -91,8 +91,11 @@ Examples of `stopProcessName`:
 - AdventureGame on macOS/Linux: `AdventureGame`
 - Java-based FactorySim setups: `java`
 
-For Steam and Epic launch modes, `stopProcessName` is required. Without it,
-GABS can launch the game but cannot stop the real game process reliably.
+For Steam bridge games, prefer `SteamManaged`; it resolves the Steam app
+manifest to the installed executable and starts Steam if needed. For launcher
+URL modes such as `SteamAppId` and `EpicAppId`, `stopProcessName` is required.
+Without it, GABS can launch the game but cannot stop the real game process
+reliably.
 
 ## What Success Looks Like
 

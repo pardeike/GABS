@@ -24,7 +24,8 @@ A friendly label such as `Example Game` or `AdventureGame`.
 How GABS should start the game:
 
 - **DirectPath**: a local executable or script
-- **SteamAppId**: a Steam App ID such as `123456` for AdventureGame
+- **SteamManaged**: a Steam App ID resolved to the installed game executable
+- **SteamAppId**: a legacy Steam launcher URL for compatibility
 - **EpicAppId**: Use Epic Games Store ID
 - **CustomCommand**: Use a custom command with arguments
 
@@ -147,9 +148,8 @@ the GABP wire version.
     "adventure": {
       "id": "adventure",
       "name": "AdventureGame",
-      "launchMode": "SteamAppId",
-      "target": "123456",
-      "stopProcessName": "GameName.exe"
+      "launchMode": "SteamManaged",
+      "target": "123456"
     }
   }
 }
@@ -167,8 +167,25 @@ Best for custom game installs, scripts, and local test setups.
 }
 ```
 
+### SteamManaged
+Best for Steam games with GABP bridges.
+```json
+{
+  "launchMode": "SteamManaged",
+  "target": "123456"
+}
+```
+You can find the App ID in the game's Steam store URL. GABS locates the Steam
+library, reads the app manifest, starts the Steam client if needed, launches the
+real game executable with GABP environment variables, and prepares
+`steam_appid.txt` when direct Steamworks startup requires it. Configured `args`
+are passed to the game in this mode.
+
+Use `gabs games doctor <id>` to inspect the resolved executable and
+`gabs games repair <id>` to switch an older `SteamAppId` config to this mode.
+
 ### SteamAppId
-Best for games installed through Steam.
+Legacy Steam launcher URL mode.
 ```json
 {
   "launchMode": "SteamAppId",
@@ -179,16 +196,18 @@ Best for games installed through Steam.
 You can find the App ID in the game's Steam store URL. `stopProcessName` is
 required for Steam games.
 
-GABS starts Steam games through the platform launcher URL. Configured `args` are
-not passed to the game in this mode. Put launch options such as
-`-savedatafolder=...` in Steam's own launch options, or use `DirectPath` /
-`CustomCommand` when GABS must control the process arguments directly.
+GABS starts Steam games through the platform launcher URL. Configured `args`
+are not passed to the game in this mode. Put launch options such as
+`-savedatafolder=...` in Steam's own launch options, or use `SteamManaged`,
+`DirectPath`, or `CustomCommand` when GABS must control process arguments and
+bridge environment directly.
 
 In launcher-driven setups, an already-running platform launcher process can
 prevent GABS from proving that new environment variables reached the real game
 process. `games_status` reports whether the real game process environment is
-readable. For deterministic env and argument control, use `DirectPath` or
-`CustomCommand`.
+readable. For deterministic env and argument control, use `SteamManaged`,
+`DirectPath`, or `CustomCommand`. For an existing Steam launcher config, run
+`gabs games repair <id>`.
 
 ### EpicAppId
 Best for games installed through Epic Games Store.
@@ -414,9 +433,8 @@ The process finding works across platforms:
 {
   "games": {
     "adventure-steam": {
-      "launchMode": "SteamAppId",
-      "target": "123456",
-      "stopProcessName": "GameName.exe"
+      "launchMode": "SteamManaged",
+      "target": "123456"
     },
     "factory-server": {
       "launchMode": "DirectPath",
@@ -433,14 +451,16 @@ The process finding works across platforms:
 ```
 
 For launcher-based games (`SteamAppId` and `EpicAppId`), `stopProcessName` is
-mandatory.
+mandatory. `SteamManaged` launches the resolved game executable directly, so
+`stopProcessName` is optional.
 
 ## Troubleshooting
 
 ### "Game won't start"
 1. Check that your target path or ID is correct
 2. Make sure the game is installed
-3. Try running the launch command manually first
+3. Run `gabs games doctor <id>`
+4. Try running the launch command manually first
 
 ### "Can't connect to game-side bridge"
 1. Make sure your game-side bridge supports GABP
@@ -450,6 +470,8 @@ mandatory.
 4. Run `games_status` and inspect `diagnostics.code`, `diagnostics.message`,
    and `nextActions`; it can identify stale runtime state, runtime ownership,
    and whether the real game process environment is readable.
+5. For Steam launcher URL configs, run `gabs games repair <id>` to switch to
+   managed Steam launch.
 
 ### "Configuration not found"
 The config file is created automatically when you add your first game. If it's missing, run `gabs games add` to create a new one.

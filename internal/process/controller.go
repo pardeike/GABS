@@ -12,6 +12,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/pardeike/gabs/internal/steam"
 )
 
 var (
@@ -22,7 +24,7 @@ var (
 
 type LaunchSpec struct {
 	GameId          string
-	Mode            string // DirectPath|SteamAppId|EpicAppId|CustomCommand
+	Mode            string // DirectPath|SteamAppId|SteamManaged|EpicAppId|CustomCommand
 	PathOrId        string
 	Args            []string
 	WorkingDir      string
@@ -63,7 +65,7 @@ func (c *Controller) Configure(spec LaunchSpec) error {
 				Err:     fmt.Errorf("PathOrId cannot be empty for DirectPath mode"),
 			}
 		}
-	case "SteamAppId", "EpicAppId", "CustomCommand":
+	case "SteamAppId", "SteamManaged", "EpicAppId", "CustomCommand":
 		if spec.PathOrId == "" {
 			return &ProcessError{
 				Type:    ProcessErrorTypeConfiguration,
@@ -103,6 +105,34 @@ func (c *Controller) Start() error {
 		cmdArgs = c.spec.Args
 	case "SteamAppId":
 		cmdName, cmdArgs = steamLaunchCommandFactory(c.spec.PathOrId)
+	case "SteamManaged":
+		app, err := steam.ResolveApp(c.spec.PathOrId)
+		if err != nil {
+			return &ProcessError{
+				Type:    ProcessErrorTypeConfiguration,
+				Context: fmt.Sprintf("failed to resolve Steam app %s", c.spec.PathOrId),
+				Err:     err,
+			}
+		}
+		if err := steam.EnsureClientRunning(); err != nil {
+			return &ProcessError{
+				Type:    ProcessErrorTypeStart,
+				Context: fmt.Sprintf("failed to prepare Steam client for %s", c.spec.GameId),
+				Err:     err,
+			}
+		}
+		if err := steam.EnsureAppIDFile(app); err != nil {
+			return &ProcessError{
+				Type:    ProcessErrorTypeConfiguration,
+				Context: fmt.Sprintf("failed to prepare Steam app id file for %s", c.spec.GameId),
+				Err:     err,
+			}
+		}
+		cmdName = app.Executable
+		cmdArgs = c.spec.Args
+		if c.spec.WorkingDir == "" {
+			c.spec.WorkingDir = app.WorkingDir
+		}
 	case "EpicAppId":
 		cmdName, cmdArgs = epicLaunchCommandFactory(c.spec.PathOrId)
 	case "CustomCommand":
@@ -147,6 +177,12 @@ func (c *Controller) setupEnvironment() {
 	bridgeEnvVars := []string{
 		fmt.Sprintf("GABS_GAME_ID=%s", c.spec.GameId),
 		fmt.Sprintf("GABS_BRIDGE_PATH=%s", bridgePath),
+	}
+	if c.spec.Mode == "SteamManaged" {
+		bridgeEnvVars = append(bridgeEnvVars,
+			fmt.Sprintf("SteamAppId=%s", c.spec.PathOrId),
+			fmt.Sprintf("SteamGameId=%s", c.spec.PathOrId),
+		)
 	}
 
 	if c.bridgeInfo != nil {
