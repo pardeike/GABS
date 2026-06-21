@@ -177,9 +177,12 @@ Best for Steam games with GABP bridges.
 ```
 You can find the App ID in the game's Steam store URL. GABS locates the Steam
 library, reads the app manifest, starts the Steam client if needed, launches the
-real game executable with GABP environment variables, and prepares
+resolved executable with GABP environment variables, and prepares
 `steam_appid.txt` when direct Steamworks startup requires it. Configured `args`
-are passed to the game in this mode.
+are passed to the game in this mode. If Steam or the platform relaunches the
+final game process without inheriting those variables, `games_status` reports
+`process-bridge-environment-missing`; use `DirectPath` or `CustomCommand` for a
+wrapper that the final process actually inherits from.
 
 Use `gabs games doctor <id>` to inspect the resolved executable and
 `gabs games repair <id>` to switch an older `SteamAppId` config to this mode.
@@ -205,8 +208,9 @@ bridge environment directly.
 In launcher-driven setups, an already-running platform launcher process can
 prevent GABS from proving that new environment variables reached the real game
 process. `games_status` reports whether the real game process environment is
-readable. For deterministic env and argument control, use `SteamManaged`,
-`DirectPath`, or `CustomCommand`. For an existing Steam launcher config, run
+readable. Prefer `SteamManaged` over launcher URL mode, but still verify the
+final process environment. If it reports `process-bridge-environment-missing`,
+use `DirectPath` or `CustomCommand`. For an existing Steam launcher config, run
 `gabs games repair <id>`.
 
 ### EpicAppId
@@ -470,8 +474,10 @@ mandatory. `SteamManaged` launches the resolved game executable directly, so
 4. Run `games_status` and inspect `diagnostics.code`, `diagnostics.message`,
    and `nextActions`; it can identify stale runtime state, runtime ownership,
    and whether the real game process environment is readable.
-5. For Steam launcher URL configs, run `gabs games repair <id>` to switch to
-   managed Steam launch.
+5. If `diagnostics.code` is `process-bridge-environment-missing`, the running
+   process is visible but cannot be attached through its environment. For Steam
+   launcher URL configs, run `gabs games repair <id>` first; if managed launch
+   still loses the environment, use `DirectPath` or `CustomCommand`.
 
 ### "Configuration not found"
 The config file is created automatically when you add your first game. If it's missing, run `gabs games add` to create a new one.

@@ -3291,6 +3291,10 @@ func (s *Server) cleanupRuntimeStateInternal(gameId string) {
 
 func (s *Server) adoptProcessBridgeEndpoint(game config.GameConfig, runtimeState *process.RuntimeState, current bridgeEndpoint) (bridgeEndpoint, bool) {
 	processEnv := s.inspectGameBridgeEnvironment(game, runtimeState)
+	return s.adoptProcessBridgeEndpointFromDiagnostic(game, processEnv, current)
+}
+
+func (s *Server) adoptProcessBridgeEndpointFromDiagnostic(game config.GameConfig, processEnv processEnvDiagnostic, current bridgeEndpoint) (bridgeEndpoint, bool) {
 	if !processEnv.Present || processEnv.Port <= 0 || strings.TrimSpace(processEnv.Token) == "" {
 		return current, false
 	}
@@ -3323,9 +3327,14 @@ func (s *Server) adoptProcessBridgeEndpoint(game config.GameConfig, runtimeState
 }
 
 func (s *Server) resolveConnectBridgeEndpoint(game config.GameConfig, runtimeState *process.RuntimeState) (bridgeEndpoint, error) {
-	endpoint, _ := s.adoptProcessBridgeEndpoint(game, runtimeState, bridgeEndpoint{})
+	processEnv := s.inspectGameBridgeEnvironment(game, runtimeState)
+	endpoint, _ := s.adoptProcessBridgeEndpointFromDiagnostic(game, processEnv, bridgeEndpoint{})
 	if endpoint.Port > 0 && strings.TrimSpace(endpoint.Token) != "" {
 		return endpoint, nil
+	}
+
+	if readableProcessEnvLacksAttachableBridgeEndpoint(game, processEnv) {
+		return bridgeEndpoint{}, fmt.Errorf("%s", processBridgeEnvironmentMissingMessage(game, processEnv))
 	}
 
 	_, port, token, err := config.ReadBridgeJSON(game.ID, s.configDir)

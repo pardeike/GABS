@@ -92,10 +92,12 @@ Examples of `stopProcessName`:
 - Java-based FactorySim setups: `java`
 
 For Steam bridge games, prefer `SteamManaged`; it resolves the Steam app
-manifest to the installed executable and starts Steam if needed. For launcher
-URL modes such as `SteamAppId` and `EpicAppId`, `stopProcessName` is required.
-Without it, GABS can launch the game but cannot stop the real game process
-reliably.
+manifest to the installed executable and starts Steam if needed. Still verify
+`games_status`: if it reports `process-bridge-environment-missing`, the final
+game process did not inherit the bridge environment and the config should use
+`DirectPath` or `CustomCommand`. For launcher URL modes such as `SteamAppId`
+and `EpicAppId`, `stopProcessName` is required. Without it, GABS can launch the
+game but cannot stop the real game process reliably.
 
 ## What Success Looks Like
 

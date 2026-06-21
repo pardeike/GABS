@@ -332,6 +332,71 @@ func TestGamesStatusIgnoresBridgeFileMismatchWhenProcessEnvironmentIsReadable(t 
 	}
 }
 
+func TestGamesStatusWarnsWhenReadableProcessEnvironmentLacksEndpoint(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process environment inspection is not supported on Windows")
+	}
+
+	tmpDir, err := os.MkdirTemp("", "gabs-status-missing-env")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	game := config.GameConfig{
+		ID:         "steam-managed-env-game",
+		Name:       "Steam Managed Env Game",
+		LaunchMode: "SteamManaged",
+		Target:     "123456",
+	}
+	gamesConfig := &config.GamesConfig{
+		Games: map[string]config.GameConfig{game.ID: game},
+	}
+
+	writeBridgeFileForStatusTest(t, tmpDir, game.ID, unusedLocalPort(t), "bridge-token")
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("failed to locate test executable: %v", err)
+	}
+	cmd := exec.Command(exe, "-test.run=TestSharedRuntimeStateHelperProcess")
+	cmd.Env = append(os.Environ(), "GABS_HELPER_PROCESS=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to start helper process: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	}()
+
+	runtimeState := process.RuntimeState{
+		GameID:   game.ID,
+		Status:   process.RuntimeStateStatusRunning,
+		OwnerPID: os.Getpid(),
+		GamePID:  cmd.Process.Pid,
+	}
+	if err := process.SaveRuntimeState(game.ID, tmpDir, runtimeState); err != nil {
+		t.Fatalf("failed to seed runtime state: %v", err)
+	}
+
+	server := NewServerForTesting(util.NewLogger("error"))
+	server.SetConfigDir(tmpDir)
+	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
+
+	statusText := marshalMessage(t, server.HandleMessage(toolCallMessage("status-missing-env", "games.status", game.ID)))
+	if !strings.Contains(statusText, `"code":"process-bridge-environment-missing"`) {
+		t.Fatalf("expected missing process bridge environment diagnosis, got: %s", statusText)
+	}
+	if !strings.Contains(statusText, "Steam-managed launch can still lose environment variables") {
+		t.Fatalf("expected SteamManaged warning, got: %s", statusText)
+	}
+	if strings.Contains(statusText, `"tool":"games_connect"`) {
+		t.Fatalf("status should not recommend games_connect when the running process env is readable but missing, got: %s", statusText)
+	}
+	if strings.Contains(statusText, "bridge-token") {
+		t.Fatalf("raw bridge token leaked in status response: %s", statusText)
+	}
+}
+
 func writeBridgeFileForStatusTest(t *testing.T, configDir, gameID string, port int, token string) string {
 	t.Helper()
 

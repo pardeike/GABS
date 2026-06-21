@@ -225,6 +225,77 @@ func TestGamesConnectPrefersReadableProcessEnvironmentOverBridgeFile(t *testing.
 	}
 }
 
+func TestGamesConnectDoesNotUseBridgeFileWhenReadableProcessEnvironmentLacksEndpoint(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process environment inspection is not supported on Windows")
+	}
+
+	tmpDir := t.TempDir()
+	writeBridgeJSONForTest(t, tmpDir, "adventure", unusedLocalPort(t), "bridge-file-token")
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("failed to locate helper executable: %v", err)
+	}
+	cmd := exec.Command(exe, "-test.run=TestSharedRuntimeStateHelperProcess")
+	cmd.Env = append(os.Environ(), "GABS_HELPER_PROCESS=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to start helper process: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	}()
+
+	runtimeState := process.RuntimeState{
+		GameID:   "adventure",
+		Status:   process.RuntimeStateStatusRunning,
+		OwnerPID: os.Getpid(),
+		GamePID:  cmd.Process.Pid,
+	}
+	if err := process.SaveRuntimeState("adventure", tmpDir, runtimeState); err != nil {
+		t.Fatalf("failed to write runtime state: %v", err)
+	}
+
+	gamesConfig := &config.GamesConfig{
+		Games: map[string]config.GameConfig{
+			"adventure": {
+				ID:         "adventure",
+				Name:       "AdventureGame",
+				LaunchMode: "SteamManaged",
+				Target:     "123456",
+			},
+		},
+	}
+
+	server := NewServerForTesting(util.NewLogger("error"))
+	server.SetConfigDir(tmpDir)
+	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
+
+	connectText := marshalMessage(t, server.HandleMessage(&Message{
+		JSONRPC: "2.0",
+		Method:  "tools/call",
+		ID:      json.RawMessage(`"connect-missing-process-env"`),
+		Params: map[string]interface{}{
+			"name": "games.connect",
+			"arguments": map[string]interface{}{
+				"gameId":  "adventure",
+				"timeout": 1,
+			},
+		},
+	}))
+
+	if !strings.Contains(connectText, `"isError":true`) {
+		t.Fatalf("expected connect to fail, got: %s", connectText)
+	}
+	if !strings.Contains(connectText, "running process environment is readable") || !strings.Contains(connectText, "does not contain GABP_SERVER_PORT/GABP_TOKEN") {
+		t.Fatalf("expected readable missing-env diagnosis, got: %s", connectText)
+	}
+	if strings.Contains(connectText, "Failed to connect to GABP server") || strings.Contains(connectText, "after 1s") {
+		t.Fatalf("connect should not dial the internal endpoint when process env is readable but missing, got: %s", connectText)
+	}
+}
+
 func TestGamesCallToolFailsFastAndStatusTurnsDisconnectedAfterBridgeDrop(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "gabs-reconnect-disconnect")
 	if err != nil {

@@ -7,7 +7,10 @@
 > support explicit active takeover with `games.connect {"forceTakeover": true}`.
 > Current Steam bridge games should use `SteamManaged`, which resolves the
 > installed Steam app executable and launches it directly with GABP environment.
-> `SteamAppId` remains as a legacy launcher URL mode.
+> `SteamAppId` remains as a legacy launcher URL mode. If a platform-managed
+> launch still drops the bridge environment before the final process starts,
+> `games_status` reports `process-bridge-environment-missing`; use `DirectPath`
+> or `CustomCommand` for that setup.
 
 ## Problem Analysis
 
@@ -150,7 +153,7 @@ type ProcessError struct {
 - ✅ **Serialized starting**: Only one process starting at a time
 - ✅ **Error handling**: Structured errors with context
 - ✅ **Steam/Epic games**: Proper legacy launcher vs directly managed process distinction
-- ✅ **SteamManaged games**: Steam apps can be launched as resolved executables with deterministic GABP environment injection
+- ✅ **SteamManaged games**: Steam apps can be launched as resolved executables with bridge environment injection, with status diagnostics when the final process does not inherit it
 
 **Status Reporting Examples**:
 - **With tracking**: "running (GABS is tracking the game process)"

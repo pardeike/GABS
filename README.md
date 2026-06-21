@@ -140,9 +140,13 @@ If you want a download-to-working walkthrough, use the
   name.
 - **Steam bridge games**: prefer `SteamManaged` launch. It resolves the Steam
   app manifest to the installed game executable, starts Steam if needed, and
-  launches the real game process with GABP environment variables. Use
-  `gabs games doctor <id>` to inspect a config and `gabs games repair <id>` to
-  convert an older `SteamAppId` launcher URL config.
+  launches the resolved executable with GABP environment variables. Some Steam
+  or platform-managed apps can still relaunch the final game process without
+  those variables; `games_status` reports that as
+  `process-bridge-environment-missing`. Use `gabs games doctor <id>` to inspect
+  a config, `gabs games repair <id>` to convert an older `SteamAppId` launcher
+  URL config, and `DirectPath` or `CustomCommand` when the final process does
+  not inherit the bridge environment.
 - **More than one AI session**: that is fine. GABS coordinates ownership per
   game with a short active-owner lease. You can hop between live sessions:
   `games_connect` takes over naturally after the previous session goes idle,
@@ -158,9 +162,10 @@ If you want a download-to-working walkthrough, use the
   `games_start` with `resetEndpoint: true` only after confirming the cache
   should be rotated for a new process.
 - **Confusing bridge state**: start with `games_status`. It compares the
-  runtime state and process environment where the OS allows it. If a Steam
-  launcher URL config reused old GABP environment, run
-  `gabs games repair <id>` to switch to managed Steam launch.
+  runtime state and process environment where the OS allows it. If
+  `diagnostics.code` is `process-bridge-environment-missing`, the running game
+  process is visible but not attachable through the expected GABP environment;
+  adjust the launch mode instead of retrying `games_connect`.
 
 ## How It Works
 

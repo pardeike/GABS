@@ -309,5 +309,8 @@ not make the game-side bridge read `bridge.json`; use `games_connect` so GABS
 can prefer the running process environment. If `games_start` reports
 `endpoint_cache_in_use`, attach with `games_connect` or use `resetEndpoint:
 true` only after confirming the cached endpoint should be rotated. For Steam
-games that need deterministic environment injection, use `SteamManaged` or run
-`gabs games repair <id>` to convert an older `SteamAppId` config.
+games, prefer `SteamManaged` over launcher URL mode or run `gabs games repair
+<id>` to convert an older `SteamAppId` config. If `games_status` reports
+`process-bridge-environment-missing`, the final process did not inherit the
+bridge environment; use `DirectPath` or `CustomCommand` instead of retrying
+`games_connect`.

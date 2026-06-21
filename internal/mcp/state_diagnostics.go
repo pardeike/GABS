@@ -64,9 +64,17 @@ func (s *Server) gameStateDiagnostics(game config.GameConfig, status string) map
 		message = "Stale runtime state was removed."
 	}
 
-	if (game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId") && status != "stopped" && status != "stale-runtime-cleaned" && !processEnv.Present {
+	if runningStatusNeedsBridgeEnvironment(status) && readableProcessEnvLacksAttachableBridgeEndpoint(game, processEnv) {
+		code = "process-bridge-environment-missing"
+		severity = "warning"
+		message = processBridgeEnvironmentMissingMessage(game, processEnv)
+	}
+
+	if runningStatusNeedsBridgeEnvironment(status) && platformManagedLaunchModeNeedsVisibleBridgeEnvironment(game) && !processEnvBridgeEndpointUsableForGame(game, processEnv) {
 		if game.LaunchMode == "SteamAppId" {
 			warnings = append(warnings, "Could not verify GABP environment on the real game process; SteamAppId launcher URL mode can reuse stale environment from an already-running launcher. Run 'gabs games repair "+game.ID+"' to switch to managed Steam launch.")
+		} else if game.LaunchMode == "SteamManaged" {
+			warnings = append(warnings, "Could not verify GABP environment on the real game process; Steam-managed launch can still lose environment variables if the platform relaunches the app. Use DirectPath or CustomCommand when the final game process does not inherit the bridge environment.")
 		} else {
 			warnings = append(warnings, fmt.Sprintf("Could not verify GABP environment on the real game process; %s launchers can reuse stale environment from an already-running launcher.", game.LaunchMode))
 		}
@@ -97,6 +105,12 @@ func nextActionsForGameStateDiagnostics(game config.GameConfig, diagnostics map[
 	if diagnostics == nil {
 		return fallback
 	}
+	code, _ := diagnostics["code"].(string)
+	if code == "process-bridge-environment-missing" {
+		return []map[string]interface{}{
+			mcpNextAction("games_show", map[string]interface{}{"gameId": game.ID}, "Review the launch configuration; the running process is visible but does not expose an attachable GABP environment."),
+		}
+	}
 	if game.LaunchMode == "SteamAppId" {
 		status, _ := diagnostics["processEnvironment"].(map[string]interface{})
 		if present, _ := status["present"].(bool); !present {
@@ -107,6 +121,51 @@ func nextActionsForGameStateDiagnostics(game config.GameConfig, diagnostics map[
 	}
 
 	return fallback
+}
+
+func runningStatusNeedsBridgeEnvironment(status string) bool {
+	switch status {
+	case "running", "shared-running", "running-disconnected", "disconnected":
+		return true
+	default:
+		return false
+	}
+}
+
+func processEnvBridgeEndpointUsableForGame(game config.GameConfig, processEnv processEnvDiagnostic) bool {
+	if !processEnv.Present || processEnv.Port <= 0 || strings.TrimSpace(processEnv.Token) == "" {
+		return false
+	}
+	return processEnv.GameID == "" || processEnv.GameID == game.ID
+}
+
+func readableProcessEnvLacksAttachableBridgeEndpoint(game config.GameConfig, processEnv processEnvDiagnostic) bool {
+	if !platformManagedLaunchModeNeedsVisibleBridgeEnvironment(game) {
+		return false
+	}
+	if !processEnv.Readable || processEnv.PID <= 0 {
+		return false
+	}
+	return !processEnvBridgeEndpointUsableForGame(game, processEnv)
+}
+
+func platformManagedLaunchModeNeedsVisibleBridgeEnvironment(game config.GameConfig) bool {
+	switch game.LaunchMode {
+	case "SteamManaged", "SteamAppId", "EpicAppId":
+		return true
+	default:
+		return false
+	}
+}
+
+func processBridgeEnvironmentMissingMessage(game config.GameConfig, processEnv processEnvDiagnostic) string {
+	if processEnv.GameID != "" && processEnv.GameID != game.ID {
+		return fmt.Sprintf("The running process environment is readable, but GABS_GAME_ID is %q instead of %q. GABS will not attach using cached endpoint state.", processEnv.GameID, game.ID)
+	}
+	if processEnv.Present {
+		return "The running process environment is readable, but it does not contain a complete GABP_SERVER_PORT/GABP_TOKEN pair. GABS will not attach using cached endpoint state."
+	}
+	return "The running process environment is readable, but it does not contain GABP_SERVER_PORT/GABP_TOKEN. The game was not launched with the GABS bridge environment, or a launcher dropped it before the final process started."
 }
 
 func gameStateDiagnosticMessage(statusItem map[string]interface{}) string {
