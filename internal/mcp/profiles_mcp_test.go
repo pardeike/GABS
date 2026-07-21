@@ -492,3 +492,66 @@ func TestLaunchSpecResolvesBundlesForCustomCommand(t *testing.T) {
 		t.Fatalf("CustomCommand bundle must resolve to the inner executable: %q", spec.PathOrId)
 	}
 }
+
+func TestStartPipelinePersistsActiveClaim(t *testing.T) {
+	t.Setenv("GABSTEST_HELPER_PROCESS", "1")
+	s := newProfiledServer(t)
+	raw, _ := callTool(t, s, "games.start", map[string]interface{}{
+		"gameId": "adventure", "profile": "combat", "timeout": 1,
+	})
+	if strings.Contains(raw, `"isError":true`) {
+		t.Fatalf("start failed: %s", raw)
+	}
+	defer callTool(t, s, "games.kill", map[string]interface{}{"gameId": "adventure"})
+
+	claim, err := process.LoadRuntimeState("adventure", s.configDir)
+	if err != nil || claim == nil {
+		t.Fatalf("claim must persist after start: %v %v", claim, err)
+	}
+	// the complete Stage 2-4 contract: active phase, spawned state with
+	// PID + fingerprint, endpoint with per-launch token, operation cleared
+	if claim.Phase != process.PhaseActive || claim.SpawnState != process.SpawnStateSpawned {
+		t.Fatalf("claim must be active/spawned: phase=%q spawnState=%q", claim.Phase, claim.SpawnState)
+	}
+	if claim.GamePID <= 0 || claim.PIDStartTime == 0 {
+		t.Fatalf("PID + start-time fingerprint must be recorded: %+v", claim)
+	}
+	if claim.Endpoint == nil || claim.Endpoint.Port <= 0 || claim.Endpoint.Token == "" {
+		t.Fatalf("endpoint (port + per-launch token) must be in the claim: %+v", claim.Endpoint)
+	}
+	if claim.Operation != nil {
+		t.Fatalf("completed start must clear the operation: %+v", claim.Operation)
+	}
+	if claim.Profile != "combat" || claim.SchemaVersion != process.RuntimeSchemaVersion {
+		t.Fatalf("claim context wrong: %+v", claim)
+	}
+}
+
+func TestStartPipelineExitedDuringStart(t *testing.T) {
+	// the helper test exits immediately without GABSTEST_HELPER_PROCESS=1
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	s := NewServerForTesting(util.NewLogger("error"))
+	s.SetConfigDir(dir)
+	s.RegisterGameManagementTools(&config.GamesConfig{
+		Version: "1.0",
+		Games: map[string]config.GameConfig{
+			"flash": {ID: "flash", Name: "F", LaunchMode: "DirectPath", Target: exe,
+				Args: []string{"-test.run=TestSharedRuntimeStateHelperProcess"}},
+		},
+	}, 0, 0)
+
+	raw, structured := callTool(t, s, "games.start", map[string]interface{}{"gameId": "flash", "timeout": 1})
+	if structured["code"] != "exited_during_start" {
+		t.Fatalf("immediate exit must map to exited_during_start, got %s", raw)
+	}
+	if _, ok := structured["exitCode"]; !ok {
+		t.Fatalf("exit evidence missing: %v", structured)
+	}
+	if claim, _ := process.LoadRuntimeState("flash", dir); claim != nil {
+		t.Fatalf("claim must be released on exited_during_start: %+v", claim)
+	}
+}

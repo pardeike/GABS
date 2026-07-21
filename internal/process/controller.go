@@ -70,6 +70,10 @@ type Controller struct {
 	bridgeInfo *BridgeInfo
 	waitOnce   sync.Once // guards c.cmd.Wait() to prevent multiple calls
 	waitDone   chan struct{}
+
+	// Stage 3 spawnState observers (design/05); nil for legacy callers.
+	beforeSpawn func()
+	afterSpawn  func(pid int, startTime int64, spawnErr error)
 }
 
 // Configure sets up the controller with the given launch specification
@@ -208,8 +212,16 @@ func (c *Controller) Start() error {
 	c.cmd.Stderr = logFile
 	defer logFile.Close() // the child keeps its own descriptor
 
-	// Start the process
+	// spawnState transitions bracket the actual OS process creation
+	// (design/05 Stage 3): immediately before → spawning, immediately
+	// after → spawned with PID + fingerprint, or failed.
+	if c.beforeSpawn != nil {
+		c.beforeSpawn()
+	}
 	if err := c.cmd.Start(); err != nil {
+		if c.afterSpawn != nil {
+			c.afterSpawn(0, 0, err)
+		}
 		ctxMsg := fmt.Sprintf("failed to start %s (mode: %s, target: %s)", c.spec.GameId, c.spec.Mode, c.spec.PathOrId)
 		if hint := startErrorHintFor(err, runtime.GOOS); hint != "" {
 			ctxMsg += "; " + hint
@@ -220,12 +232,28 @@ func (c *Controller) Start() error {
 			Err:     err,
 		}
 	}
+	if c.afterSpawn != nil {
+		pid := c.cmd.Process.Pid
+		start, ferr := ProcessStartTime(pid)
+		if ferr != nil {
+			start = 0 // degrade to existence-only evidence, never block the spawn
+		}
+		c.afterSpawn(pid, start, nil)
+	}
 
 	c.waitOnce = sync.Once{}
 	c.waitDone = make(chan struct{})
 	go c.waitForExit()
 
 	return nil
+}
+
+// SetSpawnObservers installs the Stage 3 spawnState callbacks: before runs
+// immediately before OS process creation, after immediately after with the
+// PID + start-time fingerprint (or the spawn error).
+func (c *Controller) SetSpawnObservers(before func(), after func(pid int, startTime int64, spawnErr error)) {
+	c.beforeSpawn = before
+	c.afterSpawn = after
 }
 
 // setupEnvironment configures environment variables for the process
@@ -455,7 +483,7 @@ func (c *Controller) WaitForProcessStart(timeout time.Duration) error {
 		select {
 		case <-ctx.Done():
 			return &ProcessError{
-				Type:    ProcessErrorTypeStart,
+				Type:    ProcessErrorTypeUnobserved,
 				Context: fmt.Sprintf("timed out waiting for %s to start", c.spec.GameId),
 				Err:     fmt.Errorf("process not found in system after %v", timeout),
 			}
@@ -487,7 +515,7 @@ func (c *Controller) waitForProcessNameStart(timeout time.Duration) error {
 		select {
 		case <-ctx.Done():
 			return &ProcessError{
-				Type:    ProcessErrorTypeStart,
+				Type:    ProcessErrorTypeUnobserved,
 				Context: fmt.Sprintf("timed out waiting for %s to start", c.spec.GameId),
 				Err:     fmt.Errorf("process %q not found in system after %v", c.spec.StopProcessName, timeout),
 			}
@@ -805,6 +833,10 @@ const (
 	ProcessErrorTypeStop
 	ProcessErrorTypeStatus
 	ProcessErrorTypeNotFound
+	// ProcessErrorTypeUnobserved: the spawn succeeded but nothing became
+	// observable within the process-start budget — distinct from
+	// spawn_failed (design/05 Stage 4); URL modes map it to `unobserved`.
+	ProcessErrorTypeUnobserved
 )
 
 func (e *ProcessError) Error() string {
@@ -1040,4 +1072,37 @@ func linuxProcessMatchesName(pid int, name string) (bool, error) {
 
 func isProcessGoneError(err error) bool {
 	return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH)
+}
+
+// DirectChildExited reports whether the spawned direct child has been
+// reaped — the adoption signal when the workload is still observable by
+// name (design/05 Stage 4). waitDone is the race-free exit signal.
+func (c *Controller) DirectChildExited() bool {
+	if c.waitDone == nil {
+		return false
+	}
+	select {
+	case <-c.waitDone:
+		return true
+	default:
+		return false
+	}
+}
+
+// ExitCode returns the direct child's exit code, or -1 while it runs (or
+// when it was killed by a signal). Reading ProcessState is safe only after
+// waitDone closes.
+func (c *Controller) ExitCode() int {
+	if c.waitDone == nil {
+		return -1
+	}
+	select {
+	case <-c.waitDone:
+	default:
+		return -1
+	}
+	if c.cmd == nil || c.cmd.ProcessState == nil {
+		return -1
+	}
+	return c.cmd.ProcessState.ExitCode()
 }

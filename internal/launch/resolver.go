@@ -344,6 +344,28 @@ func validateInputValue(name string, decl *config.LaunchInputConfig, val any) (s
 	return "", false, invalidInput(name, "unknown declared type "+decl.Type)
 }
 
+// ResolveProfileLifecycles resolves every configured profile's lifecycle
+// hooks (key "" for an unprofiled game) — the pre-start probe set. Probing
+// every profile's status hook, each invoked exactly as normal hook
+// execution would (its own GABS_PROFILE, its own timeout), carries the
+// one-active-instance invariant (design/05 Stage 2); the resolved
+// lifecycles also pin an external snapshot's hooks on detection.
+func ResolveProfileLifecycles(game *config.GameConfig) map[string]*ResolvedLifecycle {
+	out := map[string]*ResolvedLifecycle{}
+	if len(game.Profiles) == 0 {
+		if lc := resolveLifecycle(game, "", nil); lc != nil {
+			out[""] = lc
+		}
+		return out
+	}
+	for name, p := range game.Profiles {
+		if lc := resolveLifecycle(game, name, p.Lifecycle); lc != nil {
+			out[name] = lc
+		}
+	}
+	return out
+}
+
 // resolveLifecycle picks per-hook overrides (complete replacement, no field
 // merge), substitutes placeholders, and applies defaults.
 func resolveLifecycle(game *config.GameConfig, profile string, profileLC *config.LifecycleConfig) *ResolvedLifecycle {

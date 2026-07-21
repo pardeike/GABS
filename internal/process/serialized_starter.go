@@ -18,6 +18,11 @@ type ProcessStartResult struct {
 	BackgroundGABPConnect   bool
 	BackgroundGABPWait      time.Duration
 	Error                   error
+
+	// Stage 4 verdict extensions (design/05): set by the start pipeline,
+	// not the starter itself.
+	Adopted       bool     // workload observed after the direct child exited
+	StartWarnings []string // probe/advisory warnings from Stage 2
 }
 
 // SerializedStarter ensures only one process is starting at a time

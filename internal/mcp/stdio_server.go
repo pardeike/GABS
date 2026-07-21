@@ -1050,6 +1050,46 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		validationWarnings := gameValidationWarnings(*game)
 		startResult, err := s.startGame(*game, gamesConfig, backoffMin, backoffMax, startupGABPTimeout, resetEndpoint, resolved)
 		if err != nil {
+			var refusalErr *startRefusalError
+			if errors.As(err, &refusalErr) {
+				return s.startRefusalResult(*game, refusalErr, validationWarnings), nil
+			}
+			var unobsErr *unobservedStartError
+			if errors.As(err, &unobsErr) {
+				structured := map[string]interface{}{
+					"code":   "unobserved",
+					"gameId": game.ID,
+					"nextActions": []map[string]interface{}{
+						mcpNextAction("games_status", map[string]interface{}{"gameId": game.ID}, "Re-check after the store launcher settles."),
+					},
+				}
+				if len(unobsErr.warnings) > 0 {
+					structured["startWarnings"] = unobsErr.warnings
+				}
+				addValidationWarnings(structured, validationWarnings)
+				addResolvedContext(structured, resolved)
+				return &ToolResult{
+					Content:           []Content{{Type: "text", Text: fmt.Sprintf("Nothing observable for '%s' within the start budget — the store launcher may be updating the game or showing a dialog (login, EULA); check the desktop and re-check games_status. The claim is kept while the launch may still appear.", game.ID)}},
+					StructuredContent: structured,
+				}, nil
+			}
+			var exitedErr *exitedDuringStartError
+			if errors.As(err, &exitedErr) {
+				structured := map[string]interface{}{
+					"code":     "exited_during_start",
+					"gameId":   game.ID,
+					"exitCode": exitedErr.exitCode,
+				}
+				if exitedErr.tail != "" {
+					structured["outputTail"] = exitedErr.tail
+				}
+				addValidationWarnings(structured, validationWarnings)
+				return &ToolResult{
+					Content:           []Content{{Type: "text", Text: fmt.Sprintf("'%s' exited during start (exit code %d). Typical causes: crash, missing or corrupt data/save, mod loader failure, DRM refusing to run outside its launcher, anti-cheat rejecting a modified process, or a required online login. Output tail:\n%s", game.ID, exitedErr.exitCode, exitedErr.tail)}},
+					IsError:           true,
+					StructuredContent: structured,
+				}, nil
+			}
 			var activeErr *gameAlreadyActiveError
 			if errors.As(err, &activeErr) {
 				status := activeErr.status
@@ -1117,6 +1157,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}
 			message = appendValidationWarningText(message, validationWarnings)
 			structured := map[string]interface{}{
+				"code":              "started_bridge_pending",
 				"gameId":            game.ID,
 				"processStarted":    startResult.ProcessStarted,
 				"gabpConnected":     startResult.GABPConnected,
@@ -1135,6 +1176,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 					mcpNextAction("games_connect", map[string]interface{}{"gameId": game.ID}, "Connect after the GABP bridge finishes loading."),
 				},
 			}
+			addStartAdoption(structured, &message, startResult)
 			addValidationWarnings(structured, validationWarnings)
 			addResolvedContext(structured, resolved)
 			return &ToolResult{
@@ -1146,6 +1188,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		message := fmt.Sprintf("Game '%s' (%s) started successfully and connected via GABP.", game.ID, game.Name)
 		message = appendValidationWarningText(message, validationWarnings)
 		structured := map[string]interface{}{
+			"code":             "started_connected",
 			"gameId":           game.ID,
 			"processStarted":   true,
 			"gabpConnected":    true,
@@ -1154,6 +1197,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				mcpNextAction("games_tool_names", map[string]interface{}{"gameId": game.ID, "brief": true}, "Discover connected game-specific tools."),
 			},
 		}
+		addStartAdoption(structured, &message, startResult)
 		addValidationWarnings(structured, validationWarnings)
 		addResolvedContext(structured, resolved)
 		return &ToolResult{
@@ -3833,35 +3877,121 @@ func (s *Server) resolveSharedRuntimeStatus(gameID string) string {
 	return ""
 }
 
-func (s *Server) claimSharedRuntimeState(game config.GameConfig, spec process.LaunchSpec) (process.RuntimeState, error) {
-	state := process.NewRuntimeState(spec, process.RuntimeStateStatusStarting)
-	state.OwnerInstanceID = s.instanceID
+// startRefusalError carries a structured Stage 2 refusal (design/05) out of
+// startGame; the handler renders its stable code.
+type startRefusalError struct {
+	refusal  *process.StartRefusal
+	warnings []string
+}
 
-	for attempt := 0; attempt < 2; attempt++ {
-		err := process.ClaimRuntimeState(game.ID, s.configDir, state)
-		if err == nil {
-			return state, nil
-		}
-		if !errors.Is(err, process.ErrRuntimeStateExists) {
-			return process.RuntimeState{}, err
-		}
+func (e *startRefusalError) Error() string { return e.refusal.Message }
 
-		existingState, loadErr := process.LoadRuntimeState(game.ID, s.configDir)
-		if loadErr != nil {
-			return process.RuntimeState{}, loadErr
-		}
-		if status := process.ResolveRuntimeStateStatus(existingState); status != "" {
-			return process.RuntimeState{}, &gameAlreadyActiveError{status: status}
-		}
+// addStartAdoption renders the Stage 4 adoption verdict and Stage 2 probe
+// warnings into a start result (design/05): adoption means the injected
+// context may not have survived a launcher re-exec.
+func addStartAdoption(structured map[string]interface{}, message *string, r *process.ProcessStartResult) {
+	if r == nil {
+		return
+	}
+	if r.Adopted {
+		structured["adopted"] = true
+		*message += " Note: the launch was adopted — the direct child exited and the workload was observed by name; injected args/env (including GABS_PROFILE) may not have survived a launcher re-exec. A bridge connection proves the managed environment survived; a verified delivery report proves the full context did."
+	}
+	if len(r.StartWarnings) > 0 {
+		structured["startWarnings"] = r.StartWarnings
+	}
+}
 
-		if removeErr := process.RemoveRuntimeState(game.ID, s.configDir); removeErr != nil {
-			return process.RuntimeState{}, removeErr
+// startRefusalResult renders a Stage 2 refusal with its stable code and
+// per-code next actions.
+func (s *Server) startRefusalResult(game config.GameConfig, e *startRefusalError, validationWarnings []string) *ToolResult {
+	ref := e.refusal
+	structured := map[string]interface{}{
+		"code":   ref.Code,
+		"gameId": game.ID,
+	}
+	if ref.ActiveProfile != "" || ref.Code == process.RefusalAlreadyRunning {
+		structured["activeProfile"] = ref.ActiveProfile
+	}
+	if ref.RequestedProfile != "" {
+		structured["requestedProfile"] = ref.RequestedProfile
+	}
+	if len(ref.Candidates) > 0 {
+		structured["candidates"] = ref.Candidates
+	}
+	if ref.SnapshotPersisted {
+		structured["externalSnapshotPersisted"] = true
+	}
+	if ref.Evidence != nil {
+		structured["evidence"] = map[string]interface{}{
+			"verdict": ref.Evidence.Verdict,
+			"source":  ref.Evidence.Source,
+			"detail":  ref.Evidence.Detail,
 		}
-
-		s.log.Infow("removed stale shared runtime state before retrying launch", "gameId", game.ID)
+	}
+	if op := ref.Operation; op != nil {
+		structured["operation"] = map[string]interface{}{
+			"action":           op.Action,
+			"attemptStartedAt": op.AttemptStartedAt.Format(time.RFC3339),
+			"deadline":         op.Deadline.Format(time.RFC3339),
+		}
+	}
+	if len(e.warnings) > 0 {
+		structured["startWarnings"] = e.warnings
 	}
 
-	return process.RuntimeState{}, fmt.Errorf("failed to claim shared runtime state for %s", game.ID)
+	var next []map[string]interface{}
+	switch ref.Code {
+	case process.RefusalAlreadyRunning:
+		next = append(next,
+			mcpNextAction("games_status", map[string]interface{}{"gameId": game.ID}, "Inspect the active instance."),
+			mcpNextAction("games_stop", map[string]interface{}{"gameId": game.ID}, "Stop it first if the other profile is needed."))
+	case process.RefusalExternalInstance:
+		if ref.SnapshotPersisted {
+			next = append(next,
+				mcpNextAction("games_status", map[string]interface{}{"gameId": game.ID}, "The external instance is tracked by ID."),
+				mcpNextAction("games_stop", map[string]interface{}{"gameId": game.ID}, "Stop the external instance to free the game."))
+		} else {
+			next = append(next, mcpNextAction("games_status", map[string]interface{}{"gameId": game.ID}, "Resolve the candidates manually; GABS never guesses."))
+		}
+	case process.RefusalOperationInFlight:
+		next = append(next, mcpNextAction("games_status", map[string]interface{}{"gameId": game.ID}, "Re-check once the in-flight operation finishes."))
+	case process.RefusalBlockedUnknown:
+		next = append(next, mcpNextAction("games_status", map[string]interface{}{"gameId": game.ID}, "Gather evidence; use repair --forget-runtime only if the instance is provably gone."))
+	}
+	if len(next) > 0 {
+		structured["nextActions"] = next
+	}
+	addValidationWarnings(structured, validationWarnings)
+
+	// already_running and operation_in_progress are informational: the game
+	// is (or is becoming) available, which is what the caller wanted.
+	isError := ref.Code != process.RefusalAlreadyRunning && ref.Code != process.RefusalOperationInFlight
+	return &ToolResult{
+		Content:           []Content{{Type: "text", Text: ref.Message}},
+		IsError:           isError,
+		StructuredContent: structured,
+	}
+}
+
+// unobservedStartError is the Stage 4 unobserved outcome: the claim is kept
+// in phase starting; not a failure to retry blindly.
+type unobservedStartError struct {
+	warnings []string
+}
+
+func (e *unobservedStartError) Error() string {
+	return "nothing observable within the process-start budget"
+}
+
+// exitedDuringStartError carries the Stage 4 exit evidence.
+type exitedDuringStartError struct {
+	exitCode int
+	tail     string
+}
+
+func (e *exitedDuringStartError) Error() string {
+	return fmt.Sprintf("exited during start (exit code %d)", e.exitCode)
 }
 
 func (s *Server) cleanupRuntimeStateInternal(gameId string) {
@@ -4146,6 +4276,36 @@ func (s *Server) cleanupStoppedGame(gameID string) {
 
 // startGame starts a game process using the serialized starter approach
 // This implements @pardeike's requirements for serialized, verified process starting
+// processStartBudget is the Stage 4 verification budget (design/05):
+// URL modes get longer because the store launcher sits in the middle.
+func processStartBudget(mode string) time.Duration {
+	if isURLMode(mode) {
+		return 60 * time.Second
+	}
+	return 10 * time.Second
+}
+
+func isURLMode(mode string) bool { return mode == "SteamAppId" || mode == "EpicAppId" }
+
+func (s *Server) hasLiveGABPClient(gameID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.gabpClients[gameID]
+	return ok
+}
+
+// stampSpawnState applies a fenced claim mutation; a fencing violation
+// means the claim was superseded mid-start and is only logged — the OS
+// spawn itself is not abortable from here.
+func (s *Server) stampSpawnState(gameID, launchID, opID string, mutate func(*process.RuntimeState)) {
+	if _, err := process.FencedTransition(gameID, s.configDir, launchID, opID, func(st *process.RuntimeState) error {
+		mutate(st)
+		return nil
+	}); err != nil {
+		s.log.Warnw("spawn-state transition not applied", "gameId", gameID, "error", err)
+	}
+}
+
 func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration, startupGABPTimeout time.Duration, resetEndpoint bool, resolved *launch.Resolved) (*process.ProcessStartResult, error) {
 	launchSpec := s.launchSpecWithRuntimeDir(launchSpecFromResolved(game, resolved))
 
@@ -4155,10 +4315,30 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 			game.ID, game.LaunchMode, game.Target, err)
 	}
 
-	runtimeState, err := s.claimSharedRuntimeState(game, launchSpec)
+	// Stage 2 (design/05): claim gating by the liveness rule, complete
+	// pre-spawn claim with operation stamping, then all-profile probing +
+	// stopProcessName as the lost-claim backstop.
+	gateRes, err := process.GateStart(process.StartGate{
+		GameID:           game.ID,
+		ConfigDir:        s.configDir,
+		InstanceID:       s.instanceID,
+		RequestedProfile: launchSpec.Profile,
+		GABPLive:         s.hasLiveGABPClient(game.ID),
+		Spec:             launchSpec,
+		Budget:           processStartBudget(game.LaunchMode),
+		Probes:           launch.ResolveProfileLifecycles(&game),
+		StopProcessName:  game.StopProcessName,
+	})
 	if err != nil {
 		return nil, err
 	}
+	if gateRes.Refusal != nil {
+		return nil, &startRefusalError{refusal: gateRes.Refusal, warnings: gateRes.Warnings}
+	}
+	runtimeState := *gateRes.Claim
+	launchID := runtimeState.LaunchID
+	opID := runtimeState.Operation.OperationID
+	startWarnings := gateRes.Warnings
 
 	cleanupRuntimeState := true
 	defer func() {
@@ -4179,6 +4359,7 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 
 	// portRanges is startup-only (design/09): endpoint allocation uses the
 	// configuration pinned at process start, never the hot-reload snapshot.
+	// Failure is structured and the claim is released (deferred cleanup).
 	port, token, bridgePath, reusedBridge, err := config.PrepareBridgeEndpointForStart(game.ID, s.configDir, s.gamesConfig, resetEndpoint)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare GABS endpoint cache for game '%s': %w", game.ID, err)
@@ -4191,6 +4372,16 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	}
 
 	controller.SetBridgeInfo(port, token)
+
+	// The claim carries the endpoint (port + per-launch token): it is the
+	// normal attachment source for games_connect after a CLI start or a
+	// server restart (design/07).
+	if _, err := process.FencedTransition(game.ID, s.configDir, launchID, opID, func(st *process.RuntimeState) error {
+		st.Endpoint = &process.RuntimeEndpoint{Port: port, Token: token}
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("failed to persist endpoint into runtime claim for '%s': %w", game.ID, err)
+	}
 
 	// Pre-spawn size check on the fully materialized spec (managed env
 	// layer + executable included): a structured spec_too_large beats an
@@ -4208,25 +4399,87 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 		}
 	}
 
+	// Stage 3: spawnState transitions bracket OS process creation.
+	controller.SetSpawnObservers(
+		func() {
+			s.stampSpawnState(game.ID, launchID, opID, func(st *process.RuntimeState) {
+				st.SpawnState = process.SpawnStateSpawning
+			})
+		},
+		func(pid int, startTime int64, spawnErr error) {
+			s.stampSpawnState(game.ID, launchID, opID, func(st *process.RuntimeState) {
+				if spawnErr != nil {
+					st.SpawnState = process.SpawnStateFailed
+					return
+				}
+				st.SpawnState = process.SpawnStateSpawned
+				st.GamePID = pid
+				st.PIDStartTime = startTime
+			})
+		})
+
 	result := s.starter.StartWithVerificationWithTimeouts(controller, nil, game.ID, port, token, 0, 0)
+	if result != nil {
+		result.StartWarnings = startWarnings
+	}
 	if result.Error != nil {
+		var procErr *process.ProcessError
+		if errors.As(result.Error, &procErr) && procErr.Type == process.ProcessErrorTypeUnobserved && isURLMode(game.LaunchMode) {
+			// Stage 4 unobserved: the claim is KEPT in phase starting; a
+			// later observation promotes it, the supersession policy or
+			// repair clears it — never a no-evidence status pass (design/05).
+			cleanupRuntimeState = false
+			if _, ferr := process.FencedTransition(game.ID, s.configDir, launchID, opID, func(st *process.RuntimeState) error {
+				st.Operation = nil // the attempt is over; the deadline governs reclaim
+				return nil
+			}); ferr != nil {
+				s.log.Warnw("failed to finalize unobserved claim", "gameId", game.ID, "error", ferr)
+			}
+			return result, &unobservedStartError{warnings: startWarnings}
+		}
 		return result, fmt.Errorf("failed to start game '%s' (mode: %s, target: %s): %w",
 			game.ID, game.LaunchMode, game.Target, result.Error)
 	}
 	if !result.GameStillRunning {
-		return result, fmt.Errorf("game '%s' exited during startup", game.ID)
+		return result, &exitedDuringStartError{
+			exitCode: controller.ExitCode(),
+			tail:     controller.LaunchLogTail(16 * 1024),
+		}
 	}
 
-	runtimeState.Status = process.RuntimeStateStatusRunning
-	runtimeState.GamePID = resolveRuntimeGamePID(game, controller)
+	// Adoption (design/05 Stage 4): the direct child exited but the
+	// workload is observable — normal for launcher chains and Steam
+	// re-execs; injected context may not have survived.
+	adopted := (isURLMode(game.LaunchMode) || game.LaunchMode == "SteamManaged") && controller.DirectChildExited()
+	result.Adopted = adopted
+
 	_, defaultGABPTimeout := s.starter.GetTimeouts()
 	totalGABPTimeout := startupGABPTimeout
 	if totalGABPTimeout <= 0 {
 		totalGABPTimeout = defaultGABPTimeout
 	}
-	runtimeState = process.RefreshRuntimeOwnerLease(runtimeState, os.Getpid(), s.instanceID, s.runtimeOwnerLeaseForOperation(totalGABPTimeout), time.Now().UTC())
-	if err := process.SaveRuntimeState(game.ID, s.configDir, runtimeState); err != nil {
+	newPID := resolveRuntimeGamePID(game, controller)
+	promoted, err := process.FencedTransition(game.ID, s.configDir, launchID, opID, func(st *process.RuntimeState) error {
+		st.Status = process.RuntimeStateStatusRunning
+		st.Phase = process.PhaseActive
+		st.GamePID = newPID
+		if fp, ferr := process.ProcessStartTime(newPID); ferr == nil {
+			st.PIDStartTime = fp
+		}
+		st.Adopted = adopted
+		st.Operation = nil
+		st.ProcessStartDeadline = time.Time{}
+		*st = process.RefreshRuntimeOwnerLease(*st, os.Getpid(), s.instanceID, s.runtimeOwnerLeaseForOperation(totalGABPTimeout), time.Now().UTC())
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, process.ErrFencingViolation) {
+			cleanupRuntimeState = false
+			return result, fmt.Errorf("launch of '%s' was superseded during startup", game.ID)
+		}
 		s.log.Warnw("failed to persist running runtime state", "gameId", game.ID, "error", err)
+	} else if promoted != nil {
+		runtimeState = *promoted
 	}
 	cleanupRuntimeState = false
 
@@ -4249,10 +4502,13 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	result.ProcessExitedDuringGABP = connectResult.ProcessExitedDuringGABP
 
 	if !result.GameStillRunning {
-		if result.GABPConnectError != nil {
-			return result, fmt.Errorf("game '%s' exited during startup before GABP became available: %w", game.ID, result.GABPConnectError)
+		// Stage 5: workload died while waiting for the bridge — failure
+		// with exit evidence, claim cleared (design/05).
+		cleanupRuntimeState = true
+		return result, &exitedDuringStartError{
+			exitCode: controller.ExitCode(),
+			tail:     controller.LaunchLogTail(16 * 1024),
 		}
-		return result, fmt.Errorf("game '%s' exited during startup", game.ID)
 	}
 
 	if !result.GABPConnected {

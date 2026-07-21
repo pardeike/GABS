@@ -138,10 +138,12 @@ contract, not a scratchpad.
       CreateFile, which would false-positive on ordinary readers like
       antivirus — stable never-deleted file, bounded acquisition, no lost
       updates under 8-way contention; TransitionRuntimeState bumps the
-      CAS generation; NewFencingID mints 128-bit identities; the
-      completion-side validation — launchID+operationID for lifecycle,
-      launchID+connectionID for attachment callbacks — lands with the
-      operations that produce completions, M2.5/M2.6)
+      CAS generation; NewFencingID mints 128-bit identities; M2.5 landed
+      FencedTransition (launchID+operationID validation with
+      ErrFencingViolation) and every start-side completion — endpoint
+      stamp, spawnState transitions, promote-to-active — goes through
+      it; stop/kill completions and launchID+connectionID attachment
+      callbacks land with M2.6)
 - [~] M2.3 Hook runner (tree-kill, output capture, Windows Job Objects,
       exit-code contract) — spec: 01; tests: T-LIFE
       (RunStatusHook/RunActionHook in internal/process/hookrunner.go:
@@ -186,11 +188,37 @@ contract, not a scratchpad.
       scan propagates EACCES-class inspection failures (positive matches
       still win; disappearance races stay silent), and Windows
       GetExitCodeProcess failures surface as unknown)
-- [ ] M2.5 Start pipeline Stages 2–5: complete pre-spawn claim, all-
+- [~] M2.5 Start pipeline Stages 2–5: complete pre-spawn claim, all-
       profile probing + external snapshots, endpoint alloc + per-launch
       token, spawnState transitions, Stage 4 outcomes (adopted /
       exited_during_start / unobserved policy), Stage 5 attach — spec:
       05, 03; tests: T-START
+      (GateStart in internal/process/start_gate.go: claim gating by the
+      liveness rule — already_running with both profiles, blocked_
+      unknown_state with evidence, stale-clear-and-proceed; operation
+      stamping with executor PID/start fingerprint and pinned deadlines;
+      operation_in_progress for live in-flight executors (dead executors
+      fall through); the unobserved supersession policy (reclaim only
+      past the budget with source=none evidence); all-profile concurrent
+      status-hook probing via launch.ResolveProfileLifecycles, single-
+      attribution external snapshots (phase active/source external/
+      observedProfile/pinned hooks/inputs unavailable), name-based
+      detection with observedProfile unknown, multi-candidate refusal
+      without snapshot, unknown-probe warnings; endpoint + per-launch
+      token persisted into the claim via fenced transition, claim
+      released on endpoint failure; Stage 3 spawnState transitions
+      bracket cmd.Start via controller spawn observers; Stage 4:
+      fenced promote-to-active with re-fingerprinted PID, adopted flag
+      persisted + rendered with the context-survival warning,
+      exited_during_start with exit code + launch.log tail on both the
+      verification and bridge-wait paths, unobserved (URL modes,
+      ProcessErrorTypeUnobserved) keeps the claim in phase starting
+      with the operation cleared; Stage 5 outcome codes
+      started_connected / started_bridge_pending. Remaining: the Steam
+      not-running advisory lands with M2.15's EnsureClientRunning
+      demotion; post-spawn stopped-by-hook verification and the passive
+      unobserved→active promotion on a later bridge connection land
+      with M2.6/M2.7's status+connect work)
 - [ ] M2.6 Stop/kill: verification matrix, probe clipping,
       lastActionResult, stop_unsupported/kill_unsupported,
       operation_in_progress semantics — spec: 06; tests: T-LIFE, T-FENCE
