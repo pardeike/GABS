@@ -42,6 +42,10 @@ type LifecycleConfig struct {
 	Kill   *HookConfig `json:"kill,omitempty"`
 }
 
+// hookValidationGOOS gates platform-specific hook validation; injectable so
+// the Windows rules are testable everywhere.
+var hookValidationGOOS = runtime.GOOS
+
 // HookConfig is one lifecycle command: exact executable-plus-argv, never a shell.
 type HookConfig struct {
 	Command              string            `json:"command"`
@@ -497,6 +501,14 @@ func validateHook(hpath string, h *HookConfig, kind string, hasProfiles bool, op
 	}
 	if placeholderRe.MatchString(h.Command) {
 		add(hpath+"/command", "command does not support placeholders")
+	}
+	// Windows would implicitly wrap script commands in cmd.exe, whose argv
+	// quoting is injectable; scripts must be configured explicitly (design/20).
+	if hookValidationGOOS == "windows" {
+		switch strings.ToLower(filepath.Ext(h.Command)) {
+		case ".bat", ".cmd", ".ps1", ".vbs", ".js":
+			add(hpath+"/command", "script hooks are not run directly on Windows; set command to the interpreter (e.g. cmd.exe) and pass the script via args (e.g. /c, script path)")
+		}
 	}
 
 	if h.TimeoutSeconds != nil {

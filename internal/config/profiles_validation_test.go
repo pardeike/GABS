@@ -449,3 +449,25 @@ func TestExactEnvIssuePaths(t *testing.T) {
 	errs, _ = validateGame(t, g, ValidationOptions{})
 	requireIssue(t, errs, "/unsetEnv/1", "reserved")
 }
+
+func TestWindowsScriptHooksRejected(t *testing.T) {
+	prev := hookValidationGOOS
+	hookValidationGOOS = "windows"
+	defer func() { hookValidationGOOS = prev }()
+
+	g := profiledGame()
+	g.Lifecycle = &LifecycleConfig{Status: &HookConfig{Command: `C:\tools\status.bat`}}
+	errs, _ := validateGame(t, g, ValidationOptions{AllowLifecycle: true})
+	requireIssue(t, errs, "/lifecycle/status/command", "cmd.exe")
+
+	// explicit interpreter form is the supported spelling
+	g.Lifecycle = &LifecycleConfig{Status: &HookConfig{Command: "cmd.exe", Args: []string{"/c", `C:\tools\status.bat`}}}
+	errs, _ = validateGame(t, g, ValidationOptions{AllowLifecycle: true})
+	requireNoErrors(t, errs)
+
+	// non-Windows platforms run scripts directly; no rejection
+	hookValidationGOOS = "linux"
+	g.Lifecycle = &LifecycleConfig{Status: &HookConfig{Command: "/opt/tools/status.sh"}}
+	errs, _ = validateGame(t, g, ValidationOptions{AllowLifecycle: true})
+	requireNoErrors(t, errs)
+}

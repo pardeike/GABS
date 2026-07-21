@@ -118,11 +118,32 @@ contract, not a scratchpad.
       completion-side validation — launchID+operationID for lifecycle,
       launchID+connectionID for attachment callbacks — lands with the
       operations that produce completions, M2.5/M2.6)
-- [ ] M2.3 Hook runner (tree-kill, output capture, Windows Job Objects,
+- [x] M2.3 Hook runner (tree-kill, output capture, Windows Job Objects,
       exit-code contract) — spec: 01; tests: T-LIFE
-- [ ] M2.4 Liveness rule incl. attachment lease record, inspection-
+      (RunStatusHook/RunActionHook in internal/process/hookrunner.go:
+      unclassified/timeout/exec-failure = unknown never stopped; Setpgid
+      + kill(-pgid) on unix, Job Object via kernel32 LazyDLL on Windows
+      assigned right after Start (the µs pre-assignment window is part
+      of the documented residual-straggler risk); direct child reaped
+      before reporting, WaitDelay guards pipes held by detached
+      grandchildren; 16 KiB tail-keeping capture with truncation marker;
+      sanitized env contract incl. GABP-secret exclusion; Windows script
+      hooks (.bat/.cmd/.ps1/.vbs/.js) rejected at validation with the
+      explicit cmd.exe /c spelling in the message)
+- [x] M2.4 Liveness rule incl. attachment lease record, inspection-
       failure=unknown, URL helper PID exclusion — spec: 04; tests:
       T-LIFE, T-FENCE (attachment evidence)
+      (EvaluateLiveness in internal/process/liveness.go with exact
+      precedence: GABP → fresh fingerprint-matched attachment lease →
+      status hook → PID fingerprint → stopProcessName; ProcessStartTime
+      per platform — /proc stat field 22 (Linux), sysctl kern.proc via
+      std syscall (macOS), GetProcessTimes + STILL_ACTIVE (Windows);
+      PID-reuse mismatch = stopped, inspection failure = unknown and an
+      empty name scan never downgrades it; helper-role PIDs are never
+      workload evidence; expired leases are history; dead/unverifiable
+      lease owners are not evidence; DiagnoseHook reports the
+      hook-vs-GABP contradiction instead of hiding it; RuntimeAttachment/
+      RuntimeOperation gained owner/executor PID start-time fingerprints)
 - [ ] M2.5 Start pipeline Stages 2–5: complete pre-spawn claim, all-
       profile probing + external snapshots, endpoint alloc + per-launch
       token, spawnState transitions, Stage 4 outcomes (adopted /

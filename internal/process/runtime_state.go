@@ -54,23 +54,25 @@ type RuntimeEndpoint struct {
 // distinct from the claim or attachment owner: a CLI stop executes without
 // taking ownership from the server that owns the live bridge.
 type RuntimeOperation struct {
-	OperationID        string    `json:"operationId"`
-	Action             string    `json:"action"` // start|stop|kill
-	ExecutorInstanceID string    `json:"executorInstanceId,omitempty"`
-	ExecutorPID        int       `json:"executorPid,omitempty"`
-	AttemptStartedAt   time.Time `json:"attemptStartedAt"`
-	Deadline           time.Time `json:"deadline,omitempty"`
+	OperationID          string    `json:"operationId"`
+	Action               string    `json:"action"` // start|stop|kill
+	ExecutorInstanceID   string    `json:"executorInstanceId,omitempty"`
+	ExecutorPID          int       `json:"executorPid,omitempty"`
+	ExecutorPIDStartTime int64     `json:"executorPidStartTime,omitempty"`
+	AttemptStartedAt     time.Time `json:"attemptStartedAt"`
+	Deadline             time.Time `json:"deadline,omitempty"`
 }
 
 // RuntimeAttachment is the persisted bridge-attachment record: running
 // evidence for other processes only while the lease is fresh and the owner
 // fingerprint still matches a live process (design/04).
 type RuntimeAttachment struct {
-	ConnectionID    string    `json:"connectionId"`
-	OwnerInstanceID string    `json:"ownerInstanceId,omitempty"`
-	OwnerPID        int       `json:"ownerPid,omitempty"`
-	ObservedAt      time.Time `json:"observedAt"`
-	LeaseDeadline   time.Time `json:"leaseDeadline,omitempty"`
+	ConnectionID      string    `json:"connectionId"`
+	OwnerInstanceID   string    `json:"ownerInstanceId,omitempty"`
+	OwnerPID          int       `json:"ownerPid,omitempty"`
+	OwnerPIDStartTime int64     `json:"ownerPidStartTime,omitempty"`
+	ObservedAt        time.Time `json:"observedAt"`
+	LeaseDeadline     time.Time `json:"leaseDeadline,omitempty"`
 }
 
 // RuntimeActionResult is the persisted outcome of the last stop/kill
