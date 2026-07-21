@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -20,6 +21,15 @@ type GameConfig struct {
 	StopProcessName string   `json:"stopProcessName,omitempty"` // Optional process name for stopping the game
 	GABPMode        string   `json:"gabpMode,omitempty"`
 	Description     string   `json:"description,omitempty"`
+
+	// Launch-profile extensions (design/01-config-schema.md). All optional;
+	// legacy entries without them behave bit-for-bit as before.
+	Env            map[string]string            `json:"env,omitempty"`
+	UnsetEnv       []string                     `json:"unsetEnv,omitempty"`
+	DefaultProfile string                       `json:"defaultProfile,omitempty"`
+	Profiles       map[string]ProfileConfig     `json:"profiles,omitempty"`
+	LaunchInputs   map[string]LaunchInputConfig `json:"launchInputs,omitempty"`
+	Lifecycle      *LifecycleConfig             `json:"lifecycle,omitempty"`
 }
 
 // ToolNormalizationConfig configures how MCP tool names are normalized for different clients
@@ -72,6 +82,10 @@ type GamesConfig struct {
 	PortRanges        *PortRangeConfig         `json:"portRanges,omitempty"`        // Custom port ranges for bridge connections
 	Timeouts          *TimeoutsConfig          `json:"timeouts,omitempty"`          // Configurable timeout settings
 	StripOutputSchema bool                     `json:"stripOutputSchema,omitempty"` // Strip outputSchema from tools/list for MCP clients that reject non-standard fields (e.g. Claude Code)
+
+	// Warnings collects non-fatal load findings (unknown keys outside the
+	// strict subtrees). Never serialized; surfaced via show/list/doctor.
+	Warnings []ConfigIssue `json:"-"`
 }
 
 const (
@@ -116,10 +130,47 @@ func LoadGamesConfigFromPath(configPath string) (*GamesConfig, error) {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
+	// Duplicate object members must be rejected before any decoded form is
+	// accepted: both struct and map decoding silently keep the last value.
+	dupes, err := scanDuplicateMembers(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+	if len(dupes) > 0 {
+		return nil, &ValidationError{Issues: dupes}
+	}
+
 	var config GamesConfig
 	if err := json.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
+
+	// Unknown keys: errors inside the new strict subtrees, warnings elsewhere.
+	ukErrs, ukWarns, err := checkUnknownKeys(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	// Extension validation (profiles, launch inputs, lifecycle gate).
+	// Deliberately NOT the legacy per-game Validate(): loading never ran it,
+	// and existing configs must keep loading exactly as before.
+	extErrs := ukErrs
+	opts := DefaultValidationOptions()
+	gameIDs := make([]string, 0, len(config.Games))
+	for id := range config.Games {
+		gameIDs = append(gameIDs, id)
+	}
+	sort.Strings(gameIDs)
+	for _, id := range gameIDs {
+		g := config.Games[id]
+		errsG, warnsG := ValidateGameExtensions(id, &g, opts)
+		extErrs = append(extErrs, errsG...)
+		ukWarns = append(ukWarns, warnsG...)
+	}
+	if len(extErrs) > 0 {
+		return nil, &ValidationError{Issues: extErrs}
+	}
+	config.Warnings = ukWarns
 
 	// Ensure tool normalization defaults are set if not present in config
 	if config.ToolNormalization == nil {

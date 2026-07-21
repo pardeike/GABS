@@ -24,15 +24,20 @@ contract, not a scratchpad.
 
 ## Milestone 1 — Schema + resolver + reload + strict MCP
 
-- [ ] M1.1 Config types: Env/UnsetEnv/DefaultProfile/Profiles/
+- [x] M1.1 Config types: Env/UnsetEnv/DefaultProfile/Profiles/
       LaunchInputs/Lifecycle on game, profile, hook structs — spec: 01;
       tests: T-VAL
-- [ ] M1.2 Duplicate-JSON-member token scan + unknown-key error/warning
+- [x] M1.2 Duplicate-JSON-member token scan + unknown-key error/warning
       split + global configWarnings — spec: 01; tests: T-VAL
-- [ ] M1.3 Full validation rules (names, env grammar, unsetEnv conflicts,
-      absolute workingDir, URL-mode rejections + hook relaxation, input
-      constraints incl. string/integer semantics) — spec: 01; tests: T-VAL
-- [ ] M1.4 M1 lifecycle feature gate (reject `lifecycle` until M2) —
+      (warnings carried on GamesConfig.Warnings; MCP surfacing lands with
+      M1.11)
+- [x] M1.3 Full validation rules (names, env grammar, unsetEnv conflicts,
+      absolute workingDir, URL-mode rejections, input constraints incl.
+      string/integer semantics) — spec: 01; tests: T-VAL
+      (hook validation implemented + unit-tested behind AllowLifecycle;
+      the URL-mode stopProcessName relaxation deliberately deferred to
+      M2.14 with the gate removal, since hooks cannot be configured in M1)
+- [x] M1.4 M1 lifecycle feature gate (reject `lifecycle` until M2) —
       spec: 21; tests: T-VAL
 - [ ] M1.5 ConfigStore: hash-per-call reload, last-known-good, revisions,
       snapshot immutability; replace captured config pointers — spec: 09;
