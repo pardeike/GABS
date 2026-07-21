@@ -20,6 +20,21 @@ const (
 // runStatusHookFunc is injectable for tests.
 var runStatusHookFunc = RunStatusHook
 
+// diagnoseHookContradiction runs the status hook even though higher-tier
+// evidence already proves running, so a hook that disagrees is reported
+// instead of hidden (design/04: contradictions are reported, not resolved).
+func diagnoseHookContradiction(ev *LivenessEvidence, in LivenessInput) {
+	if !in.DiagnoseHook || in.StatusHook == nil {
+		return
+	}
+	verdict, hr := runStatusHookFunc(in.StatusHook, in.GameID, in.Profile)
+	ev.HookResult = &hr
+	if verdict == StatusStopped {
+		ev.Warnings = append(ev.Warnings,
+			"status hook reports stopped while the GABP bridge is live; the bridge wins — check the hook's exit-code contract")
+	}
+}
+
 // LivenessInput is one evaluation of the liveness rule against the evidence
 // a caller can see. StopProcessName is the caller's fallback; a claim's own
 // snapshot wins when present (callers never re-guess launch context).
@@ -59,28 +74,28 @@ func EvaluateLiveness(in LivenessInput) LivenessEvidence {
 	// 1. A live bridge proves running.
 	if in.GABPLive {
 		ev := LivenessEvidence{Verdict: StatusRunning, Source: LivenessSourceGABP, Detail: "live GABP connection"}
-		if in.DiagnoseHook && in.StatusHook != nil {
-			verdict, hr := runStatusHookFunc(in.StatusHook, in.GameID, in.Profile)
-			ev.HookResult = &hr
-			if verdict == StatusStopped {
-				ev.Warnings = append(ev.Warnings,
-					"status hook reports stopped while the GABP bridge is live; the bridge wins — check the hook's exit-code contract")
-			}
-		}
+		diagnoseHookContradiction(&ev, in)
 		return ev
 	}
 	// A persisted attachment is running-evidence for other processes only
 	// while the lease is fresh AND the owner fingerprint matches a live
-	// process; expired leases are history.
+	// process; expired leases are history. Attachments postdate the
+	// fingerprint schema, so a missing (zero) fingerprint is a malformed
+	// record, never legacy existence-only evidence — a reused owner PID
+	// must not impersonate a live bridge.
 	if in.Claim != nil && in.Claim.Attachment != nil {
 		a := in.Claim.Attachment
-		if a.OwnerPID > 0 && !a.LeaseDeadline.IsZero() && now.Before(a.LeaseDeadline) {
+		if a.OwnerPID > 0 && a.OwnerPIDStartTime != 0 && !a.LeaseDeadline.IsZero() && now.Before(a.LeaseDeadline) {
 			if verdict, _ := VerifyPIDFingerprint(a.OwnerPID, a.OwnerPIDStartTime); verdict == StatusRunning {
-				return LivenessEvidence{
+				ev := LivenessEvidence{
 					Verdict: StatusRunning, Source: LivenessSourceAttachment,
 					Detail: fmt.Sprintf("bridge attachment lease fresh (owner pid %d alive, lease until %s)",
 						a.OwnerPID, a.LeaseDeadline.UTC().Format(time.RFC3339)),
 				}
+				// Same precedence tier as a live bridge: contradictions are
+				// reported here too, not hidden behind the early return.
+				diagnoseHookContradiction(&ev, in)
+				return ev
 			}
 		}
 	}
@@ -102,6 +117,21 @@ func EvaluateLiveness(in LivenessInput) LivenessEvidence {
 
 	// 3. Built-in evidence.
 	if in.Claim == nil {
+		// No claim does not mean nothing is running: a configured
+		// stopProcessName is still probed so an already-running untracked
+		// instance is detected (the lost-claim backstop) instead of being
+		// reported stopped.
+		if in.StopProcessName != "" {
+			pids, err := findProcessesByNameFunc(in.StopProcessName)
+			if err != nil {
+				return LivenessEvidence{Verdict: StatusUnknown, Source: LivenessSourceProcessName,
+					Detail: fmt.Sprintf("no runtime claim; process scan for %q failed: %v", in.StopProcessName, err)}
+			}
+			if len(pids) > 0 {
+				return LivenessEvidence{Verdict: StatusRunning, Source: LivenessSourceProcessName,
+					Detail: fmt.Sprintf("no runtime claim, but %d process(es) named %q — external instance candidate", len(pids), in.StopProcessName)}
+			}
+		}
 		return LivenessEvidence{Verdict: StatusStopped, Source: LivenessSourceNone, Detail: "no runtime claim"}
 	}
 

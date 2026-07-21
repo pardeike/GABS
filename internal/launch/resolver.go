@@ -50,23 +50,26 @@ type Resolved struct {
 
 // ResolvedHook is one lifecycle hook after placeholder substitution and
 // defaulting — every field that affects execution or result interpretation.
+// JSON tags are part of the runtime-claim schema (design/07): the resolved
+// snapshot is persisted so stop/status after a restart or profile edit
+// never consult mutable config.
 type ResolvedHook struct {
-	Command              string
-	Args                 []string
-	WorkingDir           string
-	Env                  map[string]string
-	UnsetEnv             []string
-	TimeoutSeconds       int
-	VerifyTimeoutSeconds int   // stop/kill only
-	RunningExitCodes     []int // status only
-	StoppedExitCodes     []int // status only
+	Command              string            `json:"command"`
+	Args                 []string          `json:"args,omitempty"`
+	WorkingDir           string            `json:"workingDir,omitempty"`
+	Env                  map[string]string `json:"env,omitempty"`
+	UnsetEnv             []string          `json:"unsetEnv,omitempty"`
+	TimeoutSeconds       int               `json:"timeoutSeconds"`
+	VerifyTimeoutSeconds int               `json:"verifyTimeoutSeconds,omitempty"` // stop/kill only
+	RunningExitCodes     []int             `json:"runningExitCodes,omitempty"`     // status only
+	StoppedExitCodes     []int             `json:"stoppedExitCodes,omitempty"`     // status only
 }
 
 // ResolvedLifecycle groups the resolved hooks; nil slots use built-in behavior.
 type ResolvedLifecycle struct {
-	Status *ResolvedHook
-	Stop   *ResolvedHook
-	Kill   *ResolvedHook
+	Status *ResolvedHook `json:"status,omitempty"`
+	Stop   *ResolvedHook `json:"stop,omitempty"`
+	Kill   *ResolvedHook `json:"kill,omitempty"`
 }
 
 // ResolveError is a structured resolution failure carrying a stable code.

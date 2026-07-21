@@ -11,6 +11,14 @@ import (
 	"time"
 
 	"github.com/pardeike/gabs/internal/config"
+	"github.com/pardeike/gabs/internal/launch"
+)
+
+// linkRuntimeState and renameRuntimeState are injectable so tests can force
+// the link-less claim fallback and its failure cleanup.
+var (
+	linkRuntimeState   = os.Link
+	renameRuntimeState = os.Rename
 )
 
 const (
@@ -136,6 +144,12 @@ type RuntimeState struct {
 	AppliedInputNames []string `json:"appliedInputNames,omitempty"` // names only, never values
 	ConfigRevision    string   `json:"configRevision,omitempty"`
 
+	// Lifecycle is the resolved hook snapshot pinned at claim creation —
+	// every field affecting execution or result interpretation, so a custom
+	// stopped code never degrades to unknown after a restart or profile
+	// edit, and recovery never consults mutable config (design/07).
+	Lifecycle *launch.ResolvedLifecycle `json:"lifecycle,omitempty"`
+
 	Endpoint             *RuntimeEndpoint        `json:"endpoint,omitempty"`
 	Operation            *RuntimeOperation       `json:"operation,omitempty"`
 	Attachment           *RuntimeAttachment      `json:"attachment,omitempty"`
@@ -174,6 +188,7 @@ func NewRuntimeState(spec LaunchSpec, status string) RuntimeState {
 		Profile:           spec.Profile,
 		AppliedInputNames: append([]string(nil), spec.AppliedInputs...),
 		ConfigRevision:    spec.ConfigRevision,
+		Lifecycle:         spec.Lifecycle,
 	}
 }
 
@@ -229,25 +244,40 @@ func ClaimRuntimeState(gameID, configDir string, state RuntimeState) error {
 		return fmt.Errorf("failed to close runtime temp file: %w", err)
 	}
 
-	if err := os.Link(tmpPath, path); err != nil {
+	if err := linkRuntimeState(tmpPath, path); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return ErrRuntimeStateExists
 		}
-		// Fallback for filesystems without hard links: O_EXCL creation of
-		// the full content in one write (small enough to be practically
-		// atomic; the primary path never takes this branch on macOS,
-		// Linux, or NTFS).
-		f, ferr := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if ferr != nil {
-			if errors.Is(ferr, os.ErrExist) {
-				return ErrRuntimeStateExists
-			}
-			return fmt.Errorf("failed to create runtime state: %w", err)
+		return claimRuntimeStateWithoutLink(gameID, configDir, path, tmpPath, err)
+	}
+	return nil
+}
+
+// claimRuntimeStateWithoutLink is the fallback for filesystems that reject
+// hard links (the primary path never takes it on macOS, Linux, or NTFS).
+// Exclusivity still comes from O_EXCL, but the content is published by
+// renaming the fully written temp file over the placeholder — all under
+// the transition lock. LoadRuntimeState takes the same lock whenever it
+// reads a torn or empty claim, so no reader ever acts on the placeholder
+// window, and a failure never leaves a partial claim behind.
+func claimRuntimeStateWithoutLink(gameID, configDir, path, tmpPath string, linkErr error) error {
+	lock, err := AcquireTransitionLock(gameID, configDir, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("claim fallback after link failure (%v): %w", linkErr, err)
+	}
+	defer lock.Release()
+
+	f, ferr := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if ferr != nil {
+		if errors.Is(ferr, os.ErrExist) {
+			return ErrRuntimeStateExists
 		}
-		defer f.Close()
-		if _, werr := f.Write(data); werr != nil {
-			return fmt.Errorf("failed to write runtime state: %w", werr)
-		}
+		return fmt.Errorf("failed to create runtime state: %w", ferr)
+	}
+	f.Close()
+	if err := renameRuntimeState(tmpPath, path); err != nil {
+		os.Remove(path)
+		return fmt.Errorf("failed to publish runtime state: %w", err)
 	}
 	return nil
 }
@@ -307,15 +337,45 @@ func LoadRuntimeState(gameID, configDir string) (*RuntimeState, error) {
 		return nil, fmt.Errorf("failed to read runtime state: %w", err)
 	}
 	// The claim carries the per-launch token: tighten legacy 0644 files.
+	// Failure to tighten surfaces — the token must not stay world-readable.
 	if fi, statErr := os.Stat(path); statErr == nil && fi.Mode().Perm()&0o077 != 0 {
-		_ = os.Chmod(path, 0o600)
+		if chmodErr := os.Chmod(path, 0o600); chmodErr != nil {
+			return nil, fmt.Errorf("runtime state %s has loose permissions (%v) that cannot be tightened: %w", path, fi.Mode().Perm(), chmodErr)
+		}
 	}
 
+	state, perr := parseRuntimeState(data)
+	if perr != nil {
+		// A torn or empty claim can only be the link-less fallback mid-
+		// publication (design/05: readers never act on a partial claim).
+		// The transition lock brackets that window: take it and re-read.
+		lock, lerr := AcquireTransitionLock(gameID, configDir, 2*time.Second)
+		if lerr != nil {
+			return nil, fmt.Errorf("failed to parse runtime state (and could not take the transition lock to re-read): %w", perr)
+		}
+		data, err = os.ReadFile(path)
+		lock.Release()
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("failed to read runtime state: %w", err)
+		}
+		if state, perr = parseRuntimeState(data); perr != nil {
+			return nil, fmt.Errorf("failed to parse runtime state: %w", perr)
+		}
+	}
+	return state, nil
+}
+
+func parseRuntimeState(data []byte) (*RuntimeState, error) {
+	if len(data) == 0 {
+		return nil, errors.New("empty claim file")
+	}
 	var state RuntimeState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, fmt.Errorf("failed to parse runtime state: %w", err)
+		return nil, err
 	}
-
 	return &state, nil
 }
 

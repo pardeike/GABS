@@ -4492,6 +4492,7 @@ func launchSpecFromResolved(game config.GameConfig, r *launch.Resolved) process.
 	spec.AbsentEnvNames = append([]string(nil), r.AbsentEnvNames...)
 	spec.AppliedInputs = append([]string(nil), r.AppliedInputs...)
 	spec.ConfigRevision = r.ConfigRevision
+	spec.Lifecycle = r.Lifecycle
 	return spec
 }
 

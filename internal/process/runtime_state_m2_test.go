@@ -2,13 +2,29 @@ package process
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/pardeike/gabs/internal/config"
+	"github.com/pardeike/gabs/internal/launch"
 )
+
+// errUnsupportedLink stands in for a filesystem that rejects hard links.
+var errUnsupportedLink = errors.New("operation not supported")
+
+func runtimeStatePathForTest(t *testing.T, gameID, configDir string) string {
+	t.Helper()
+	cp, err := config.NewConfigPaths(configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cp.GetRuntimeStatePath(gameID)
+}
 
 func m2Spec(gameID string) LaunchSpec {
 	return LaunchSpec{
@@ -246,5 +262,175 @@ func TestFencingIDs(t *testing.T) {
 	a, b := NewFencingID(), NewFencingID()
 	if a == b || len(a) != 32 {
 		t.Fatalf("fencing IDs must be unique 128-bit hex: %q %q", a, b)
+	}
+}
+
+func TestClaimLifecycleSnapshotRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	spec := m2Spec("g-lc")
+	spec.StopProcessName = "game-bin"
+	spec.Lifecycle = &launch.ResolvedLifecycle{
+		Status: &launch.ResolvedHook{
+			Command: "/opt/tools/status", Args: []string{"--game", "g-lc"},
+			Env: map[string]string{"CTX": "combat"}, UnsetEnv: []string{"NOISY"},
+			TimeoutSeconds: 7, RunningExitCodes: []int{0, 3}, StoppedExitCodes: []int{9},
+		},
+		Stop: &launch.ResolvedHook{
+			Command: "/opt/tools/stop", TimeoutSeconds: 45, VerifyTimeoutSeconds: 120,
+			WorkingDir: "/srv/g",
+		},
+	}
+	state := NewRuntimeState(spec, RuntimeStateStatusStarting)
+	if err := ClaimRuntimeState("g-lc", dir, state); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := LoadRuntimeState("g-lc", dir)
+	if err != nil || loaded == nil {
+		t.Fatalf("load: %v %v", loaded, err)
+	}
+	// The pinned snapshot must survive verbatim: a custom stopped code must
+	// not degrade to unknown after a restart or profile edit (design/07),
+	// and the built-in fallback stays pinned alongside the hooks.
+	lc := loaded.Lifecycle
+	if lc == nil || lc.Status == nil || lc.Stop == nil {
+		t.Fatalf("lifecycle snapshot missing: %+v", loaded)
+	}
+	if got := lc.Status.StoppedExitCodes; len(got) != 1 || got[0] != 9 {
+		t.Fatalf("custom stopped codes lost: %v", got)
+	}
+	if got := lc.Status.RunningExitCodes; len(got) != 2 || got[0] != 0 || got[1] != 3 {
+		t.Fatalf("running codes lost: %v", got)
+	}
+	if lc.Status.TimeoutSeconds != 7 || lc.Status.Env["CTX"] != "combat" || len(lc.Status.UnsetEnv) != 1 {
+		t.Fatalf("status hook fields lost: %+v", lc.Status)
+	}
+	if lc.Stop.VerifyTimeoutSeconds != 120 || lc.Stop.WorkingDir != "/srv/g" {
+		t.Fatalf("stop hook fields lost: %+v", lc.Stop)
+	}
+	if loaded.StopProcessName != "game-bin" {
+		t.Fatalf("built-in fallback not pinned: %+v", loaded)
+	}
+}
+
+func TestClaimFallbackWithoutHardlinks(t *testing.T) {
+	dir := t.TempDir()
+	prevLink := linkRuntimeState
+	linkRuntimeState = func(oldname, newname string) error {
+		return &os.LinkError{Op: "link", Old: oldname, New: newname, Err: errUnsupportedLink}
+	}
+	t.Cleanup(func() { linkRuntimeState = prevLink })
+
+	state := NewRuntimeState(m2Spec("g-fb"), RuntimeStateStatusStarting)
+	if err := ClaimRuntimeState("g-fb", dir, state); err != nil {
+		t.Fatalf("fallback claim failed: %v", err)
+	}
+	loaded, err := LoadRuntimeState("g-fb", dir)
+	if err != nil || loaded == nil || loaded.LaunchID != state.LaunchID {
+		t.Fatalf("fallback must publish the complete claim: %+v %v", loaded, err)
+	}
+
+	// exclusivity is preserved on the fallback path
+	if err := ClaimRuntimeState("g-fb", dir, NewRuntimeState(m2Spec("g-fb"), RuntimeStateStatusStarting)); err != ErrRuntimeStateExists {
+		t.Fatalf("second fallback claim must fail with ErrRuntimeStateExists, got %v", err)
+	}
+}
+
+func TestClaimFallbackFailureLeavesNoPartialClaim(t *testing.T) {
+	dir := t.TempDir()
+	prevLink, prevRename := linkRuntimeState, renameRuntimeState
+	linkRuntimeState = func(oldname, newname string) error {
+		return &os.LinkError{Op: "link", Old: oldname, New: newname, Err: errUnsupportedLink}
+	}
+	renameRuntimeState = func(string, string) error { return errUnsupportedLink }
+	t.Cleanup(func() { linkRuntimeState, renameRuntimeState = prevLink, prevRename })
+
+	if err := ClaimRuntimeState("g-fbf", dir, NewRuntimeState(m2Spec("g-fbf"), RuntimeStateStatusStarting)); err == nil {
+		t.Fatalf("claim must fail when publication fails")
+	}
+	// The empty O_EXCL placeholder must not survive as a blocking claim.
+	loaded, err := LoadRuntimeState("g-fbf", dir)
+	if err != nil || loaded != nil {
+		t.Fatalf("failed fallback must leave nothing behind: %+v %v", loaded, err)
+	}
+}
+
+func TestLoadTornClaimWaitsForFallbackPublication(t *testing.T) {
+	dir := t.TempDir()
+	state := NewRuntimeState(m2Spec("g-torn"), RuntimeStateStatusStarting)
+	data, err := marshalRuntimeState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate the fallback's placeholder window: empty claim file while the
+	// transition lock is held; publication completes before release.
+	lock, err := AcquireTransitionLock("g-torn", dir, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cpDir := filepath.Dir(runtimeStatePathForTest(t, "g-torn", dir))
+	path := runtimeStatePathForTest(t, "g-torn", dir)
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		time.Sleep(150 * time.Millisecond)
+		tmp := filepath.Join(cpDir, ".pub.tmp")
+		if err := os.WriteFile(tmp, data, 0o600); err == nil {
+			_ = os.Rename(tmp, path)
+		}
+		lock.Release()
+	}()
+
+	loaded, err := LoadRuntimeState("g-torn", dir)
+	<-done
+	if err != nil || loaded == nil || loaded.LaunchID != state.LaunchID {
+		t.Fatalf("reader must wait out the placeholder window via the lock: %+v %v", loaded, err)
+	}
+
+	// A permanently torn claim (no lock holder) is an error, never a nil
+	// "no claim" that would authorize a start.
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadRuntimeState("g-torn", dir); err == nil {
+		t.Fatalf("permanently torn claim must be an error")
+	}
+}
+
+func TestGameDirIsPrivate(t *testing.T) {
+	dir := t.TempDir()
+	if err := ClaimRuntimeState("g-perm", dir, NewRuntimeState(m2Spec("g-perm"), RuntimeStateStatusStarting)); err != nil {
+		t.Fatal(err)
+	}
+	gameDir := filepath.Dir(runtimeStatePathForTest(t, "g-perm", dir))
+	fi, err := os.Stat(gameDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o700 {
+		t.Fatalf("game dir must be 0700, got %v", fi.Mode().Perm())
+	}
+
+	// pre-existing loose dirs are tightened
+	loose := filepath.Dir(runtimeStatePathForTest(t, "g-loose", dir))
+	if err := os.MkdirAll(loose, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(loose, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClaimRuntimeState("g-loose", dir, NewRuntimeState(m2Spec("g-loose"), RuntimeStateStatusStarting)); err != nil {
+		t.Fatal(err)
+	}
+	fi, err = os.Stat(loose)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o700 {
+		t.Fatalf("loose game dir must be tightened to 0700, got %v", fi.Mode().Perm())
 	}
 }

@@ -3,6 +3,7 @@ package process
 import (
 	"os"
 	"os/exec"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -145,11 +146,24 @@ func runHook(h *launch.ResolvedHook, gameID, profile string) HookResult {
 	return res
 }
 
+// hookEnvCaseInsensitive folds env keys on Windows, where the environment
+// is case-insensitive: unsetEnv must remove every case variant and hook env
+// must replace, not shadow, an inherited variant. Injectable for tests.
+var hookEnvCaseInsensitive = runtime.GOOS == "windows"
+
 // hookEnvironment builds the hook env per design/01: sanitized inherited
 // environment (inherited GABS_*/GABP_* removed — hooks never receive GABP
 // secrets) → hook unsetEnv → hook env → GABS_GAME_ID + GABS_PROFILE.
 func hookEnvironment(h *launch.ResolvedHook, gameID, profile string) []string {
-	env := map[string]string{}
+	fold := func(k string) string {
+		if hookEnvCaseInsensitive {
+			return strings.ToUpper(k)
+		}
+		return k
+	}
+	type entry struct{ key, value string }
+	env := map[string]entry{} // folded key -> spelled key + value
+
 	for _, kv := range os.Environ() {
 		i := strings.IndexByte(kv, '=')
 		if i <= 0 {
@@ -160,28 +174,24 @@ func hookEnvironment(h *launch.ResolvedHook, gameID, profile string) []string {
 		if strings.HasPrefix(upper, "GABS_") || strings.HasPrefix(upper, "GABP_") {
 			continue
 		}
-		env[k] = kv[i+1:]
+		env[fold(k)] = entry{key: k, value: kv[i+1:]}
 	}
 	for _, k := range h.UnsetEnv {
-		delete(env, k)
+		delete(env, fold(k))
 	}
 	for k, v := range h.Env {
-		env[k] = v
+		env[fold(k)] = entry{key: k, value: v}
 	}
-	env["GABS_GAME_ID"] = gameID
+	env["GABS_GAME_ID"] = entry{key: "GABS_GAME_ID", value: gameID}
 	if profile != "" {
-		env["GABS_PROFILE"] = profile
+		env["GABS_PROFILE"] = entry{key: "GABS_PROFILE", value: profile}
 	}
 
-	keys := make([]string, 0, len(env))
-	for k := range env {
-		keys = append(keys, k)
+	out := make([]string, 0, len(env))
+	for _, e := range env {
+		out = append(out, e.key+"="+e.value)
 	}
-	sort.Strings(keys)
-	out := make([]string, 0, len(keys))
-	for _, k := range keys {
-		out = append(out, k+"="+env[k])
-	}
+	sort.Strings(out)
 	return out
 }
 

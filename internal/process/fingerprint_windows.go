@@ -22,9 +22,13 @@ func ProcessStartTime(pid int) (int64, error) {
 	defer syscall.CloseHandle(h)
 
 	// A held handle keeps an exited process inspectable; only STILL_ACTIVE
-	// counts as existing.
+	// counts as existing, and an inspection failure must surface as an
+	// error (unknown), never be treated like STILL_ACTIVE.
 	var code uint32
-	if err := syscall.GetExitCodeProcess(h, &code); err == nil && code != statusStillActive {
+	if err := syscall.GetExitCodeProcess(h, &code); err != nil {
+		return 0, fmt.Errorf("GetExitCodeProcess(%d): %w", pid, err)
+	}
+	if code != statusStillActive {
 		return 0, ErrProcessNotFound
 	}
 

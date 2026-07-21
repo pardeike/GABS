@@ -54,10 +54,25 @@ func (cp *ConfigPaths) GetRuntimeStatePath(gameID string) string {
 	return filepath.Join(cp.GetGameDir(gameID), "runtime.json")
 }
 
-// EnsureGameDir creates the game-specific directory if it doesn't exist
+// EnsureGameDir creates the game-specific directory if it doesn't exist.
+// The directory holds per-launch credentials (runtime.json, bridge.json),
+// so it is private (0700) and pre-existing looser modes are tightened —
+// failure to tighten is an error, never silently ignored (design/07).
 func (cp *ConfigPaths) EnsureGameDir(gameID string) error {
 	gameDir := cp.GetGameDir(gameID)
-	return os.MkdirAll(gameDir, 0755)
+	if err := os.MkdirAll(gameDir, 0o700); err != nil {
+		return err
+	}
+	fi, err := os.Stat(gameDir)
+	if err != nil {
+		return err
+	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		if err := os.Chmod(gameDir, 0o700); err != nil {
+			return fmt.Errorf("game dir %s has loose permissions (%v) that cannot be tightened: %w", gameDir, fi.Mode().Perm(), err)
+		}
+	}
+	return nil
 }
 
 // EnsureBaseDir creates the base configuration directory if it doesn't exist

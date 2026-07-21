@@ -221,3 +221,57 @@ func TestLivenessNoClaimNoEvidence(t *testing.T) {
 		t.Fatalf("nothing to observe: %+v", ev)
 	}
 }
+
+func TestLivenessNoClaimProbesStopProcessName(t *testing.T) {
+	// A missing claim must not skip the lost-claim backstop: a configured
+	// stopProcessName is still probed and an untracked instance detected.
+	cases := []struct {
+		pids    []int
+		err     error
+		verdict string
+	}{
+		{[]int{77}, nil, StatusRunning},
+		{nil, nil, StatusStopped},
+		{nil, errors.New("hidepid"), StatusUnknown},
+	}
+	for _, c := range cases {
+		swapLivenessProbes(t, nil, nil, func(string) ([]int, error) { return c.pids, c.err })
+		ev := EvaluateLiveness(LivenessInput{StopProcessName: "game-bin"})
+		if ev.Verdict != c.verdict {
+			t.Fatalf("pids=%v err=%v: got %+v, want %q", c.pids, c.err, ev, c.verdict)
+		}
+	}
+}
+
+func TestLivenessAttachmentZeroFingerprintNotEvidence(t *testing.T) {
+	// Attachments postdate the fingerprint schema: a zero fingerprint is
+	// malformed, and whatever process holds that PID now must not
+	// impersonate a live bridge owner.
+	swapLivenessProbes(t, hookReturning(StatusStopped, nil), nil, nil)
+	claim := &RuntimeState{Attachment: &RuntimeAttachment{
+		ConnectionID: "c1", OwnerPID: os.Getpid(), OwnerPIDStartTime: 0,
+		LeaseDeadline: time.Now().Add(time.Minute),
+	}}
+	ev := EvaluateLiveness(LivenessInput{Claim: claim, StatusHook: &launch.ResolvedHook{Command: "x"}})
+	if ev.Source != LivenessSourceStatusHook {
+		t.Fatalf("zero-fingerprint attachment must not be evidence: %+v", ev)
+	}
+}
+
+func TestLivenessAttachmentContradictionWarning(t *testing.T) {
+	pid, start := ownFingerprint(t)
+	swapLivenessProbes(t, hookReturning(StatusStopped, nil), nil, nil)
+	claim := &RuntimeState{Attachment: &RuntimeAttachment{
+		ConnectionID: "c1", OwnerPID: pid, OwnerPIDStartTime: start,
+		LeaseDeadline: time.Now().Add(time.Minute),
+	}}
+	ev := EvaluateLiveness(LivenessInput{
+		Claim: claim, StatusHook: &launch.ResolvedHook{Command: "x"}, DiagnoseHook: true,
+	})
+	if ev.Verdict != StatusRunning || ev.Source != LivenessSourceAttachment {
+		t.Fatalf("fresh lease wins the contradiction: %+v", ev)
+	}
+	if len(ev.Warnings) == 0 || ev.HookResult == nil {
+		t.Fatalf("attachment-tier contradictions must be reported too: %+v", ev)
+	}
+}

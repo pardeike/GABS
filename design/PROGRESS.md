@@ -107,18 +107,29 @@ contract, not a scratchpad.
       (full schema landed incl. Operation/Attachment/ActionResult/
       Digests/Delivery types — later M2 items populate them; claims stamp
       schemaVersion=2, launchID, generation=1, phase, spawnState,
-      pidRole; hammer + exactly-one-winner + hardlink-fallback tests)
+      pidRole; hammer + exactly-one-winner tests; review round 3
+      completed the contract: the resolved lifecycle snapshot + pinned
+      stopProcessName persist in the claim (custom exit codes round-trip,
+      T-RT), the link-less fallback is now atomic under the transition
+      lock with reader lock-retry on torn claims and cleanup on failure
+      (tested via injected link/rename), game dirs are created 0700 and
+      loose modes tightened with errors surfaced, and legacy-claim
+      chmod failures now propagate instead of being discarded; the
+      built-in graceful/force strategy pin lands with M2.6, which
+      defines the strategy)
 - [~] M2.2 Transition lock + domain-scoped fencing
       (launchID/operationID/connectionID; generation as CAS) — spec: 06;
       tests: T-FENCE
-      (lock primitive done: flock on unix, exclusive-share CreateFile on
-      Windows, stable never-deleted file, bounded acquisition, no lost
+      (lock primitive done: flock on unix, LockFileEx byte-range on
+      Windows — review round 3 replaced the initial exclusive-share
+      CreateFile, which would false-positive on ordinary readers like
+      antivirus — stable never-deleted file, bounded acquisition, no lost
       updates under 8-way contention; TransitionRuntimeState bumps the
       CAS generation; NewFencingID mints 128-bit identities; the
       completion-side validation — launchID+operationID for lifecycle,
       launchID+connectionID for attachment callbacks — lands with the
       operations that produce completions, M2.5/M2.6)
-- [x] M2.3 Hook runner (tree-kill, output capture, Windows Job Objects,
+- [~] M2.3 Hook runner (tree-kill, output capture, Windows Job Objects,
       exit-code contract) — spec: 01; tests: T-LIFE
       (RunStatusHook/RunActionHook in internal/process/hookrunner.go:
       unclassified/timeout/exec-failure = unknown never stopped; Setpgid
@@ -127,9 +138,15 @@ contract, not a scratchpad.
       of the documented residual-straggler risk); direct child reaped
       before reporting, WaitDelay guards pipes held by detached
       grandchildren; 16 KiB tail-keeping capture with truncation marker;
-      sanitized env contract incl. GABP-secret exclusion; Windows script
-      hooks (.bat/.cmd/.ps1/.vbs/.js) rejected at validation with the
-      explicit cmd.exe /c spelling in the message)
+      sanitized env contract incl. GABP-secret exclusion and folded keys
+      on Windows; Windows script hooks (.bat/.cmd/.ps1/.vbs/.js)
+      rejected at validation with the explicit cmd.exe /c spelling;
+      review round 3: Windows behavioral tests written
+      (hookrunner_windows_test.go — Job Object tree-kill with grandchild
+      marker, exit-code contract, folded env, stderr tail) and a
+      windows-latest CI lane added to test.yml; flip to [x] when that
+      lane is green — unix cells verified locally, Windows cells are
+      written-but-unexecuted until CI runs)
 - [x] M2.4 Liveness rule incl. attachment lease record, inspection-
       failure=unknown, URL helper PID exclusion — spec: 04; tests:
       T-LIFE, T-FENCE (attachment evidence)
@@ -143,7 +160,14 @@ contract, not a scratchpad.
       workload evidence; expired leases are history; dead/unverifiable
       lease owners are not evidence; DiagnoseHook reports the
       hook-vs-GABP contradiction instead of hiding it; RuntimeAttachment/
-      RuntimeOperation gained owner/executor PID start-time fingerprints)
+      RuntimeOperation gained owner/executor PID start-time fingerprints;
+      review round 3 closed the false-stopped paths: a no-claim
+      evaluation still probes stopProcessName (lost-claim backstop), a
+      zero attachment fingerprint is malformed-never-legacy evidence,
+      DiagnoseHook also covers the attachment tier, the Linux process
+      scan propagates EACCES-class inspection failures (positive matches
+      still win; disappearance races stay silent), and Windows
+      GetExitCodeProcess failures surface as unknown)
 - [ ] M2.5 Start pipeline Stages 2–5: complete pre-spawn claim, all-
       profile probing + external snapshots, endpoint alloc + per-launch
       token, spawnState transitions, Stage 4 outcomes (adopted /
@@ -204,3 +228,18 @@ contract, not a scratchpad.
   original wording restored, and the relaxation implemented behind the
   AllowLifecycle gate (both in extension validation and in the legacy
   GameConfig.Validate branch) rather than deferred.
+- 2026-07-21, M2.1 + M2.2 + M2.3, protocol §rules + design/06: the
+  M2.1/M2.2 checkpoint notes claimed coverage that did not exist — a
+  "hardlink-fallback test" (no test forced that branch, and the branch
+  itself was non-atomic and unlocked) and "0600/0700" enforcement (game
+  dirs were still created 0755, chmod failures silently discarded).
+  Additionally, the Windows transition lock was implemented as
+  share-none CreateFile instead of design/06's LockFileEx without
+  recording a deviation, and M2.3 was marked [x] with no Windows
+  behavioral test executing any of its Windows-only code. All caught in
+  review round 3. Resolution: locked atomic fallback + reader lock-retry
+  with real forced-branch tests, 0700 enforcement with surfaced errors,
+  LockFileEx byte-range locking per design (share-none rejected because
+  ordinary readers like antivirus would cause false
+  operation_in_progress), M2.3 reopened to [~] until the new
+  windows-latest CI lane runs the new Windows tests.

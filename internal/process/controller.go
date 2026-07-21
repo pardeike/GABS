@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pardeike/gabs/internal/launch"
 	"github.com/pardeike/gabs/internal/steam"
 )
 
@@ -50,6 +51,10 @@ type LaunchSpec struct {
 	// into the runtime claim.
 	AppliedInputs  []string
 	ConfigRevision string
+
+	// Lifecycle is the resolved hook snapshot, persisted into the runtime
+	// claim so stop/status never consult mutable config (design/07).
+	Lifecycle *launch.ResolvedLifecycle
 }
 
 type BridgeInfo struct {
@@ -941,37 +946,67 @@ func findProcessesByNameWithPgrep(name string) ([]int, error) {
 	return pids, nil
 }
 
+// linuxProcRoot is injectable so the scan's error handling is testable on
+// any platform.
+var linuxProcRoot = "/proc"
+
+// findLinuxProcessesByName scans the process table. Inspection failures
+// (e.g. EACCES under hidepid) must surface as errors so liveness reports
+// unknown, never a false stopped (design/04); only normal process-
+// disappearance races are ignored. Any positive match still wins — a found
+// process is running-evidence regardless of unreadable neighbors.
 func findLinuxProcessesByName(name string) ([]int, error) {
 	var pids []int
 
-	entries, err := os.ReadDir("/proc")
+	entries, err := os.ReadDir(linuxProcRoot)
 	if err != nil {
 		return nil, err
 	}
 
+	var inspectErr error
 	for _, entry := range entries {
 		pid, err := strconv.Atoi(entry.Name())
 		if err != nil {
 			continue
 		}
-		if linuxProcessMatchesName(pid, name) {
+		match, err := linuxProcessMatchesName(pid, name)
+		if err != nil {
+			inspectErr = err
+			continue
+		}
+		if match {
 			pids = append(pids, pid)
 		}
 	}
 
+	if len(pids) == 0 && inspectErr != nil {
+		return nil, fmt.Errorf("process table not fully inspectable: %w", inspectErr)
+	}
 	return pids, nil
 }
 
-func linuxProcessMatchesName(pid int, name string) bool {
-	procDir := filepath.Join("/proc", strconv.Itoa(pid))
+func linuxProcessMatchesName(pid int, name string) (bool, error) {
+	procDir := filepath.Join(linuxProcRoot, strconv.Itoa(pid))
 
-	if comm, err := os.ReadFile(filepath.Join(procDir, "comm")); err == nil && strings.TrimSpace(string(comm)) == name {
-		return true
+	var inspectErr error
+	if comm, err := os.ReadFile(filepath.Join(procDir, "comm")); err == nil {
+		if strings.TrimSpace(string(comm)) == name {
+			return true, nil
+		}
+	} else if !isProcessGoneError(err) {
+		inspectErr = err
 	}
 
 	cmdline, err := os.ReadFile(filepath.Join(procDir, "cmdline"))
-	if err != nil || len(cmdline) == 0 {
-		return false
+	if err != nil {
+		if isProcessGoneError(err) {
+			// disappeared mid-scan: an ordinary race, not an inspection failure
+			return false, nil
+		}
+		return false, err
+	}
+	if len(cmdline) == 0 {
+		return false, inspectErr
 	}
 
 	argv0End := strings.IndexByte(string(cmdline), 0)
@@ -980,5 +1015,12 @@ func linuxProcessMatchesName(pid int, name string) bool {
 	}
 	argv0 := string(cmdline[:argv0End])
 
-	return argv0 == name || filepath.Base(argv0) == name
+	if argv0 == name || filepath.Base(argv0) == name {
+		return true, nil
+	}
+	return false, inspectErr
+}
+
+func isProcessGoneError(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH)
 }
