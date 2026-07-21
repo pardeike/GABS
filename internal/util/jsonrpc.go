@@ -245,6 +245,16 @@ func NewNewlineFrameReader(r io.Reader) *NewlineFrameReader {
 	return &NewlineFrameReader{scanner: scanner}
 }
 
+// UnmarshalPreservingNumbers decodes JSON with json.Number for all numeric
+// values. Incoming MCP messages must never pass through float64: launch
+// inputs require exact integer decoding end-to-end (design/03), and float64
+// silently rounds values above 2^53.
+func UnmarshalPreservingNumbers(data []byte, obj interface{}) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	return dec.Decode(obj)
+}
+
 // ReadJSON reads one newline-delimited JSON message
 func (r *NewlineFrameReader) ReadJSON(obj interface{}) error {
 	if !r.scanner.Scan() {
@@ -253,7 +263,7 @@ func (r *NewlineFrameReader) ReadJSON(obj interface{}) error {
 		}
 		return io.EOF
 	}
-	return json.Unmarshal(r.scanner.Bytes(), obj)
+	return UnmarshalPreservingNumbers(r.scanner.Bytes(), obj)
 }
 
 // AutoFrameReader detects the incoming stream framing and reads messages accordingly.
@@ -293,7 +303,7 @@ func (r *AutoFrameReader) ReadJSON(obj interface{}) error {
 		if err != nil {
 			return err
 		}
-		return json.Unmarshal(data, obj)
+		return UnmarshalPreservingNumbers(data, obj)
 	case FramingNewline:
 		if r.newlineReader == nil {
 			r.newlineReader = NewNewlineFrameReader(r.reader)

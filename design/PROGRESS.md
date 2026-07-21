@@ -32,11 +32,12 @@ contract, not a scratchpad.
       (warnings carried on GamesConfig.Warnings; MCP surfacing lands with
       M1.11)
 - [x] M1.3 Full validation rules (names, env grammar, unsetEnv conflicts,
-      absolute workingDir, URL-mode rejections, input constraints incl.
-      string/integer semantics) — spec: 01; tests: T-VAL
-      (hook validation implemented + unit-tested behind AllowLifecycle;
-      the URL-mode stopProcessName relaxation deliberately deferred to
-      M2.14 with the gate removal, since hooks cannot be configured in M1)
+      absolute workingDir, URL-mode rejections + hook relaxation, input
+      constraints incl. string/integer semantics) — spec: 01; tests: T-VAL
+      (hook validation and the URL-mode stopProcessName relaxation are both
+      implemented and tested behind AllowLifecycle, incl. the legacy
+      Validate() branch; the gate keeps them unreachable from the load
+      path until M2.14 lifts it)
 - [x] M1.4 M1 lifecycle feature gate (reject `lifecycle` until M2) —
       spec: 21; tests: T-VAL
 - [~] M1.5 ConfigStore: hash-per-call reload, last-known-good, revisions,
@@ -130,5 +131,9 @@ contract, not a scratchpad.
 
 ## Deviations
 
-(none yet — add entries as: date, item, spec section, what differs, why,
-and how it was resolved or why it is acceptable)
+- 2026-07-21, M1.3, protocol §rules: the first checkpoint reworded M1.3's
+  item text to drop "URL-mode ... hook relaxation" instead of marking the
+  deferral, violating the never-reword rule. Caught in review. Resolution:
+  original wording restored, and the relaxation implemented behind the
+  AllowLifecycle gate (both in extension validation and in the legacy
+  GameConfig.Validate branch) rather than deferred.

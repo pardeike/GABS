@@ -133,6 +133,13 @@ func Resolve(snap *config.Snapshot, req Request, opts Options) (*Resolved, *Reso
 				Message:    fmt.Sprintf("launch input %q is not declared for game %q", name, req.GameID),
 				Candidates: declared}
 		}
+		value, apply, verr := validateInputValue(name, &decl, req.Inputs[name])
+		if verr != nil {
+			return nil, verr
+		}
+		if !apply {
+			continue // boolean false equals omission — checked before applicability
+		}
 		if len(decl.Profiles) > 0 {
 			applicable := false
 			for _, p := range decl.Profiles {
@@ -145,13 +152,6 @@ func Resolve(snap *config.Snapshot, req Request, opts Options) (*Resolved, *Reso
 					Message:    fmt.Sprintf("launch input %q is not applicable to profile %q", name, profile),
 					Candidates: append([]string(nil), decl.Profiles...)}
 			}
-		}
-		value, apply, verr := validateInputValue(name, &decl, req.Inputs[name])
-		if verr != nil {
-			return nil, verr
-		}
-		if !apply {
-			continue // boolean false equals omission
 		}
 		ai := appliedInput{name: name}
 		for _, a := range decl.Args {
@@ -186,14 +186,20 @@ func Resolve(snap *config.Snapshot, req Request, opts Options) (*Resolved, *Reso
 		}
 		env.set(k, v)
 	}
-	unsetNames := map[string]bool{}
+	// Forwarding metadata must represent the effective (possibly
+	// case-insensitive) environment: fold-keyed with last-writer spelling,
+	// exactly like envMap, or GABS_FORWARD_ENV/GABS_ABSENT_ENV would list
+	// two case variants of one effective key.
+	unsetNames := map[string]string{} // folded -> last-writer spelling
+	ctxNames := map[string]string{}   // folded -> last-writer spelling
 	applyLayer := func(unset []string, layer map[string]string) {
 		for _, k := range unset {
 			env.unset(k)
-			unsetNames[k] = true
+			unsetNames[env.fold(k)] = k
 		}
 		for _, k := range sortedKeysOf(layer) {
 			env.set(k, layer[k])
+			ctxNames[env.fold(k)] = k
 		}
 	}
 	applyLayer(game.UnsetEnv, game.Env)
@@ -204,7 +210,7 @@ func Resolve(snap *config.Snapshot, req Request, opts Options) (*Resolved, *Reso
 
 	// Names expected absent: explicitly unset and not re-set by a later layer.
 	var absent []string
-	for k := range unsetNames {
+	for _, k := range unsetNames {
 		if !env.has(k) {
 			absent = append(absent, k)
 		}
@@ -212,20 +218,8 @@ func Resolve(snap *config.Snapshot, req Request, opts Options) (*Resolved, *Reso
 	sort.Strings(absent)
 
 	// Config-defined context keys (game + profile + applied input env keys).
-	ctxSet := map[string]bool{}
-	for k := range game.Env {
-		ctxSet[k] = true
-	}
-	for k := range selected.Env {
-		ctxSet[k] = true
-	}
-	for _, ai := range applied {
-		for k := range ai.env {
-			ctxSet[k] = true
-		}
-	}
-	ctxKeys := make([]string, 0, len(ctxSet))
-	for k := range ctxSet {
+	ctxKeys := make([]string, 0, len(ctxNames))
+	for _, k := range ctxNames {
 		ctxKeys = append(ctxKeys, k)
 	}
 	sort.Strings(ctxKeys)

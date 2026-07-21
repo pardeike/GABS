@@ -254,7 +254,8 @@ func SaveGamesConfigToPath(config *GamesConfig, configPath string) error {
 
 	// Write atomically
 	tempPath := configPath + ".tmp"
-	if err := os.WriteFile(tempPath, data, 0644); err != nil {
+	// 0600: config may hold environment values (design/20).
+	if err := os.WriteFile(tempPath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write temp config: %w", err)
 	}
 
@@ -282,6 +283,11 @@ func (c *GamesConfig) GetGame(gameID string) (*GameConfig, bool) {
 func (c *GamesConfig) AddGame(game GameConfig) error {
 	if err := game.Validate(); err != nil {
 		return err
+	}
+	// Extension fields must never be constructable in an invalid state that
+	// would only fail on the next load.
+	if errs, _ := ValidateGameExtensions(game.ID, &game, DefaultValidationOptions()); len(errs) > 0 {
+		return &ValidationError{Issues: errs}
 	}
 	if c.Games == nil {
 		c.Games = make(map[string]GameConfig)
@@ -324,8 +330,8 @@ func (g *GameConfig) Validate() error {
 	// SteamManaged launches the resolved game executable directly, so it can be
 	// tracked like DirectPath while still using the Steam app id for discovery.
 	if g.LaunchMode == "SteamAppId" || g.LaunchMode == "EpicAppId" {
-		if g.StopProcessName == "" {
-			return fmt.Errorf("stopProcessName is required for %s games to enable proper game termination. Without it, GABS can only stop the launcher process, not the actual game", g.LaunchMode)
+		if g.StopProcessName == "" && !g.hasURLHookAlternative() {
+			return fmt.Errorf("stopProcessName is required for %s games to enable proper game termination (or, once lifecycle hooks are supported, a game-level status hook plus a stop or kill hook). Without it, GABS can only stop the launcher process, not the actual game", g.LaunchMode)
 		}
 	}
 

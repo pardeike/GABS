@@ -277,6 +277,15 @@ func parseOptionalPositiveIntValue(raw interface{}, key string) (int, bool, *Too
 
 	var value int
 	switch typed := raw.(type) {
+	case json.Number:
+		parsed, err := strconv.ParseInt(typed.String(), 10, 64)
+		if err != nil {
+			return 0, false, &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Argument '%s' must be an integer", key)}},
+				IsError: true,
+			}
+		}
+		value = int(parsed)
 	case float64:
 		if typed != float64(int(typed)) {
 			return 0, false, &ToolResult{
@@ -1008,6 +1017,15 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 
 		var value int
 		switch typed := raw.(type) {
+		case json.Number:
+			parsed, err := strconv.ParseInt(typed.String(), 10, 64)
+			if err != nil {
+				return 0, false, &ToolResult{
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("Argument '%s' must be an integer", key)}},
+					IsError: true,
+				}
+			}
+			value = int(parsed)
 		case float64:
 			if typed != float64(int(typed)) {
 				return 0, false, &ToolResult{
@@ -1056,6 +1074,15 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 
 		var cursor int
 		switch typed := rawCursor.(type) {
+		case json.Number:
+			parsed, err := strconv.ParseInt(typed.String(), 10, 64)
+			if err != nil {
+				return 0, &ToolResult{
+					Content: []Content{{Type: "text", Text: "Argument 'cursor' must be an integer offset or string cursor"}},
+					IsError: true,
+				}
+			}
+			cursor = int(parsed)
 		case float64:
 			if typed != float64(int(typed)) {
 				return 0, &ToolResult{
@@ -4405,7 +4432,9 @@ func (s *Server) handleToolsCall(msg *Message) *Message {
 		return NewError(msg.ID, -32602, "Invalid params", err.Error())
 	}
 
-	if err := json.Unmarshal(paramsBytes, &params); err != nil {
+	// Numbers must survive the round trip exactly: json.Number marshals as
+	// the original literal, and the re-decode preserves it (design/03).
+	if err := util.UnmarshalPreservingNumbers(paramsBytes, &params); err != nil {
 		return NewError(msg.ID, -32602, "Invalid params", err.Error())
 	}
 
@@ -4461,7 +4490,7 @@ func (s *Server) handleResourcesRead(msg *Message) *Message {
 		return NewError(msg.ID, -32602, "Invalid params", err.Error())
 	}
 
-	if err := json.Unmarshal(paramsBytes, &params); err != nil {
+	if err := util.UnmarshalPreservingNumbers(paramsBytes, &params); err != nil {
 		return NewError(msg.ID, -32602, "Invalid params", err.Error())
 	}
 

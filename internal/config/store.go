@@ -37,14 +37,15 @@ func (e *ConfigError) Error() string {
 type Store struct {
 	path string
 
-	mu          sync.Mutex
-	current     *Snapshot
-	currentHash [sha256.Size]byte
-	haveGood    bool
-	invalidHash [sha256.Size]byte
-	invalidErr  *ConfigError
-	haveInvalid bool
-	parseCount  int // observed by tests: invalid content must parse exactly once
+	mu            sync.Mutex
+	current       *Snapshot
+	currentHash   [sha256.Size]byte
+	currentAbsent bool // current snapshot represents an absent file, not content
+	haveGood      bool
+	invalidHash   [sha256.Size]byte
+	invalidErr    *ConfigError
+	haveInvalid   bool
+	parseCount    int // observed by tests: invalid content must parse exactly once
 }
 
 // NewStore creates a store for the given config file path.
@@ -69,10 +70,14 @@ func (s *Store) Snapshot() (*Snapshot, *ConfigError) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			// Existing empty-config behavior: absent file = default config.
-			if s.haveGood && s.currentHash == sha256.Sum256(nil) {
+			// Absence is tracked separately from any content hash: a
+			// zero-byte file is invalid JSON, not the default config.
+			if s.haveGood && s.currentAbsent {
 				return s.current, nil
 			}
-			return s.publishLocked(nil, defaultGamesConfig()), nil
+			snap := s.publishLocked(nil, defaultGamesConfig())
+			s.currentAbsent = true
+			return snap, nil
 		}
 		cerr := &ConfigError{Revision: "unreadable", Err: err}
 		if s.haveGood {
@@ -82,7 +87,7 @@ func (s *Store) Snapshot() (*Snapshot, *ConfigError) {
 	}
 
 	hash := sha256.Sum256(data)
-	if s.haveGood && hash == s.currentHash {
+	if s.haveGood && !s.currentAbsent && hash == s.currentHash {
 		return s.current, nil
 	}
 	if s.haveInvalid && hash == s.invalidHash {
@@ -122,6 +127,7 @@ func (s *Store) publishLocked(hash *[sha256.Size]byte, cfg *GamesConfig) *Snapsh
 	snap := &Snapshot{Config: cfg, Revision: revisionOf(h), ConfigDir: dir}
 	s.current = snap
 	s.currentHash = h
+	s.currentAbsent = false
 	s.haveGood = true
 	s.haveInvalid = false
 	s.invalidErr = nil

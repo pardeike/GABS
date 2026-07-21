@@ -367,3 +367,85 @@ func TestHookValidation(t *testing.T) {
 	errs, _ = validateGame(t, g, opts)
 	requireIssue(t, errs, "/profiles/vanilla/lifecycle/status/command", "required")
 }
+
+func TestAddGameRunsExtensionValidation(t *testing.T) {
+	c := &GamesConfig{Version: "1.0"}
+	g := profiledGame()
+	g.DefaultProfile = "" // invalid: profiles without defaultProfile
+	if err := c.AddGame(g); err == nil {
+		t.Fatalf("AddGame must reject invalid extension config")
+	}
+	g = profiledGame()
+	if err := c.AddGame(g); err != nil {
+		t.Fatalf("valid profiled game must be addable: %v", err)
+	}
+}
+
+func TestHookWorkingDirRelativeWithPlaceholder(t *testing.T) {
+	g := profiledGame()
+	g.Lifecycle = &LifecycleConfig{Stop: &HookConfig{Command: "c", WorkingDir: "relative/${profile}"}}
+	errs, _ := validateGame(t, g, ValidationOptions{AllowLifecycle: true})
+	requireIssue(t, errs, "/lifecycle/stop/workingDir", "absolute")
+	// absolute literal with placeholder suffix stays valid
+	g.Lifecycle = &LifecycleConfig{Stop: &HookConfig{Command: "c", WorkingDir: "/srv/${profile}"}}
+	errs, _ = validateGame(t, g, ValidationOptions{AllowLifecycle: true})
+	requireNoErrors(t, errs)
+}
+
+func TestInputEnvCaseFoldCollision(t *testing.T) {
+	g := inputGame(map[string]LaunchInputConfig{
+		"x": {Description: "d", Type: "boolean", Env: map[string]string{"Foo": "1", "FOO": "2"}},
+	})
+	errs, _ := validateGame(t, g, ValidationOptions{CaseInsensitiveEnv: true})
+	requireIssue(t, errs, "/launchInputs/x/env", "case")
+	errs, _ = validateGame(t, g, ValidationOptions{CaseInsensitiveEnv: false})
+	requireNoErrors(t, errs)
+}
+
+func TestURLModeHookRelaxation(t *testing.T) {
+	mk := func(lc *LifecycleConfig, stopName string) GameConfig {
+		return GameConfig{ID: "u", Name: "U", LaunchMode: "SteamAppId", Target: "1",
+			StopProcessName: stopName, Lifecycle: lc}
+	}
+	opts := ValidationOptions{AllowLifecycle: true}
+	status := &HookConfig{Command: "checker"}
+	stop := &HookConfig{Command: "stopper"}
+
+	// status + stop hooks satisfy the requirement without stopProcessName
+	errs, _ := validateGame(t, mk(&LifecycleConfig{Status: status, Stop: stop}, ""), opts)
+	requireNoErrors(t, errs)
+
+	// status-only is insufficient
+	errs, _ = validateGame(t, mk(&LifecycleConfig{Status: status}, ""), opts)
+	requireIssue(t, errs, "/games/u", "stopProcessName")
+
+	// stop-only is insufficient (no observation mechanism)
+	errs, _ = validateGame(t, mk(&LifecycleConfig{Stop: stop}, ""), opts)
+	requireIssue(t, errs, "/games/u", "stopProcessName")
+
+	// stopProcessName alone remains sufficient
+	errs, _ = validateGame(t, mk(&LifecycleConfig{Status: status}, "Game.exe"), opts)
+	requireNoErrors(t, errs)
+
+	// legacy Validate() accepts the hook alternative too
+	g := mk(&LifecycleConfig{Status: status, Kill: &HookConfig{Command: "k"}}, "")
+	if err := g.Validate(); err != nil {
+		t.Fatalf("Validate must accept status+kill hooks in place of stopProcessName: %v", err)
+	}
+	g = mk(nil, "")
+	if err := g.Validate(); err == nil {
+		t.Fatalf("Validate must still require stopProcessName without hooks")
+	}
+}
+
+func TestExactEnvIssuePaths(t *testing.T) {
+	g := profiledGame()
+	g.Env = map[string]string{"FEATURE,MODE": "x"}
+	errs, _ := validateGame(t, g, ValidationOptions{})
+	requireIssue(t, errs, "/env/FEATURE,MODE", "portable")
+
+	g = profiledGame()
+	g.UnsetEnv = []string{"OK_KEY", "GABS_BAD"}
+	errs, _ = validateGame(t, g, ValidationOptions{})
+	requireIssue(t, errs, "/unsetEnv/1", "reserved")
+}

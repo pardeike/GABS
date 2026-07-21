@@ -181,3 +181,19 @@ func TestStoreConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestStoreMissingThenEmptyFile(t *testing.T) {
+	s, p := storeAt(t, "")
+	if _, cerr := s.Snapshot(); cerr != nil {
+		t.Fatalf("missing file must serve defaults: %v", cerr)
+	}
+	// A zero-byte file is invalid JSON — it must NOT be conflated with the
+	// absent-file default (absence is not a content hash).
+	if err := os.WriteFile(p, []byte{}, 0600); err != nil {
+		t.Fatal(err)
+	}
+	snap, cerr := s.Snapshot()
+	if cerr == nil {
+		t.Fatalf("empty file must surface a ConfigError, got clean snapshot %+v", snap)
+	}
+}

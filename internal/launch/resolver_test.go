@@ -362,3 +362,75 @@ func TestUnprofiledLegacyGame(t *testing.T) {
 		t.Fatalf("legacy game must have empty context/absent key lists")
 	}
 }
+
+func TestFalseBooleanBeforeApplicability(t *testing.T) {
+	// A profile-restricted boolean supplied as false while another profile is
+	// selected equals omission — it must not fail applicability.
+	g := testGame()
+	g.LaunchInputs["combatOnly"] = config.LaunchInputConfig{
+		Description: "d", Type: "boolean", Profiles: []string{"combat"}, Args: []string{"--combat-only"},
+	}
+	r, rerr := Resolve(snapWith(g), Request{GameID: "adventure", Profile: "vanilla",
+		Inputs: map[string]any{"combatOnly": false}}, Options{InheritedEnv: baseEnv})
+	if rerr != nil {
+		t.Fatalf("false boolean must equal omission before applicability: %+v", rerr)
+	}
+	if len(r.AppliedInputs) != 0 {
+		t.Fatalf("nothing must apply: %v", r.AppliedInputs)
+	}
+	// true still fails applicability
+	_, rerr = Resolve(snapWith(g), Request{GameID: "adventure", Profile: "vanilla",
+		Inputs: map[string]any{"combatOnly": true}}, Options{InheritedEnv: baseEnv})
+	if rerr == nil || rerr.Code != "launch_input_invalid" {
+		t.Fatalf("true must still fail applicability, got %+v", rerr)
+	}
+}
+
+func TestForwardingMetadataFoldsOnWindowsSemantics(t *testing.T) {
+	// Game-level FOO + profile-level Foo on case-insensitive merge: the
+	// forwarding metadata must list exactly one effective name (last-writer
+	// spelling), matching envMap semantics.
+	g := testGame()
+	g.Env = map[string]string{"FOO": "game"}
+	g.UnsetEnv = nil
+	p := g.Profiles["combat"]
+	p.Env = map[string]string{"Foo": "profile"}
+	p.UnsetEnv = nil
+	g.Profiles["combat"] = p
+	r, rerr := Resolve(snapWith(g), Request{GameID: "adventure", Profile: "combat"},
+		Options{InheritedEnv: nil, CaseInsensitiveEnv: true})
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	count := 0
+	for _, k := range r.ContextEnvKeys {
+		if k == "FOO" || k == "Foo" {
+			count++
+			if k != "Foo" {
+				t.Fatalf("last-writer spelling must win in ContextEnvKeys, got %q", k)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("fold-aware metadata must list one variant, got %d in %v", count, r.ContextEnvKeys)
+	}
+	// absences fold the same way: game unsets BAR, profile unsets bar
+	g.UnsetEnv = []string{"BAR"}
+	p = g.Profiles["combat"]
+	p.UnsetEnv = []string{"bar"}
+	g.Profiles["combat"] = p
+	r, rerr = Resolve(snapWith(g), Request{GameID: "adventure", Profile: "combat"},
+		Options{InheritedEnv: []string{"BAR=x"}, CaseInsensitiveEnv: true})
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	count = 0
+	for _, k := range r.AbsentEnvNames {
+		if k == "BAR" || k == "bar" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("fold-aware absences must list one variant, got %d in %v", count, r.AbsentEnvNames)
+	}
+}

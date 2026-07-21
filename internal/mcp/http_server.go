@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pardeike/gabs/internal/util"
 	"github.com/pardeike/gabs/internal/version"
 )
 
@@ -130,7 +131,7 @@ func (s *Server) handleMCPHTTPRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Parse JSON-RPC message
 	var msg Message
-	if err := json.Unmarshal(body, &msg); err != nil {
+	if err := util.UnmarshalPreservingNumbers(body, &msg); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintf(w, `{"error":"Invalid JSON-RPC message"}`)

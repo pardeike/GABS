@@ -164,6 +164,12 @@ func ValidateGameExtensions(gameID string, g *GameConfig, opts ValidationOptions
 			addErr(base+"/unsetEnv", g.LaunchMode+" "+urlModeHint)
 		}
 		errs = append(errs, validateLifecycleSlot(base, g.Lifecycle, len(g.Profiles) > 0, opts)...)
+		// One observation/control mechanism stays mandatory for URL modes:
+		// the URL-opener helper PID proves nothing about the workload. Hooks
+		// (status + stop-or-kill) may satisfy it in place of stopProcessName.
+		if opts.AllowLifecycle && g.StopProcessName == "" && !g.hasURLHookAlternative() {
+			addErr(base, g.LaunchMode+" games must declare stopProcessName, or a game-level status hook plus a stop or kill hook")
+		}
 		return errs, warns
 	}
 
@@ -223,7 +229,7 @@ func ValidateGameExtensions(gameID string, g *GameConfig, opts ValidationOptions
 		if !profileNameRe.MatchString(name) {
 			addErr(ipath, "invalid launch input name (must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$)")
 		}
-		errs = append(errs, validateLaunchInput(ipath, name, &in, g.Profiles)...)
+		errs = append(errs, validateLaunchInput(ipath, name, &in, g.Profiles, opts.CaseInsensitiveEnv)...)
 	}
 
 	// Cross-input env conflicts: two inputs that could both apply to the same
@@ -256,47 +262,55 @@ func validateEnvLayer(base string, env map[string]string, unset []string, caseIn
 	seenFolded := map[string]string{}
 	for _, k := range keys {
 		kpath := base + "/env/" + escapePointerToken(k)
-		issues = append(issues, validateEnvKey(base+"/env", k)...)
+		issues = append(issues, validateEnvKey(kpath, k)...)
 		if hasNUL(env[k]) {
 			add(kpath, "environment value must not contain NUL")
 		}
 		if prev, ok := seenFolded[fold(k)]; ok {
-			add(base+"/env", fmt.Sprintf("environment keys %q and %q collide after case folding", prev, k))
+			add(kpath, fmt.Sprintf("environment keys %q and %q collide after case folding", prev, k))
 		} else {
 			seenFolded[fold(k)] = k
 		}
 	}
 
 	seenUnset := map[string]string{}
-	for _, k := range unset {
-		issues = append(issues, validateEnvKey(base+"/unsetEnv", k)...)
+	for i, k := range unset {
+		upath := fmt.Sprintf("%s/unsetEnv/%d", base, i)
+		issues = append(issues, validateEnvKey(upath, k)...)
 		if prev, ok := seenUnset[fold(k)]; ok {
 			if prev == k {
-				add(base+"/unsetEnv", fmt.Sprintf("duplicate unsetEnv entry %q", k))
+				add(upath, fmt.Sprintf("duplicate unsetEnv entry %q", k))
 			} else {
-				add(base+"/unsetEnv", fmt.Sprintf("unsetEnv entries %q and %q collide after case folding", prev, k))
+				add(upath, fmt.Sprintf("unsetEnv entries %q and %q collide after case folding", prev, k))
 			}
 			continue
 		}
 		seenUnset[fold(k)] = k
 		if _, ok := seenFolded[fold(k)]; ok {
-			add(base+"/unsetEnv", fmt.Sprintf("key %q appears in both env and unsetEnv of the same layer", k))
+			add(upath, fmt.Sprintf("key %q appears in both env and unsetEnv of the same layer", k))
 		}
 	}
 	return issues
 }
 
-func validateEnvKey(base, key string) []ConfigIssue {
-	var issues []ConfigIssue
+// validateEnvKey reports issues at the exact RFC 6901 member/index path.
+func validateEnvKey(memberPath, key string) []ConfigIssue {
 	if !envKeyRe.MatchString(key) {
-		issues = append(issues, ConfigIssue{Path: base, Message: fmt.Sprintf("environment key %q must match the portable identifier grammar ^[A-Za-z_][A-Za-z0-9_]*$", key)})
-		return issues
+		return []ConfigIssue{{Path: memberPath, Message: fmt.Sprintf("environment key %q must match the portable identifier grammar ^[A-Za-z_][A-Za-z0-9_]*$", key)}}
 	}
 	upper := strings.ToUpper(key)
 	if strings.HasPrefix(upper, "GABS_") || strings.HasPrefix(upper, "GABP_") {
-		issues = append(issues, ConfigIssue{Path: base + "/" + escapePointerToken(key), Message: "environment keys with the reserved prefixes GABS_/GABP_ are not allowed"})
+		return []ConfigIssue{{Path: memberPath, Message: "environment keys with the reserved prefixes GABS_/GABP_ are not allowed"}}
 	}
-	return issues
+	return nil
+}
+
+// hasURLHookAlternative reports whether lifecycle hooks satisfy the URL-mode
+// observation/control requirement in place of stopProcessName: a game-level
+// status hook plus a stop or kill hook.
+func (g *GameConfig) hasURLHookAlternative() bool {
+	return g.Lifecycle != nil && g.Lifecycle.Status != nil &&
+		(g.Lifecycle.Stop != nil || g.Lifecycle.Kill != nil)
 }
 
 func countValuePlaceholders(in *LaunchInputConfig) int {
@@ -310,7 +324,7 @@ func countValuePlaceholders(in *LaunchInputConfig) int {
 	return n
 }
 
-func validateLaunchInput(ipath, name string, in *LaunchInputConfig, profiles map[string]ProfileConfig) []ConfigIssue {
+func validateLaunchInput(ipath, name string, in *LaunchInputConfig, profiles map[string]ProfileConfig, caseInsensitive bool) []ConfigIssue {
 	var issues []ConfigIssue
 	add := func(path, msg string) { issues = append(issues, ConfigIssue{Path: path, Message: msg}) }
 
@@ -384,12 +398,7 @@ func validateLaunchInput(ipath, name string, in *LaunchInputConfig, profiles map
 			add(fmt.Sprintf("%s/args/%d", ipath, i), "argument must not contain NUL")
 		}
 	}
-	for _, k := range sortedKeys(in.Env) {
-		issues = append(issues, validateEnvKey(ipath+"/env", k)...)
-		if hasNUL(in.Env[k]) {
-			add(ipath+"/env/"+escapePointerToken(k), "environment value must not contain NUL")
-		}
-	}
+	issues = append(issues, validateEnvLayer(ipath, in.Env, nil, caseInsensitive)...)
 
 	// Profile applicability references.
 	seenProf := map[string]bool{}
@@ -538,8 +547,14 @@ func validateHook(hpath string, h *HookConfig, kind string, hasProfiles bool, op
 	if h.WorkingDir != "" {
 		if hasNUL(h.WorkingDir) {
 			add(hpath+"/workingDir", "working directory must not contain NUL")
-		} else if stripPlaceholders(h.WorkingDir) == h.WorkingDir && !filepath.IsAbs(h.WorkingDir) {
-			add(hpath+"/workingDir", "working directory must be an absolute path")
+		} else {
+			// Placeholders cannot make a path absolute (their values contain
+			// no separators), so probe with substituted dummies: a literal
+			// like "relative/${profile}" must not bypass the check.
+			probe := placeholderRe.ReplaceAllString(h.WorkingDir, "x")
+			if !filepath.IsAbs(probe) {
+				add(hpath+"/workingDir", "working directory must be an absolute path (after placeholder substitution)")
+			}
 		}
 		issues = append(issues, validatePlaceholders(hpath+"/workingDir", h.WorkingDir, hasProfiles)...)
 	}
@@ -554,10 +569,6 @@ func validateHook(hpath string, h *HookConfig, kind string, hasProfiles bool, op
 		issues = append(issues, validatePlaceholders(hpath+"/env/"+escapePointerToken(k), h.Env[k], hasProfiles)...)
 	}
 	return issues
-}
-
-func stripPlaceholders(s string) string {
-	return placeholderRe.ReplaceAllString(s, "")
 }
 
 func validatePlaceholders(path, s string, hasProfiles bool) []ConfigIssue {
