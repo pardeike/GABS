@@ -8,10 +8,10 @@ import (
 // helper: build a minimal profiled game
 func profiledGame() GameConfig {
 	return GameConfig{
-		ID:         "adventure",
-		Name:       "Adventure Game",
-		LaunchMode: "DirectPath",
-		Target:     "/opt/example/adventure",
+		ID:             "adventure",
+		Name:           "Adventure Game",
+		LaunchMode:     "DirectPath",
+		Target:         "/opt/example/adventure",
 		DefaultProfile: "vanilla",
 		Profiles: map[string]ProfileConfig{
 			"vanilla":     {Description: "Untouched user data", Args: []string{"--data-root", "/srv/a/vanilla"}},

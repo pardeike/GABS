@@ -57,15 +57,15 @@ type HookConfig struct {
 
 // Hook timing bounds and defaults (integral seconds).
 const (
-	StatusHookTimeoutDefault  = 5
-	StatusHookTimeoutMax      = 60
-	StopHookTimeoutDefault    = 30
-	KillHookTimeoutDefault    = 10
-	ActionHookTimeoutMax      = 600
-	VerifyTimeoutDefault      = 15
-	VerifyTimeoutMax          = 600
-	InputMaxLengthDefault     = 1024
-	InputMaxLengthMax         = 65536
+	StatusHookTimeoutDefault = 5
+	StatusHookTimeoutMax     = 60
+	StopHookTimeoutDefault   = 30
+	KillHookTimeoutDefault   = 10
+	ActionHookTimeoutMax     = 600
+	VerifyTimeoutDefault     = 15
+	VerifyTimeoutMax         = 600
+	InputMaxLengthDefault    = 1024
+	InputMaxLengthMax        = 65536
 )
 
 // ConfigIssue is one validation finding with an RFC 6901 JSON pointer path.

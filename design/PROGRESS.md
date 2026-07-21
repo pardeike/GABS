@@ -44,10 +44,15 @@ contract, not a scratchpad.
       tests: T-RELOAD
       (store complete with tests; handler pointer replacement lands
       together with M1.9–M1.11 server wiring)
-- [ ] M1.6 Pure resolver: selection, arg order, env merge (unsetEnv
+- [~] M1.6 Pure resolver: selection, arg order, env merge (unsetEnv
       layers, managed layer, GABS_FORWARD_ENV/GABS_ABSENT_ENV), cwd, hook
       resolution, static resolvability, platform-size check — spec: 02,
       03; tests: T-RES
+      (pure resolution, input validation, lifecycle resolution, context/
+      absent key computation, and spec-size check complete with tests;
+      static filesystem resolvability + hook PATH pinning deferred to the
+      M1.7/M1.10 slice, where controller launch-mode semantics —
+      CustomCommand target parsing, Steam resolution — are in scope)
 - [ ] M1.7 Platform spawn rules: macOS .app inner-binary resolution, no
       open/ShellExecute for propagation-capable modes, elevation → hint,
       Windows quoting — spec: 03; tests: T-DELIV (Windows/macOS cells)
