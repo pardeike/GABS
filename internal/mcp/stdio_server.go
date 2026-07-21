@@ -42,7 +42,8 @@ type Server struct {
 	gabpClients       map[string]*gabp.Client  // Track GABP connections per game
 	gabpAttention     map[string]*gameAttentionState
 	gabpDisconnects   map[string]gabpDisconnectRecord
-	starter           *process.SerializedStarter // Serialized process starter
+	bridgeAttachments map[string]bridgeAttachmentRef // Current persisted attachment identity per game (lazy-init)
+	starter           *process.SerializedStarter     // Serialized process starter
 	gamesConfig       *config.GamesConfig
 	instanceID        string
 	ownerLease        time.Duration
@@ -169,6 +170,31 @@ func (s *Server) gameConfigForRuntimeOwnership(gameID string) config.GameConfig 
 }
 
 func (s *Server) saveRuntimeOwnerLease(game config.GameConfig, state *process.RuntimeState, operationTimeout time.Duration) (*process.RuntimeState, error) {
+	now := time.Now().UTC()
+	lease := s.runtimeOwnerLeaseForOperation(operationTimeout)
+
+	if state != nil {
+		// Never blind-save a stale copy over the live claim: the ownership
+		// refresh mutates only its own fields under the transition lock, so
+		// concurrent fenced writes (attachment records, phase promotions)
+		// survive (design/06).
+		updated, err := process.TransitionRuntimeState(game.ID, s.configDir, lifecycleLockTimeout, func(st *process.RuntimeState) error {
+			st.Status = process.RuntimeStateStatusRunning
+			if st.StopProcessName == "" {
+				st.StopProcessName = game.StopProcessName
+			}
+			*st = process.RefreshRuntimeOwnerLease(*st, os.Getpid(), s.instanceID, lease, now)
+			return nil
+		})
+		if err == nil {
+			return updated, nil
+		}
+		if !errors.Is(err, process.ErrNoRuntimeClaim) {
+			return nil, err
+		}
+		// The claim vanished meanwhile; fall through to a fresh record.
+	}
+
 	updatedState := process.RuntimeState{
 		GameID:          game.ID,
 		Status:          process.RuntimeStateStatusRunning,
@@ -176,18 +202,7 @@ func (s *Server) saveRuntimeOwnerLease(game config.GameConfig, state *process.Ru
 		OwnerInstanceID: s.instanceID,
 		StopProcessName: game.StopProcessName,
 	}
-	if state != nil {
-		updatedState = *state
-		updatedState.GameID = game.ID
-		updatedState.Status = process.RuntimeStateStatusRunning
-		updatedState.OwnerPID = os.Getpid()
-		updatedState.OwnerInstanceID = s.instanceID
-		if updatedState.StopProcessName == "" {
-			updatedState.StopProcessName = game.StopProcessName
-		}
-	}
-
-	updatedState = process.RefreshRuntimeOwnerLease(updatedState, os.Getpid(), s.instanceID, s.runtimeOwnerLeaseForOperation(operationTimeout), time.Now().UTC())
+	updatedState = process.RefreshRuntimeOwnerLease(updatedState, os.Getpid(), s.instanceID, lease, now)
 	if err := process.SaveRuntimeState(game.ID, s.configDir, updatedState); err != nil {
 		return nil, err
 	}
@@ -828,8 +843,11 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			statusDesc := s.getStatusDescriptionFromStatus(status, game)
 			statusItem := s.gameStatusStructured(*game, status)
 			statusItem["currentConfigRevision"] = configRevision
-			if rs, rsErr := process.LoadRuntimeState(game.ID, s.configDir); rsErr == nil && rs != nil && rs.ConfigRevision != "" {
-				statusItem["activeConfigRevision"] = rs.ConfigRevision
+			if rs, rsErr := process.LoadRuntimeState(game.ID, s.configDir); rsErr == nil && rs != nil {
+				if rs.ConfigRevision != "" {
+					statusItem["activeConfigRevision"] = rs.ConfigRevision
+				}
+				attachRuntimeLifecycle(statusItem, rs)
 			}
 			attachConfigHealth(statusItem, gamesConfig, cfgErr)
 			content.WriteString(fmt.Sprintf("**%s** (%s): %s\n", game.ID, game.Name, statusDesc))
@@ -862,8 +880,11 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				status := s.checkGameStatus(game.ID)
 				statusDesc := s.getStatusDescriptionFromStatus(status, &game)
 				statusItem := s.gameStatusStructured(game, status)
-				if rs, rsErr := process.LoadRuntimeState(game.ID, s.configDir); rsErr == nil && rs != nil && rs.ConfigRevision != "" {
-					statusItem["activeConfigRevision"] = rs.ConfigRevision
+				if rs, rsErr := process.LoadRuntimeState(game.ID, s.configDir); rsErr == nil && rs != nil {
+					if rs.ConfigRevision != "" {
+						statusItem["activeConfigRevision"] = rs.ConfigRevision
+					}
+					attachRuntimeLifecycle(statusItem, rs)
 				}
 				if diagnosticMessage := gameStateDiagnosticMessage(statusItem); diagnosticMessage != "" {
 					content.WriteString(fmt.Sprintf("• **%s**: %s — %s\n", game.ID, statusDesc, diagnosticMessage))
@@ -1263,6 +1284,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			return resolveFail, nil
 		}
 
+		// Current-schema claims go through the design/06 pipeline; the
+		// legacy path below remains for claims M2.8 has not normalized and
+		// for in-memory-only tracking.
+		if res := s.lifecycleActionResult(*game, process.OperationActionStop); res != nil {
+			return res, nil
+		}
+
 		err := s.stopGame(*game, false)
 		if err != nil {
 			// Check if this is a launcher-specific configuration issue
@@ -1318,6 +1346,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		game, resolveFail := resolveGameResult(gamesConfig, gameIdOrTarget)
 		if resolveFail != nil {
 			return resolveFail, nil
+		}
+
+		if res := s.lifecycleActionResult(*game, process.OperationActionKill); res != nil {
+			return res, nil
 		}
 
 		err := s.stopGame(*game, true)
@@ -3809,6 +3841,10 @@ func (s *Server) getStatusDescriptionFromStatus(status string, gameConfig *confi
 		return "GABP disconnected (the game may have crashed or closed the bridge)"
 	case "stale-runtime-cleaned":
 		return "stopped (stale runtime state was removed)"
+	case process.PhaseStopping:
+		return "stopping (a bounded stop operation is in progress)"
+	case process.PhaseKilling:
+		return "killing (a bounded force-termination operation is in progress)"
 	case "stopped":
 		return "stopped"
 	case "launcher-running":
@@ -3864,8 +3900,14 @@ func (s *Server) HandleUnexpectedGABPDisconnect(gameID string, client *gabp.Clie
 	resourcesChanged := len(s.gameResources[gameID]) > 0
 	s.clearGameAttentionStateLocked(gameID)
 	s.cleanupGameResourcesInternal(gameID)
+	attachmentRef, hadAttachment := s.takeBridgeAttachmentRefLocked(gameID)
 	s.mu.Unlock()
 
+	if hadAttachment {
+		// A matching disconnect clears the persisted attachment record;
+		// the connection identity fences out stale callbacks (design/06).
+		s.clearBridgeAttachment(gameID, attachmentRef.launchID, attachmentRef.connectionID)
+	}
 	if resourcesChanged {
 		s.SendResourcesListChangedNotification()
 	}
@@ -3887,6 +3929,13 @@ func (s *Server) resolveClaimStatusByLiveness(gameID string, claim *process.Runt
 	if claim.Source == process.SourceExternal && claim.ObservedProfile != "" && claim.ObservedProfile != process.ObservedProfileUnknown {
 		profile = claim.ObservedProfile
 	}
+	// An in-flight bounded operation owns its claim: status truthfully
+	// reports the persisted phase with the attempt's timing (design/06) and
+	// never cleans the claim out from under the executor — completion or
+	// interruption recovery does that.
+	opInFlight := claim.Operation != nil && !claim.Operation.Deadline.IsZero() &&
+		time.Now().UTC().Before(claim.Operation.Deadline)
+
 	ev := process.EvaluateLiveness(process.LivenessInput{
 		GABPLive:   gabpLive,
 		Claim:      claim,
@@ -3896,16 +3945,48 @@ func (s *Server) resolveClaimStatusByLiveness(gameID string, claim *process.Runt
 	})
 	switch ev.Verdict {
 	case process.StatusRunning:
-		if claim.Phase == process.PhaseStarting {
+		switch claim.Phase {
+		case process.PhaseStarting:
+			if claim.Operation == nil {
+				// Passive promotion (design/20): running seen by a status
+				// observation promotes a completed-unobserved claim to
+				// active; an in-flight start owns its own completion.
+				if _, err := process.FencedTransition(gameID, s.configDir, claim.LaunchID, "", func(st *process.RuntimeState) error {
+					if st.Operation != nil || st.Phase != process.PhaseStarting {
+						return process.ErrFencingViolation
+					}
+					st.Phase = process.PhaseActive
+					st.Status = process.RuntimeStateStatusRunning
+					return nil
+				}); err == nil {
+					return process.RuntimeStateStatusRunning
+				}
+			}
 			return process.RuntimeStateStatusStarting
+		case process.PhaseStopping, process.PhaseKilling:
+			if opInFlight {
+				return claim.Phase
+			}
 		}
 		return process.RuntimeStateStatusRunning
 	case process.StatusUnknown:
-		if claim.Phase == process.PhaseStarting {
+		switch claim.Phase {
+		case process.PhaseStarting:
 			return process.RuntimeStateStatusStarting
+		case process.PhaseStopping, process.PhaseKilling:
+			if opInFlight {
+				return claim.Phase
+			}
 		}
 		return "unknown"
 	default: // stopped
+		if opInFlight {
+			switch claim.Phase {
+			case process.PhaseStopping, process.PhaseKilling:
+				return claim.Phase
+			}
+			return process.RuntimeStateStatusStarting
+		}
 		// Completed-unobserved asymmetry (design/05 Stage 4): absence-based
 		// stopped never clears the claim — only positive evidence does.
 		if claim.Phase == process.PhaseStarting && claim.Operation == nil && claim.SpawnState == process.SpawnStateSpawned {
@@ -5229,6 +5310,11 @@ func (s *Server) CleanupGABPConnection(gameId string) {
 		delete(s.gabpClients, gameId)
 		s.log.Debugw("cleaned up GABP client connection", "gameId", gameId)
 	}
+	// Close() never fires the disconnect handler, so the explicit cleanup
+	// path clears the persisted attachment record itself.
+	if ref, ok := s.takeBridgeAttachmentRefLocked(gameId); ok {
+		s.clearBridgeAttachment(gameId, ref.launchID, ref.connectionID)
+	}
 	s.clearGameAttentionStateLocked(gameId)
 	delete(s.gabpDisconnects, gameId)
 	s.deleteGameToolAliasesLocked(gameId)
@@ -5300,6 +5386,11 @@ func (s *Server) cleanupGABPConnectionInternal(gameId string) {
 		}
 		delete(s.gabpClients, gameId)
 		s.log.Debugw("cleaned up GABP client connection", "gameId", gameId)
+	}
+	// Close() never fires the disconnect handler, so the explicit cleanup
+	// path clears the persisted attachment record itself.
+	if ref, ok := s.takeBridgeAttachmentRefLocked(gameId); ok {
+		s.clearBridgeAttachment(gameId, ref.launchID, ref.connectionID)
 	}
 	s.clearGameAttentionStateLocked(gameId)
 	delete(s.gabpDisconnects, gameId)

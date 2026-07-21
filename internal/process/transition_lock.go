@@ -1,6 +1,7 @@
 package process
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,12 @@ import (
 
 	"github.com/pardeike/gabs/internal/config"
 )
+
+// ErrTransitionLockBusy marks bounded lock-acquisition timeouts so callers
+// can surface them as operation_in_progress instead of a generic failure
+// (design/06: lock contention is never a hang and never an unexplained
+// error).
+var ErrTransitionLockBusy = errors.New("transition lock held by another operation")
 
 // TransitionLock is the per-game cross-process advisory lock held for
 // milliseconds around state reads and writes — never during hooks or waits
@@ -41,7 +48,7 @@ func AcquireTransitionLock(gameID, configDir string, timeout time.Duration) (*Tr
 			return nil, fmt.Errorf("failed to acquire transition lock for %s: %w", gameID, err)
 		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("transition lock for %s is held by another operation", gameID)
+			return nil, fmt.Errorf("transition lock for %s: %w", gameID, ErrTransitionLockBusy)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}

@@ -172,3 +172,21 @@ func TestHookOutputCapIsTail(t *testing.T) {
 		t.Fatalf("truncation must be marked")
 	}
 }
+
+func TestStatusHookClippedToRemainingWindow(t *testing.T) {
+	dir := t.TempDir()
+	script := writeHookScript(t, dir, "slow.sh", "sleep 30\nexit 0\n")
+	h := statusHook(script)
+	h.TimeoutSeconds = 60 // the hook's own budget dwarfs the remaining window
+
+	startAt := time.Now()
+	verdict, res := RunStatusHookClipped(h, "g", "", 300*time.Millisecond)
+	elapsed := time.Since(startAt)
+	if verdict != StatusUnknown || !res.TimedOut {
+		t.Fatalf("a clipped probe that ran out is unknown+timed-out, got %q %+v", verdict, res)
+	}
+	// The clip plus the pipe grace bounds the call — nowhere near 30s.
+	if elapsed > 5*time.Second {
+		t.Fatalf("clipped probe must honor the window, took %v", elapsed)
+	}
+}

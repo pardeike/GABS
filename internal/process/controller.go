@@ -606,6 +606,22 @@ func (c *Controller) Kill() error {
 	return nil
 }
 
+// TerminateDirectChild kills and reaps the direct child this controller
+// started, if it is still alive — the pre-clear reap required before a
+// stopped verdict removes the claim (design/04). It never touches
+// name-matched processes; the workload's fate is the verification
+// pipeline's business, not this method's.
+func (c *Controller) TerminateDirectChild() {
+	if c.cmd == nil || c.cmd.Process == nil || c.DirectChildExited() {
+		return
+	}
+	_ = c.cmd.Process.Kill()
+	select {
+	case <-c.waitDone:
+	case <-time.After(5 * time.Second):
+	}
+}
+
 // Restart stops and then starts the process
 func (c *Controller) Restart() error {
 	// Stop then Start, preserving spec

@@ -19,6 +19,7 @@ type ControllerInterface interface {
 	SetSpawnObservers(before func() error, after func(pid int, startTime int64, spawnErr error))
 	DirectChildExited() bool
 	ExitCode() int
+	TerminateDirectChild()
 }
 
 // NewController creates a new controller instance

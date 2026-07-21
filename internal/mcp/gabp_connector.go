@@ -82,6 +82,11 @@ func (c *ServerGABPConnector) AttemptConnection(ctx context.Context, gameID stri
 
 	c.log.Infow("GABP connection established", "gameId", gameID, "addr", addr)
 
+	// Persist the attachment record (design/04) before mirroring: a
+	// mirroring failure routes through the disconnect handler, which
+	// clears exactly this record by its connection identity.
+	c.server.recordBridgeAttachment(gameID, client.IsConnected)
+
 	if !c.mirrorSynchronously {
 		c.startAsyncToolMirroring(gameID, client)
 		return nil

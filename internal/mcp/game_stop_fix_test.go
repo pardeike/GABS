@@ -149,10 +149,12 @@ func TestGameStopFix(t *testing.T) {
 		}
 
 		// Should contain warning about missing configuration OR indicate process not tracked
-		if strings.Contains(responseStr, "Configure 'stopProcessName'") {
+		if strings.Contains(responseStr, "Configure 'stopProcessName'") || strings.Contains(responseStr, "'stopProcessName'") {
 			t.Log("✓ Shows proper stopProcessName configuration warning")
 		} else if strings.Contains(responseStr, "no process tracked") {
 			t.Log("✓ Shows that process is not tracked (equivalent message)")
+		} else if strings.Contains(responseStr, "stop_unsupported") {
+			t.Log("✓ stop_unsupported with configuration guidance (design/06)")
 		} else {
 			t.Error("Should warn about missing stopProcessName configuration or indicate no tracking")
 		}

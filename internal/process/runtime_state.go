@@ -54,6 +54,11 @@ const (
 
 var ErrRuntimeStateExists = errors.New("runtime state already exists")
 
+// ErrNoRuntimeClaim marks a transition that found no claim to mutate — for
+// fenced completions this is the claim-was-removed case, handled like a
+// fencing violation (the completion is discarded, design/06).
+var ErrNoRuntimeClaim = errors.New("no runtime claim exists")
+
 // RuntimeEndpoint is the claim-persisted GABP endpoint: the normal
 // attachment source after a CLI start or server restart (bridge.json stays
 // diagnostic).
@@ -89,13 +94,25 @@ type RuntimeAttachment struct {
 
 // RuntimeActionResult is the persisted outcome of the last stop/kill
 // attempt — this single field replaces an operation journal (design/06).
+// Detail carries non-hook failure facts (a built-in action's OS error, a
+// verification summary) that have no exit code or stderr to speak for them.
 type RuntimeActionResult struct {
 	Action          string    `json:"action"`
 	Outcome         string    `json:"outcome"`
 	ExitCode        *int      `json:"exitCode,omitempty"`
 	StderrTail      string    `json:"stderrTail,omitempty"`
+	Detail          string    `json:"detail,omitempty"`
 	TreeKillWarning bool      `json:"treeKillWarning,omitempty"`
 	Timestamp       time.Time `json:"timestamp"`
+}
+
+// RuntimeBuiltinFallback pins the built-in stop/kill contract at claim
+// creation alongside stopProcessName and the PID role (design/07): recovery
+// and cross-process stops execute the mechanism decided at launch, never
+// one re-derived from mutable config.
+type RuntimeBuiltinFallback struct {
+	GracefulStrategy string `json:"gracefulStrategy"`
+	ForceStrategy    string `json:"forceStrategy"`
 }
 
 // RuntimeContextDigests are the non-reversible expected-context digests
@@ -159,6 +176,10 @@ type RuntimeState struct {
 	// edit, and recovery never consults mutable config (design/07).
 	Lifecycle *launch.ResolvedLifecycle `json:"lifecycle,omitempty"`
 
+	// BuiltinFallback is the pinned graceful/force strategy for built-in
+	// (hook-less) stop/kill actions (design/07).
+	BuiltinFallback *RuntimeBuiltinFallback `json:"builtinFallback,omitempty"`
+
 	Endpoint             *RuntimeEndpoint        `json:"endpoint,omitempty"`
 	Operation            *RuntimeOperation       `json:"operation,omitempty"`
 	Attachment           *RuntimeAttachment      `json:"attachment,omitempty"`
@@ -198,7 +219,17 @@ func NewRuntimeState(spec LaunchSpec, status string) RuntimeState {
 		AppliedInputNames: append([]string(nil), spec.AppliedInputs...),
 		ConfigRevision:    spec.ConfigRevision,
 		Lifecycle:         spec.Lifecycle,
+		BuiltinFallback:   pinBuiltinFallback(),
 	}
+}
+
+// pinBuiltinFallback records the platform's built-in graceful/force
+// mechanism at claim creation (design/07): the pin travels with the claim
+// so a later stop — after restart, config edit, or from another GABS
+// process — executes what the launch decided.
+func pinBuiltinFallback() *RuntimeBuiltinFallback {
+	graceful, force := builtinStrategiesForPlatform()
+	return &RuntimeBuiltinFallback{GracefulStrategy: graceful, ForceStrategy: force}
 }
 
 // NewFencingID mints a random 128-bit identity (launchID, operationID,
@@ -537,7 +568,7 @@ func TransitionRuntimeState(gameID, configDir string, lockTimeout time.Duration,
 		return nil, err
 	}
 	if state == nil {
-		return nil, fmt.Errorf("no runtime claim exists for %s", gameID)
+		return nil, fmt.Errorf("%w for %s", ErrNoRuntimeClaim, gameID)
 	}
 	if err := mutate(state); err != nil {
 		return nil, err

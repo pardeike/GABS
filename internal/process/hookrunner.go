@@ -45,7 +45,22 @@ type HookResult struct {
 // the contract: configured running/stopped sets; anything else — timeout,
 // exec failure, unclassified exit — is unknown, never stopped.
 func RunStatusHook(h *launch.ResolvedHook, gameID, profile string) (string, HookResult) {
-	res := runHook(h, gameID, profile)
+	return classifyStatusResult(h, runHookWithTimeout(h, gameID, profile, resolveHookTimeout(h)))
+}
+
+// RunStatusHookClipped runs a status probe whose context is clipped to
+// min(the hook's own timeout, maxWait) — verification probes must never
+// push an operation past its persisted deadline (design/06): a hanging
+// 60 s hook started 3 s before the window ends gets 3 s.
+func RunStatusHookClipped(h *launch.ResolvedHook, gameID, profile string, maxWait time.Duration) (string, HookResult) {
+	timeout := resolveHookTimeout(h)
+	if maxWait > 0 && maxWait < timeout {
+		timeout = maxWait
+	}
+	return classifyStatusResult(h, runHookWithTimeout(h, gameID, profile, timeout))
+}
+
+func classifyStatusResult(h *launch.ResolvedHook, res HookResult) (string, HookResult) {
 	if res.ExecError != nil || res.TimedOut || res.ExitCode < 0 {
 		return StatusUnknown, res
 	}
@@ -71,11 +86,19 @@ func RunActionHook(h *launch.ResolvedHook, gameID, profile string) (bool, HookRe
 }
 
 func runHook(h *launch.ResolvedHook, gameID, profile string) HookResult {
-	var res HookResult
+	return runHookWithTimeout(h, gameID, profile, resolveHookTimeout(h))
+}
+
+func resolveHookTimeout(h *launch.ResolvedHook) time.Duration {
 	timeout := time.Duration(h.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
+	return timeout
+}
+
+func runHookWithTimeout(h *launch.ResolvedHook, gameID, profile string, timeout time.Duration) HookResult {
+	var res HookResult
 
 	cmd := exec.Command(h.Command, h.Args...)
 	if h.WorkingDir != "" {

@@ -130,7 +130,7 @@ contract, not a scratchpad.
       defines the strategy; review round 4 added the
       appliedLaunchInputsState field ("unavailable" for external
       snapshots, distinct from an empty list) with a round-trip test)
-- [~] M2.2 Transition lock + domain-scoped fencing
+- [x] M2.2 Transition lock + domain-scoped fencing
       (launchID/operationID/connectionID; generation as CAS) — spec: 06;
       tests: T-FENCE
       (lock primitive done: flock on unix, LockFileEx byte-range on
@@ -142,8 +142,17 @@ contract, not a scratchpad.
       FencedTransition (launchID+operationID validation with
       ErrFencingViolation) and every start-side completion — endpoint
       stamp, spawnState transitions, promote-to-active — goes through
-      it; stop/kill completions and launchID+connectionID attachment
-      callbacks land with M2.6)
+      it; M2.6 landed the remaining domains: stop/kill completions and
+      the fenced claim removal validate launchID+operationID (a failed
+      stop finishing after a kill removed or replaced the claim is
+      discarded and cannot resurrect state — tested with a mid-hook
+      claim replacement and with concurrent stops under -race), and
+      attachment callbacks validate launchID+connectionID (an old
+      disconnect never clears a newer connection; the lease refresher
+      stops on any fencing rejection); bounded lock contention now
+      surfaces as ErrTransitionLockBusy and renders as a bounded
+      operation_in_progress; M2.9's delivery callbacks reuse these
+      primitives when they land)
 - [~] M2.3 Hook runner (tree-kill, output capture, Windows Job Objects,
       exit-code contract) — spec: 01; tests: T-LIFE
       (RunStatusHook/RunActionHook in internal/process/hookrunner.go:
@@ -188,7 +197,7 @@ contract, not a scratchpad.
       scan propagates EACCES-class inspection failures (positive matches
       still win; disappearance races stay silent), and Windows
       GetExitCodeProcess failures surface as unknown)
-- [~] M2.5 Start pipeline Stages 2–5: complete pre-spawn claim, all-
+- [x] M2.5 Start pipeline Stages 2–5: complete pre-spawn claim, all-
       profile probing + external snapshots, endpoint alloc + per-launch
       token, spawnState transitions, Stage 4 outcomes (adopted /
       exited_during_start / unobserved policy), Stage 5 attach — spec:
@@ -244,13 +253,73 @@ contract, not a scratchpad.
       GABP liveness); operation_in_progress renders phase;
       endpoint_unavailable is a stable code on all endpoint failures;
       exited_during_start carries resolved context, probe warnings,
-      hook evidence, and next actions. Remaining: the Steam
-      not-running advisory lands with M2.15's EnsureClientRunning
-      demotion; the passive unobserved→active promotion on a later
-      bridge connection lands with M2.6/M2.7's status+connect work)
-- [ ] M2.6 Stop/kill: verification matrix, probe clipping,
+      hook evidence, and next actions. The passive unobserved→active
+      promotion landed with M2.6: a bridge attach promotes a starting
+      claim to active, and a status observation with positive running
+      evidence promotes a completed-unobserved claim — both fenced, and
+      neither touches an in-flight operation. The Steam not-running
+      advisory is M2.15's own item (EnsureClientRunning demotion) and
+      is no longer carried here)
+- [x] M2.6 Stop/kill: verification matrix, probe clipping,
       lastActionResult, stop_unsupported/kill_unsupported,
       operation_in_progress semantics — spec: 06; tests: T-LIFE, T-FENCE
+      (ExecuteStopAction in internal/process/stop_gate.go: one-operation
+      admission under the transition lock — an in-flight attempt refuses
+      with operation_in_progress carrying phase + started-at + deadline
+      (kill during stopping included, hook never run twice; exactly-one-
+      executor proven under -race with four contenders), an expired or
+      provably-dead attempt is recorded as lastActionResult interrupted
+      and replaced, and bounded lock contention surfaces as
+      operation_in_progress via ErrTransitionLockBusy, never a hang.
+      Capability is resolved from the pinned snapshot only: the action
+      hook wins, else the built-in fallback needs a pinned workload PID
+      (helper PIDs never qualify) or stopProcessName; stop_unsupported
+      names the launch mode and points at games_kill when force is
+      configured, kill_unsupported never falls back to the stop hook,
+      and refusals persist nothing. The built-in graceful/force strategy
+      pin (M2.1's last open pin) is stamped at claim creation
+      (sigterm/sigkill, taskkill/taskkill_force) and dispatched by the
+      executor: fingerprint-verified workload PID first (an unverifiable
+      PID is never signaled — PID reuse), then every name match with a
+      collision warning; a scan failure is action_failed with detail,
+      never silent. Hooks run with the lock released and external
+      snapshots' hooks get the observed profile. The post-action
+      verification matrix follows design/06 row by row: positive sources
+      (status hook / workload fingerprint / name scan) decide —
+      running → action_succeeded_running (claim kept, phase promoted
+      active), all-stopped → terminated (launcher child reaped first,
+      fenced claim removal), any-unknown → termination_unverified with
+      the claim kept and phase restored; no-source → hook success clears
+      (stop-only wrapper); bridge evidence — a live in-process GABP
+      connection or a fresh fingerprint-matched foreign attachment
+      lease — keeps the claim as termination_unverified and never
+      upgrades to a positive running verdict nor clears under a live
+      bridge (T-FENCE), while self-owned records defer to the in-process
+      connection state and dead-owner leases are history. Verification
+      status probes are clipped to min(hook timeout, remaining window),
+      behaviorally tested against a real hanging hook. Failures persist
+      lastActionResult{action, outcome, exitCode, stderrTail, detail,
+      treeKillWarning, timestamp} — detail is a schema addition for
+      builtin/verification facts that have no exit code — and every
+      completion is fenced by launchID+operationID (a mid-hook claim
+      replacement discards the completion with a warning and cannot
+      resurrect state). MCP wiring: games_stop/games_kill route schema-2
+      claims through the pipeline (legacy claims keep the old path until
+      M2.8 normalizes them), render the stable codes with per-code next
+      actions (operation_in_progress is non-error), and terminated
+      releases the controller, bridge client, mirrored tools, and
+      diagnostic bridge file; games_status reports phases
+      stopping/killing with the attempt's timing, surfaces
+      lastActionResult, and never removes a claim carrying an in-flight
+      operation — closing a latent race where a status call could
+      delete a mid-start claim between publication and observability.
+      Attachment callbacks (M2.2's remainder) landed here, as did both
+      passive promotions (M2.5's remainder). Two adjacent fixes: the
+      ownership-lease save was rewritten from a blind whole-claim
+      overwrite to an in-place transition after the new connect
+      integration test caught it clobbering concurrent fenced writes,
+      and RunStatusHook was refactored to share its classifier with the
+      new clipped variant)
 - [ ] M2.7 Restart recovery: liveness-driven, interrupted-phase
       normalization, spawning-window verdicts, executor-vs-owner —
       spec: 07, 05 Stage 3; tests: T-FENCE, T-START (claim-window),
