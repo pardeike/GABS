@@ -32,6 +32,19 @@ variables first:
 `runtime.json` belongs to GABS ownership coordination. Game-side bridge code
 must ignore it.
 
+## Launch Profiles Work
+
+The `design/` folder is the binding, implementation-final specification for
+the launch-profiles feature (issue #66): named launch contexts, declared
+launch inputs, lifecycle hooks, hot config reload, and the supporting
+runtime/liveness model. When implementing or reviewing that work, start at
+`design/README.md` and track state in `design/PROGRESS.md` — its
+test-driven protocol (spec → failing tests → implementation → same-commit
+progress update) is mandatory. Rejected alternatives live in
+`design/12-rationale.md`; do not re-add them. Until a design section is
+implemented, the docs in `docs/` describe current released behavior and
+must not be updated ahead of the code.
+
 ## Working Rules
 
 - Build with `make build` after Go source changes.
