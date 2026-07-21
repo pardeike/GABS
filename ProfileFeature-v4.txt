@@ -1,0 +1,1299 @@
+# GABS Launch Profiles — Design v4
+
+Status: **implementation-final.** Six review rounds concluded; the final
+bounded correctness pass (domain-scoped fencing, attachment leases,
+probe-per-profile, executor identity, spawning recovery, Stage 1 code
+exhaustiveness, delivery aggregation matrix) is incorporated. Remaining
+questions are implementation-and-testing matters, not design review.
+ProfileFeature-v4-implementation.txt is the binding companion.
+
+Resolves issue #66 (https://github.com/pardeike/GABS/issues/66): launch one
+configured game under named, isolated launch contexts; let callers request
+pre-declared startup options; make wrapped/containerized launches observable
+and stoppable; and make config edits effective without restarting GABS or the
+MCP client.
+
+The model is three small layers:
+
+    stable game identity  ->  optional named profile  ->  optional declared, typed launch inputs
+
+Profiles select repeatable launch context. Launch inputs add bounded,
+explicit per-launch variation. Lifecycle hooks make the selected context
+observable and controllable. None of these is a second control channel for
+the running game — that remains GABP tools.
+
+## Design stance
+
+v4 deliberately replaces machinery with contracts where a contract is enough:
+
+- **Hooks must be idempotent and honest.** Stop/kill/status commands must be
+  safe to run more than once, and a status hook must distinguish "stopped"
+  from "cannot determine" (exit unknown, don't guess). GABS may re-run a hook
+  after a crash or retry instead of tracking at-most-once invocation state.
+- **The MCP caller is the operator.** GABS is a developer tool. Hook stderr,
+  child-process output, exit codes, and config paths are shown to the caller
+  because they are the debugging signal, not hidden as secrets.
+- **Reuse existing mechanisms, add exactly one.** Cross-process safety
+  uses the existing runtime-state claim (atomic create-exclusive) and owner-lease
+  model, plus one new primitive: a per-game transition lock (an OS advisory
+  file lock) held for milliseconds around state reads and writes, never
+  during hooks or waits. The claim file plus its launch ID and generation
+  is authoritative between processes. No operation journals, no operation
+  IDs.
+- **Unknown is a first-class answer.** When GABS cannot prove liveness it
+  says `unknown`, keeps its state, refuses to start a duplicate, and tells
+  the caller how to resolve it. It never invents certainty.
+- **Proof is earned, not declared.** GABS tracks which launch contexts have
+  actually worked and uses that history to attribute failures and to deter
+  "fixing" proven configuration after a transient problem. It never
+  write-protects the config file; protection is evidence, not locks.
+- **GABS reports; it does not improvise.** No auto-retry of a failed start,
+  no automatic relaunch when a bridge is slow, no driving of store-launcher
+  UI dialogs. Every result carries evidence and a concrete next action.
+
+## Goals
+
+1. `games_start` with `profile: "combat-test"` launches the game under that
+   named context; nothing bleeds into other profiles.
+2. Callers can request declared startup options without GABS ever exposing
+   raw argument/environment passthrough on MCP.
+3. Wrapped and containerized launches get working status/stop/kill via
+   configured commands.
+4. Config edits take effect on the next call — no GABS or client restart.
+5. Every way a start can fail — bad config, dead target, store launcher
+   trouble, early crash, missing bridge — produces a distinct, evidence-
+   carrying result that tells the caller what happened and what to do.
+
+## Non-goals
+
+- Game-specific concepts (`dataDir`, `modList`). Isolation is expressed
+  through generic args/env/workingDir; enforcement belongs to the launcher,
+  wrapper, or container.
+- Raw per-call args/env on the MCP surface.
+- Multiple concurrent instances of one game ID (see "Profile design
+  assessment" for why and for the reserved extension path).
+- Automatic migration, config rewriting, or a migration planner.
+- Shell interpretation, tilde/variable expansion, or command substitution
+  anywhere.
+- New MCP tools, dynamic per-profile tools, or `tools/list` churn.
+- Breaking GABP wire changes. (One optional, backward-compatible field in
+  the bridge's session-welcome response is added for context-delivery
+  verification; old bridges simply omit it.)
+
+## Configuration schema
+
+All new fields are optional additions to the existing game entry. The config
+version stays `1.0`; existing configs remain valid, untouched, and
+warning-free. (Older GABS binaries ignore unknown fields, so a
+profile-enabled config must not be used with a pre-profile binary —
+release-notes item, not a schema mechanism.)
+
+```json
+{
+  "id": "adventure",
+  "name": "Adventure Game",
+  "launchMode": "DirectPath",
+  "target": "/opt/example/adventure",
+  "args": ["--bridge"],
+  "env": { "LOG_FORMAT": "json" },
+  "defaultProfile": "vanilla",
+  "profiles": {
+    "vanilla": {
+      "description": "Untouched user data",
+      "args": ["--data-root", "/srv/adventure/vanilla"]
+    },
+    "combat-test": {
+      "description": "Isolated combat-test data",
+      "args": ["--data-root", "/srv/adventure/combat-test"],
+      "env": { "CONTENT_SET": "combat" },
+      "workingDir": "/srv/adventure/combat-test"
+    }
+  },
+  "launchInputs": {
+    "quickStart": {
+      "description": "Skip menus and load the configured quick-start path",
+      "type": "boolean",
+      "args": ["--quick-start"]
+    },
+    "scenario": {
+      "description": "Select a configured startup scenario",
+      "type": "string",
+      "enum": ["arena", "tutorial"],
+      "profiles": ["combat-test"],
+      "args": ["--scenario", "${value}"]
+    }
+  },
+  "lifecycle": {
+    "status": { "command": "adventure-status", "args": ["${profile}"] },
+    "stop":   { "command": "containerctl", "args": ["stop", "adventure-${profile}"] },
+    "kill":   { "command": "containerctl", "args": ["kill", "adventure-${profile}"] }
+  }
+}
+```
+
+New game-level fields: `env`, `unsetEnv`, `defaultProfile`, `profiles`, `launchInputs`,
+`lifecycle`.
+
+### Profiles
+
+- A profile is a launch-context overlay: `description`, `args`, `env`,
+  `unsetEnv`, `workingDir`, and complete per-hook `lifecycle` overrides. It cannot change
+  identity or transport: `id`, `name`, `target`, `launchMode`,
+  `stopProcessName`, `gabpMode`, and bridge/runtime identity stay at game
+  level. Profile names never appear in mirrored tool names or discovery.
+- Game-level `args`/`env` are common base context; profile `args` append,
+  profile `env` overrides matching keys, profile `workingDir` replaces the
+  game `workingDir` when set.
+- When `profiles` is non-empty, `defaultProfile` is **required** and must
+  name a configured profile — enforced at config load. Consequence:
+  `games_start <id>` without a profile always works, and there is no "you
+  must pick a profile" error state. Guideline (docs): make the default your
+  *safest* profile, since it is what a bare start gets. Trade-off accepted:
+  there is no "explicit profile always required" mode; callers wanting that
+  discipline pass `--profile` always.
+- Exactly one profile (or the unprofiled launch) can be active per game ID.
+- Games without `profiles` behave bit-for-bit as today.
+
+### Launch inputs
+
+The "start with quickstart" request, made safe by declaration: the config
+author declares named, typed inputs; callers may supply only those names and
+values.
+
+- Types: `boolean`, `string`, `integer`. Strings may declare `enum`; integers
+  may declare `minimum`/`maximum` (inclusive). An optional `profiles` array
+  restricts an input to specific profiles. Strings without `enum` are still
+  bounded: default `maxLength` 1024, declarable up to 65536, optional
+  `pattern`. Supplied values are rejected at call time for NUL bytes,
+  invalid UTF-8, or length/pattern violations — "typed" means bounded,
+  not merely stringly. Exact semantics, pinned so no SDK or agent guesses:
+  `maxLength` counts Unicode code points; `pattern` is RE2 syntax (Go
+  `regexp`) matched against the **entire** value (full-match anchoring —
+  deliberately stricter than JSON Schema's unanchored ECMA convention,
+  and stated wherever the schema-style map is rendered); an invalid
+  pattern is a config validation error. Integers are signed 64-bit,
+  decoded exactly (`json.Number` — a floating intermediary that would
+  round values above 2^53 is rejected as non-integral), with
+  `minimum`/`maximum` compared in int64; `${value}` substitutes the
+  canonical base-10 form (optional leading minus, no leading zeros, no
+  exponent).
+- Each input declares `description` (required) and `args` and/or `env`
+  bindings. `${value}` in a binding is replaced by the supplied value;
+  substitution never crosses argv boundaries and never invokes a shell.
+  String/integer inputs must use `${value}` at least once; boolean bindings
+  must not contain it. A boolean applies its bindings only when supplied as
+  `true`; `false` equals omission.
+- Inputs apply only when explicitly supplied — no implicit defaults. Supplied
+  inputs apply in lexical name order.
+- Inputs must be lifecycle-neutral: a value that status/stop/kill would need
+  to identify the workload (container name, service, data root) must be a
+  profile instead. GABS documents this contract; it cannot infer executable
+  semantics.
+
+### Lifecycle hooks
+
+Structured commands replace the shell-string `stopCommand` from the issue.
+
+- Hooks: `status`, `stop`, `kill`. Each supports `command` (required),
+  `args`, `workingDir`, `env`, `unsetEnv`, `timeoutSeconds`; stop/kill
+  additionally support `verifyTimeoutSeconds`.
+- Execution is exact executable-plus-argv — never a shell. `command` is an
+  absolute path or a name resolved via PATH at launch time. Pipelines and
+  shell logic belong in a wrapper script the user configures. On Windows,
+  `command` must be an executable; batch files must be configured explicitly
+  as `cmd.exe` with `/c script.cmd ...` args (GABS never implicitly wraps in
+  a shell, avoiding cmd.exe quoting surprises).
+- Placeholders `${gameId}` and `${profile}` are substituted in `args`, `env`
+  values, and `workingDir`. `${profile}` is valid only for games with
+  profiles. Unknown placeholders are validation errors.
+- Exit-code contract: status — 0 = running, 1 = stopped, anything else,
+  timeout, or failure to execute = unknown; optional `runningExitCodes` /
+  `stoppedExitCodes` (non-empty, disjoint) override the defaults. Stop/kill —
+  0 = success, anything else = failure.
+- **Status hooks must not conflate "stopped" with "cannot determine".** Many
+  tools do exactly that: `docker inspect` exits 1 both when the container is
+  absent and when the daemon is unreachable. Such tools need a small wrapper
+  that checks reachability first and exits with an unclassified code (e.g. 2)
+  when it cannot tell. The documented container example ships this wrapper;
+  a raw `docker inspect` status hook is the canonical misconfiguration, and
+  its consequence (a daemon hiccup reads as "stopped" and unblocks a
+  duplicate start) is called out in docs and doctor.
+- Timeouts (integral seconds): status 1–60, default 5; stop 1–600, default
+  30; kill 1–600, default 10; `verifyTimeoutSeconds` 1–600, default 15 (how
+  long GABS polls for termination after a stop/kill action succeeds — games
+  that save on exit need more than the default).
+- On hook timeout GABS terminates the hook's process tree (process group on
+  Unix, Job Object on Windows), confirms its direct child is reaped, and
+  reports unknown (status) or failure (stop/kill). Residual risk, accepted
+  and documented: a grandchild that detached from the group can survive and
+  act late; GABS records a warning in the result and in runtime state, and
+  the pre-start probe (below) is the backstop. GABS does not block future
+  starts on this possibility.
+- Hook environment: sanitized inherited environment (inherited `GABS_*`/
+  `GABP_*` removed) → hook `unsetEnv` → hook `env` → `GABS_GAME_ID` +
+  `GABS_PROFILE` (when a profile is selected). Hooks never receive
+  `GABP_TOKEN`/`GABP_SERVER_PORT`.
+- Hook stdout/stderr are captured (capped at 16 KiB per stream); the stderr
+  tail and exit code are included in failure results and logs.
+- Per-hook resolution order: profile override (complete replacement, no
+  field merge) → game-level hook → built-in behavior (tracked PID, then
+  `stopProcessName`).
+- Contract: hooks must be idempotent and self-contained. GABS may run a hook
+  again after a crash, a retry, or a second stop request.
+
+### Validation rules
+
+Config validation reports exact JSON paths. Rules:
+
+- Profile and input names match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`,
+  case-sensitive.
+- `defaultProfile` required with profiles, must exist. An input's `profiles`
+  list must name existing profiles.
+- Config-declared environment keys (game, profile, input, hook — `env`
+  and `unsetEnv` alike) must match the portable grammar
+  `^[A-Za-z_][A-Za-z0-9_]*$` — what every platform accepts, and what makes
+  `GABS_FORWARD_ENV` and its documented shell loop unambiguous. Keys with
+  reserved prefixes `GABS_`/`GABP_` (ASCII case-insensitive) are rejected
+  everywhere; NUL in values is rejected; on Windows, keys colliding after
+  case folding are rejected. A key may not appear in both `unsetEnv` and
+  `env` of the same layer. `unsetEnv` exists because isolation requires
+  *absence*, not just replacement: an inherited host `CONTENT_SET` must be
+  removable from a profile, and an empty string is observably different
+  from an unset variable.
+- Working directories declared in the new subtrees (profiles, hooks) must
+  be absolute paths — v4 defines no relative base, and delivery
+  verification needs an unambiguous expected value. A legacy relative
+  game-level `workingDir` keeps its historical behavior; its cwd channel
+  is reported `unverifiable` (capping overall delivery at `partial`) and
+  doctor flags it.
+- Two inputs that could write the same env key are a validation error.
+- `SteamAppId` and `EpicAppId` launch via launcher URLs and cannot
+  propagate args/env/cwd to the game: these modes reject `profiles`,
+  `launchInputs`, and the new game-level `env`/`unsetEnv` entirely (pointing at
+  SteamManaged, DirectPath, CustomCommand) — context that would reach only
+  the URL helper, never the game, must not validate silently. Pre-existing
+  launcher-only fields on such entries (`args`, `workingDir`) stay
+  loadable unchanged for compatibility, but doctor reports them as
+  launcher-only (a doctor finding, not a load warning, preserving the
+  warning-free promise for legacy entries). Game-level lifecycle hooks
+  remain valid for every mode — and they relax the existing rule that URL
+  modes must declare `stopProcessName`: a game-level `status` hook plus a
+  `stop` or `kill` hook satisfies the observation/control requirement
+  instead, since hooks are stronger evidence than a name match. One of
+  the two mechanisms remains mandatory for URL modes, because the
+  URL-opener helper PID proves nothing about the workload.
+- Duplicate JSON object members anywhere in the config file are
+  `config_invalid` with the path. Both struct and map decoding silently
+  keep the last member, so a duplicated profile name, hook field, or env
+  key would validate while launching a different context than the one a
+  reviewer read — unacceptable with automatic reload. Detection is a
+  token-level scan before any decoded form is accepted. (Release-notes
+  item: such files previously loaded last-value-wins.)
+- Unknown keys in the new subtrees (`profiles`, `launchInputs`, `lifecycle`)
+  are errors; unknown keys elsewhere produce a warning naming the path.
+  Warnings are not log-only: they appear in `games_show` (per game), in
+  `games_list` structured content (count per game), and in doctor output.
+  Warnings with no owning game — a top-level unknown key, a misspelled
+  `timeouts` member — appear in a global `configWarnings` array in
+  structured list/status results, so MCP callers without a CLI still see
+  them.
+
+## Launch resolution
+
+A pure resolver takes (immutable config snapshot, game ID, optional profile,
+supplied input values) and returns an immutable process spec plus a resolved
+lifecycle snapshot. Deep-copied; no side effects; exactly one config
+snapshot per start.
+
+- Profile selection: explicit profile if given (unknown → `profile_not_found`
+  with sorted candidates); else `defaultProfile`; games without profiles
+  reject a requested profile with `profiles_not_configured`.
+- Argument order: game `args` → profile `args` → supplied input arg groups
+  in lexical input-name order.
+- Environment (later wins): inherited environment with inherited `GABS_*`/
+  `GABP_*` keys removed → game `unsetEnv`, then game `env` → profile
+  `unsetEnv`, then profile `env` → supplied input `env`
+  bindings (lexical) → GABS-managed variables (`GABS_GAME_ID`,
+  `GABP_SERVER_PORT`, `GABP_TOKEN`, `GABS_BRIDGE_PATH`, `GABS_PROFILE` when
+  a profile is selected, plus platform/launch-mode requirements such as
+  Windows `SystemRoot`). Deterministic map merge, case-insensitive keys on
+  Windows.
+- Working directory: profile `workingDir` if set, else game `workingDir`.
+  Paths are literal; no expansion.
+- `GABS_PROFILE=<name>` is exported to the launched process and to lifecycle
+  hooks whenever a profile is selected; absent for unprofiled launches.
+
+## Context delivery
+
+Profiles only matter if the resolved context actually reaches the game.
+Past launch-state problems all trace to one implicit assumption — "the
+child gets what we set" — that launcher chains silently break. v4 replaces
+the assumption with a small, provable promise plus per-launch observation.
+
+**The one-hop guarantee.** An OS offers exactly three channels into a new
+process: argv, environment, and working directory. GABS guarantees delivery
+of all three to the first process it creates — and only to that process.
+Every further hop (script → game, wrapper → container, store client →
+relaunched child) is owned by whoever creates it. This makes the semantics
+implementable with certainty: the guarantee is one syscall deep and fully
+testable.
+
+**Chain ownership.** Who owns the last hop, per chain:
+
+| Chain | argv | env | cwd | last-hop owner |
+| --- | --- | --- | --- | --- |
+| DirectPath/SteamManaged → binary | GABS | GABS | GABS | GABS |
+| Script wrapper → game | wrapper forwards (`"$@"` / `%*`) | inherited by default | inherited | user's wrapper |
+| Wrapper → container | wrapper maps args | wrapper maps explicitly (`-e`) | n/a inside | user's wrapper |
+| SteamManaged with SteamAPI re-exec | lost (Steam's own options) | lost (Steam client's env) | Steam's choice | Steam client |
+| SteamAppId / EpicAppId URL | none | none | none | store client — why these modes reject profiles |
+
+**Wrapper contract.** Documented and testable: forward argv; preserve the
+environment, or map it explicitly where a boundary filters it (containers,
+sandboxes). To make that mapping robust, GABS exports `GABS_FORWARD_ENV`:
+a comma-separated list of every variable name a wrapper must carry across
+a filtering boundary — the GABS-managed variables plus the names (never
+the values) of all config-defined context keys for this launch. A
+container wrapper forwards them generically
+(`for v in ${GABS_FORWARD_ENV//,/ }; do args+=(-e "$v"); done`) and stays
+correct when GABS or the config adds variables later. GABS also exports
+`GABS_ABSENT_ENV`: the names that must be *absent* in the workload
+(`unsetEnv` results). An absence cannot be forwarded, but a boundary can
+reintroduce one — a container image defining `CONTENT_SET` defeats the
+profile's isolation — so the wrapper contract includes not re-injecting
+these names, and delivery verification checks them (below). Both loops
+are safe because validation restricts config-declared env names to a
+portable identifier grammar — no commas, whitespace, or glob characters
+can appear in a name.
+
+**Files are diagnostic, never live handoff.** `bridge.json` additionally
+records the selected profile, config revision, and start time — for
+diagnostics and doctor output only. The live bridge contract stays
+env-only: a bridge takes its endpoint, token, and context from its process
+environment, never from the file, because a file cannot prove freshness —
+a process from a previous launch (or a manual one) reading the current
+file would attach to the wrong generation with the wrong profile
+attribution. The consequence is stated, not hidden: a chain that strips
+the environment produces a workload whose bridge cannot attach at all; the
+fix is the wrapper contract or the Steam mitigations, never a stale-file
+guess. Argv lost to a re-exec is equally unrecoverable by any file.
+
+**Credentials are per-launch.** Every new runtime claim mints a fresh GABP
+token, even when the endpoint port is reused — `resetEndpoint` governs
+only the port. A connection presenting a previous launch's token is
+rejected and surfaced as `stale_bridge_credential`. Without this, a
+delayed process from a superseded launch (a store finally starting the
+game after an `unobserved` claim was reclaimed) could authenticate with
+reused credentials and be attributed to the new launch and profile.
+Env-only handoff and per-launch credentials together are what make a live
+GABP connection trustworthy as launch-attribution evidence.
+
+**Delivery verification.** GABS is the GABP client; the game-side bridge
+is the server. The bridge's **session-welcome response** therefore gains
+the one optional, backward-compatible field: the bridge reports the
+**raw observed values** — argv, working directory, the environment values
+for the keys named in `GABS_FORWARD_ENV`, and explicit present/absent
+status for the keys named in `GABS_ABSENT_ENV` — as seen inside the game
+process; GABS hashes locally, compares, and discards. The env channel
+encodes presence versus absence explicitly: a key that was meant to be
+absent but arrives with a value (reintroduced by a container image or
+wrapper) fails the channel exactly like a wrong value. (Bridge-side
+hashing was considered and rejected: it would require distributing the
+salt and pinning a canonical encoding across every bridge SDK for no real
+privacy gain on a token-authenticated localhost connection. A separate
+bridge→GABS follow-up method was likewise rejected: welcome-time
+reporting suffices and keeps the wire surface at exactly one field.) GABS
+compares **per channel** — argv, cwd, managed env, config-context env —
+against non-reversible digests of the resolved spec pinned at spawn. The
+argv channel covers the argument payload *excluding argv[0]*: GABS spawns
+a wrapper with the wrapper as argv[0] while the game observes its own
+executable there, so element zero legitimately differs across hops and
+process identity is judged by fingerprint/adoption, not by this channel.
+`contextDelivery` reports per-channel verdicts plus an overall summary,
+aggregated by one pinned matrix:
+
+- no `observed` field at all → every expected channel `unknown`, overall
+  `unknown` (an old bridge yields `unknown`, never `partial`);
+- a reported, matching channel → `verified`;
+- a reported, differing value → `mismatched`;
+- an expected but unreported channel → `unknown`;
+- a channel that cannot be compared by contract (legacy relative
+  game-level `workingDir`) → `unverifiable`;
+- overall `verified` requires every channel the resolved spec uses to be
+  `verified`;
+- any explicit `mismatched` → overall `partial`;
+- comparable evidence mixed with `unknown`/`unverifiable` channels →
+  overall `partial`;
+- no comparable evidence and no mismatch → overall `unknown`;
+- only overall `verified` increments `deliveriesVerified`.
+
+So a wrapper that forwards the managed variables but drops `CONTENT_SET`
+or changes the working directory yields `partial`, never a false
+`verified`. Working directories are compared in one platform-canonical
+form on both sides — absolute, symlink-resolved (macOS `/tmp` is
+`/private/tmp`), case- and separator-folded on Windows — computed by GABS
+for both the spawn digest and the reported value; canonicalization
+failure makes that channel `unknown`, never a false mismatch. Comparing
+against spawn-time digests (not current config) keeps verification
+correct for delayed handshakes — after a CLI start, a server restart, or
+a config edit. "Did my profile actually reach the game?" becomes a
+per-launch observed fact, not an inference.
+
+**Platform rules** (fixed here so implementers never guess):
+
+- macOS: a `.app` bundle target resolves to its inner executable
+  (`Contents/MacOS/`, per `CFBundleExecutable`) and is exec'd directly.
+  For the propagation-capable modes (DirectPath, SteamManaged,
+  CustomCommand) GABS never uses `open` — LaunchServices launches drop
+  argv and env silently. The URL-only modes are the explicit exception:
+  they exist to hand a URL to the OS opener (`open`/`xdg-open`/shell
+  association), promise no propagation, and reject profiles for exactly
+  that reason. Doctor warns when a quarantined/translocated app makes
+  relative paths unreliable.
+- Windows: argv is joined into one command line using standard
+  `CommandLineToArgvW` quoting; games with custom command-line parsing may
+  mis-split exotic values — a documented caveat, not a GABS bug. For the
+  propagation-capable modes GABS never falls back to ShellExecute (it
+  would silently lose env injection and the PID); URL modes use the
+  shell's URL association by design. A target that requires elevation
+  fails spawn with a precise "requires elevation; GABS does not elevate"
+  hint.
+- Linux: Steam Linux Runtime (pressure-vessel), Flatpak, and Snap may
+  filter or contain the environment. The wrapper contract plus
+  `GABS_FORWARD_ENV` is the supported path, and delivery verification
+  shows what actually arrived.
+
+**Why this is complete.** argv, environment, cwd, files, and post-start
+IPC are the only ways any OS lets one process hand state to another. GABS
+owns the first three for one hop, deliberately refuses the file channel
+for live handoff (freshness is unprovable), and post-start IPC is GABP
+itself. Anything a chain drops, the wrapper
+contract makes assignable and delivery verification makes visible. There
+is deliberately no pre-launch "prepare" hook for materializing per-profile
+state (config files, registry keys, directories): a wrapper script *is*
+the prepare hook — it composes, runs under the user's control, and is
+testable without GABS.
+
+## Liveness
+
+One liveness rule, in precedence order, used by start (duplicate check),
+status, GABP waiting, stop/kill verification, and restart recovery:
+
+1. A live GABP connection proves `running` (the bridge is served by the
+   game). Because the live contract is env-only, a connection also proves
+   the managed `GABP_*` environment reached the process; the handshake's
+   optional delivery report is what verifies the remaining channels (argv,
+   cwd, context env). Attachment is also a *persisted record* in the
+   runtime claim, maintained under the transition lock: `connectionID`,
+   the attachment owner's instance and process fingerprint, `observedAt`,
+   and a renewable lease deadline refreshed while the socket stays
+   connected (piggybacked on the existing heartbeat). A different process
+   — the CLI stopping a server-owned launch — treats it as running
+   evidence only while the lease is fresh **and** the owner fingerprint
+   still matches a live process; a matching disconnect clears it; an
+   expired lease downgrades it to history. A CLI can therefore never
+   clear a claim while another live GABS process still owns the bridge.
+2. Otherwise a configured status hook is authoritative: running / stopped /
+   unknown per its exit-code contract.
+3. Otherwise, built-in evidence: tracked PID verified by a PID +
+   process-start-time fingerprint recorded at launch (PID reuse can never
+   match), then the existing `stopProcessName` fallback. An *inspection
+   failure* — a fingerprint read error, a process-table enumeration error,
+   a permissions denial — is `unknown`, never stopped: only a successful
+   lookup that finds no match is stopped-evidence. For URL modes the
+   tracked child is the short-lived URL-opener helper, never the workload:
+   its liveness is not workload evidence and its exit is expected — only
+   GABP, a status hook, or `stopProcessName` can prove a URL-mode workload.
+
+Invariants:
+
+- `unknown` never cleans up state and never authorizes a start when a claim
+  exists. The result says what was observed (hook exit code / stderr tail /
+  timeout) and what to do next.
+- Contradictions are reported, not resolved by deletion: hook says stopped
+  while GABP is live → running, with a warning about the hook. GABS never
+  drops a live bridge to make evidence agree.
+- A launcher/wrapper exit while the status hook reports running is normal.
+- Before hook-reported `stopped` clears a claim, GABS terminates and reaps
+  any still-live launcher child it started.
+- The claim file is authoritative between processes. If a GABS server's
+  in-memory state disagrees with the claim file (e.g. a CLI stop removed
+  it), the server reconciles against fresh liveness evidence instead of
+  trusting either side blindly.
+
+## Starting a game
+
+Start is the fragile path: config, filesystem, store launcher, DRM,
+anti-cheat, network, and bridge can each fail independently. The pipeline
+has five named stages; every stage has defined outcomes, and each failure
+carries evidence and a next action. GABS never auto-retries.
+
+### Stage 1 — Validate (nothing has run)
+
+Structured errors, no side effects: `config_invalid` (with the exact
+parse/validation error and whether last-known-good is in effect — starts are
+blocked on stale config), unknown/ambiguous game ID,
+`profiles_not_configured`, `profile_not_found`, `launch_input_not_declared`,
+`launch_input_invalid`, `launch_mode_incompatible`, `timeout` out of range.
+
+Static resolvability is checked here so misconfiguration fails fast with a
+path instead of a spawn-and-die: DirectPath/CustomCommand target exists and
+is executable (or PATH-resolvable); SteamManaged resolved executable exists;
+effective working directories exist; hook commands resolvable. Each failure
+names the offending JSON path and the resolved filesystem path it checked.
+
+The Stage 1 branch-to-code mapping is exhaustive — every terminal path has
+exactly one code:
+
+| Stage 1 branch | Code |
+| --- | --- |
+| config parse / schema / semantic / duplicate-member failure | `config_invalid` |
+| unknown game ID | `game_not_found` |
+| ambiguous game reference | `ambiguous_game_reference` |
+| profile requested on unprofiled game / unknown profile | `profiles_not_configured` / `profile_not_found` |
+| undeclared / invalid launch input | `launch_input_not_declared` / `launch_input_invalid` |
+| mode rejects profiles/inputs/env | `launch_mode_incompatible` |
+| `timeout` outside 1–3600 | `timeout_out_of_range` |
+| target / cwd / PATH / hook unresolvable (JSON path + filesystem path) | `launch_spec_unresolvable` |
+
+`spawn_failed` is reserved for failures after a valid resolved spec
+reaches OS process creation — never for resolvability.
+
+### Stage 2 — Preflight (claim and external checks)
+
+- Claim the runtime state. Publication is atomic *with its full content*:
+  the complete claim is written to a same-directory temp file and
+  hard-linked into place — the link fails if a claim exists (preserving
+  create-exclusivity), a failed write publishes nothing, and a lock-free
+  status reader can never observe an empty or partially written claim
+  (plain `O_EXCL`-then-write would expose exactly that window). The
+  published content is the **complete pre-spawn snapshot**, never a bare
+  marker file: schema
+  version, phase `starting`, `spawnState: preflight`, operation kind /
+  attempt start / pinned deadline, selected profile, resolved hook
+  snapshot, and owner fingerprint — everything is known before claiming,
+  because resolution is pure and already done. Two consequences: a
+  concurrent start during preflight reads the operation timing and
+  correctly returns `operation_in_progress` (not `blocked_unknown_state`),
+  and a crash in this window leaves a claim that dead-owner recovery can
+  **safely remove**, because `spawnState: preflight` proves process
+  creation was never attempted — no liveness puzzle, no manual repair.
+  If a claim exists, evaluate
+  liveness for the **claimed** context: running → `already_running` (with
+  `activeProfile` and `requestedProfile`); unknown → `blocked_unknown_state`
+  (evidence + repair guidance; a claim means GABS started something, so
+  uncertainty blocks); stopped → clear the stale claim and proceed.
+- When no prior claim existed, probe before spawning (holding the fresh
+  claim, which concurrent starts already see as `operation_in_progress`)
+  — the backstop for lost claims and straggler hooks. GABS probes
+  **every** configured profile's resolved status hook concurrently, each
+  under its own timeout. Probing only the requested profile — or trusting
+  a single "global" hook by author convention — would miss a
+  still-running profile A while starting B and break the
+  one-active-instance invariant; this document's own schema example has a
+  game-level hook taking `${profile}`, so "game-level" does not mean
+  profile-independent, and no unenforced author obligation may carry the
+  invariant. There is **no** single-probe shortcut in v4: each probe runs
+  with that profile's normal `GABS_PROFILE` set, because even a
+  byte-identical command/args/env configuration is not equivalent across
+  invocations — the hook can read the managed variable directly, and a
+  probe invoked differently from normal hook execution yields
+  unrepresentative answers. A few bounded probes are cheaper than a
+  violated invariant; an explicitly declared game-scoped optimization can
+  be considered after v4. Any running result →
+  `external_instance_detected`, refusing the start. Attribution then
+  decides what control is offered: exactly one profile probe running →
+  GABS rewrites its fresh claim into an **external snapshot** (phase
+  `active`, `source: external`, that profile, its resolved hooks pinned
+  from the current config) so status/stop/kill can act on the instance by
+  ID, including after a restart. More than one profile running → report
+  all names, persist no snapshot, and direct the caller to resolve
+  manually — GABS never guesses among candidates.
+  Probes returning unknown → proceed, with a warning listing the
+  unprobeable profiles (no claim means GABS owns nothing yet; blocking
+  here would brick starts on a misconfigured hook — the asymmetry with
+  the claimed case is deliberate). Also run the existing
+  `stopProcessName` check where applicable: a unique name match is
+  treated like a game-level detection — external snapshot with
+  `observedProfile: unknown` and the built-in name/PID fallback pinned as
+  its control mechanism, so the refused start leaves the instance
+  manageable (status/stop/kill) after a restart or config edit. Colliding
+  name matches are reported without a snapshot, like ambiguous hook
+  results.
+- Allocate the GABP endpoint (port); failure is a structured error and the
+  claim is released. The fully resolved spec is also checked against
+  platform argv/env-block size limits here — a structured error naming the
+  oversized part beats an opaque `E2BIG` at exec.
+- Store-launcher advisory: for Steam modes, if no Steam client process is
+  observable, the result carries a warning ("Steam does not appear to be
+  running; the launch may stall at login/startup or the game may relaunch
+  itself through Steam"). Advisory only — `steam://` starts Steam itself,
+  so this must not block. Any pre-start store-client assistance GABS
+  performs (such as the existing ensure-Steam-is-running step for
+  SteamManaged) is best-effort and bounded: its failure becomes this
+  warning, never a start failure.
+
+### Stage 3 — Spawn
+
+Immediately before process creation, `spawnState` advances to `spawning`
+under the transition lock; immediately after, to `spawned` with the
+PID/fingerprint, or `failed`. Dead-owner recovery therefore has three
+honest cases: `preflight` → remove safely (creation never attempted);
+`spawned`/`failed` → normal liveness; `spawning` without a PID → the
+crash-during-spawn window, resolved by the **normal liveness rule** over
+the claim's pinned evidence (status hook, attachment record, built-in
+fallback), exactly like every other recovery path: running evidence
+promotes to `active`, definitive stopped evidence removes the claim, and
+only genuinely unknown evidence preserves it occupied.
+OS-level process creation fails (missing interpreter, bad architecture,
+permission denied, macOS Gatekeeper/quarantine block) → `spawn_failed` with
+the OS error; claim released. From spawn onward the child's stdout/stderr
+go to a per-launch log file (truncated at each spawn) whose descriptors
+remain valid after any GABS process exits — never parent-owned pipes,
+which would turn a CLI exit into EPIPE for a logging game. GABS reads a
+capped tail (16 KiB) from it — the single best "why did it die" evidence,
+included in failure results.
+
+### Stage 4 — Workload verification
+
+Bounded by a process-start budget (defaults: 10 s for
+DirectPath/CustomCommand/SteamManaged, 60 s for the URL modes, configurable
+under the existing `timeouts.startup` settings). For URL modes the tracked
+child is the URL-opener helper, not the workload: its liveness never
+counts as workload evidence and its prompt exit is *expected* — it is
+neither `exited_during_start` nor a reason to release the claim. URL-mode
+verification relies solely on GABP, status hooks, or `stopProcessName`;
+none of those by budget expiry → `unobserved`, exactly as documented.
+Outcomes:
+
+- **Verified running** — tracked PID alive, or status hook reports running,
+  or `stopProcessName` match. Continue to Stage 5.
+- **Adopted** — the tracked PID exited but the status hook or process name
+  observes the workload. This is normal for launcher chains and for Steam
+  titles that re-exec themselves through the Steam client. Verified running,
+  with `adopted: true` and a warning: injected args/env (including
+  `GABS_PROFILE`) may not have survived the relaunch — Steam relaunches with
+  its own configured options. A subsequent bridge connection proves at
+  least the managed environment survived (the live contract is env-only),
+  and a `verified` delivery report proves the full context did; adoption
+  with *no* connection is the signal to suspect context loss. Docs: for games that force the Steam re-exec, either place
+  `steam_appid.txt` beside the executable (disables the restart, keeping
+  the launch a direct child) or configure the context via Steam launch
+  options (`%command%` wrapper) — never rely on injection surviving the
+  relaunch.
+- **Exited during start** — child exited without adoption:
+  `exited_during_start` with exit code and output tail; claim released.
+  Typical causes surfaced in the hint: crash, missing/corrupt data or save,
+  mod loader failure, DRM refusing to start outside its launcher, anti-cheat
+  rejecting a modified process, online login required.
+- **Unobserved** — nothing observable when the budget expires (mostly URL
+  modes: wrong app ID, game not installed, store updating the game first, a
+  login/EULA dialog waiting on the desktop). Outcome `unobserved`: the
+  claim is **kept** in phase `starting` with guidance ("the store launcher
+  may be updating or showing a dialog — check the desktop; re-check
+  games_status"). Reconciliation is passive — a later bridge connection or
+  workload observation promotes the claim to `active` — and asymmetric:
+  while a claim is `starting` after `unobserved`, **absence of evidence is
+  not stopped**. The same absence produced `unobserved`, and the store may
+  still launch the game minutes later, so status never clears this claim
+  on a no-evidence observation. It resolves only through positive
+  observation, `repair --forget-runtime`, or the explicit supersession
+  policy: a new start may reclaim an `unobserved` claim older than its
+  process-start budget after fresh probes again find nothing, and that
+  result warns that an abandoned store launch could still appear. No
+  background poller.
+- **Stopped by hook** — status hook definitively reports stopped after spawn
+  (e.g. container exited immediately): treated as exited-during-start, with
+  hook evidence plus captured output.
+
+### Stage 5 — Bridge attach
+
+Existing `timeout`/`resetEndpoint` semantics preserved. Outcomes:
+
+- `started_connected` — bridge usable; done.
+- `started_bridge_pending` — workload verified running, bridge not yet
+  connected within the wait. **Not an error.** Background attachment
+  continues; next actions: wait, then `games_connect`. Long modlists take
+  minutes; a slow bridge never justifies a relaunch or a profile switch.
+  If the bridge never comes up: the game-side bridge/mod may not be
+  installed or enabled, an online game may be stuck at a connection screen,
+  or (if `adopted`) the injected environment may have been lost — the result
+  hint enumerates these in that order.
+- Workload died while waiting → failure with exit evidence, claim cleared
+  per liveness.
+
+### Bad-case map
+
+| Situation | GABS observes | Result | Class | Caller guidance |
+| --- | --- | --- | --- | --- |
+| Config invalid / stale | hash+parse on call | `config_invalid`, starts blocked | config | fix file; error names path; reload is automatic |
+| Target/cwd/hook missing | static resolution | `launch_spec_unresolvable` + both paths | config; environment when proven | fix config — or restore what disappeared |
+| Duplicate start | claim + liveness | `already_running` + both profiles | state | use the active instance or stop it |
+| Claim exists, evidence unclear | hook unknown/timeout | `blocked_unknown_state` + evidence | state | check hook/stderr; `repair --forget-runtime` if truly stale |
+| Lost claim, workload alive | pre-start probes (game-level or all profiles) | `external_instance_detected` + external snapshot | state | stop it by ID — the snapshot enables it |
+| Executable broken (arch, deps, Gatekeeper) | spawn error | `spawn_failed` + OS error | environment | fix binary/permissions |
+| Crash / bad save / mod failure | early exit | `exited_during_start` + exit code + output tail | game | read output; fix game state |
+| Anti-cheat kills modified process | early exit or no bridge | `exited_during_start` / `started_bridge_pending` | game | hint lists anti-cheat as cause |
+| Steam not running (SteamManaged) | advisory + adoption/exit | warning; then normal outcomes | environment | start Steam; see adoption note |
+| Steam re-exec drops context | adoption, delivery not verified | `adopted` warning, `started_bridge_pending` | environment | `steam_appid.txt`, Steam launch options, or wrapper |
+| Steam/Epic updating or dialog (URL modes) | nothing observable | `unobserved`, claim kept `starting` | environment | check desktop; re-check status |
+| Wrong app ID / not installed | nothing observable | `unobserved` | config; environment when proven | verify target in store |
+| Online server down | runs, no bridge or exits | `started_bridge_pending` / `exited_during_start` | environment | game-side issue; evidence attached |
+| Container image missing / name conflict | wrapper exits fast | `exited_during_start` + wrapper stderr | environment | stderr says exactly what |
+
+## Stopping and phases
+
+Runtime state carries a persisted `phase`: `starting`, `active`, `stopping`,
+`killing`. Rules:
+
+- `games_status` never blocks on an in-flight operation: it reads the
+  persisted phase and runs its own bounded evidence probe. While a stop hook
+  runs, status truthfully reports phase `stopping` with the attempt's start
+  time and deadline.
+- One lifecycle operation per game at a time. A start/stop/kill arriving
+  while another operation is in flight does **not** queue and does not
+  block: it returns immediately with `operation_in_progress` (phase, action,
+  started-at, deadline). Operations are strictly bounded (hook timeout +
+  verify window), so the caller re-checks after the deadline. A stop
+  arriving during `stopping` reports the in-flight attempt rather than
+  running the hook twice concurrently.
+- Phase transitions are cross-process safe. Every read-decide-persist step
+  — claim creation, phase writes, claim removal, `lastActionResult` — runs
+  under a per-game OS advisory **transition lock** (flock on Unix,
+  LockFileEx on Windows, on a stable never-deleted lock file), never held
+  while a hook runs or anything waits. Fencing identities are
+  **domain-scoped** — one universal check would let an attachment update
+  invalidate a legitimate stop completion, or a lifecycle transition
+  invalidate a legitimate disconnect:
+  - `launchID` (immutable, random, minted at claim creation) identifies
+    the claim's lifetime and closes the ABA case across claim
+    delete/recreate — deletion or recreation invalidates all old work;
+  - `operationID` identifies each start/stop/kill attempt;
+  - `connectionID` identifies each GABP attachment lifetime;
+  - the persisted `generation` is only the state revision for
+    compare-and-swap writes — never a validity test for unrelated
+    callbacks.
+  Under the lock: a lifecycle completion validates launchID, operationID,
+  action, and expected phase, then merges its result into the latest
+  claim even if attachment fields changed meanwhile — a bridge
+  disconnecting while stop verification runs is the ordinary case, not a
+  conflict. A connect/disconnect/delivery callback validates launchID and
+  connectionID, so an old disconnect can never clear a newer connection.
+  A failed stop finishing after a kill removed the claim is rejected by
+  launchID + operationID and cannot resurrect `active` state. An
+  in-process mutex alone can give none of this between the MCP server and
+  the CLI.
+- Kill during `stopping` likewise returns `operation_in_progress` until the
+  stop attempt resolves (bounded), then may run. Kill never falls back to
+  the graceful stop hook; if no force-capable action exists it says so
+  (`kill_unsupported`). The inverse exists too: a valid kill-only
+  configuration (URL mode with status + kill hooks, no `stopProcessName`)
+  makes `games_stop` return `stop_unsupported` with `games_kill` as the
+  next action — stop never silently escalates to kill.
+- Caller abandonment (MCP transport gives up mid-stop) changes nothing
+  server-side: the bounded attempt completes, and its outcome is observable.
+  On success the claim is removed (status: stopped). On failure the phase
+  returns to `active` and the attempt's result — action, exit code, stderr
+  tail, timestamp, tree-kill warning if any — is persisted as
+  `lastActionResult` in runtime state and shown by status. This replaces
+  v3's operation journal with one field.
+- Post-action verification: the liveness rule runs through the
+  verification window (`verifyTimeoutSeconds`, default 15) after every
+  successful action — hook exit 0 may mean "shutdown requested", not
+  "terminated". Hook success is provisional; at the window's end the
+  existing evidence *sources* decide, by explicit matrix:
+  - any source reports running → claim stays; `action_succeeded_running`;
+  - every existing source reports stopped → claim cleared; `terminated`;
+  - any existing source reports unknown (status-hook timeout or
+    unclassified exit, inspection failure) → claim stays,
+    `termination_unverified` — unknown never cleans state, even directly
+    after a successful action;
+  - no independent source exists at all (no status hook, launcher gone,
+    bridge never attached) → hook success alone stands as the
+    stop-only-wrapper evidence and clears the claim.
+  The third row is the one an evidence-*absence* phrasing would get
+  wrong: a source that answered "unknown" exists and is not agreement.
+  Unverified termination keeps the claim; a later observation that finds
+  stopped clears it then.
+
+## Runtime state
+
+`runtime.json` (existing file, extended) records atomically (same-directory
+temp file + rename, 0600; directory 0700):
+
+- `phase` (`starting|active|stopping|killing`), the immutable random
+  launch ID, and the monotonically increasing transition generation;
+- `source` (`gabs`, or `external` for an adopted external instance);
+- selected profile (or none) and applied launch-input **names** (never
+  values);
+- config revision used;
+- the effective launch mode and the PID's role (`workload` for direct
+  modes, `helper` for URL modes) — pinned so restart recovery applies the
+  right liveness rule without consulting mutable config: a helper PID
+  never counts as workload liveness, a workload PID is authoritative;
+- `spawnState` (`preflight|spawning|spawned|failed`);
+- workload PID + start-time fingerprint (when available) and `adopted` flag;
+- the per-launch `contextDelivery` verdict (per-channel and overall, with
+  unknown/unverifiable reasons) once reported, so `games_status` renders
+  it after a restart without re-deriving or silently downgrading it;
+- the resolved lifecycle hook snapshot — every field that affects
+  execution *or result interpretation*: absolute command, args, env,
+  `unsetEnv`, workingDir, timeouts, `verifyTimeoutSeconds`, and the
+  running/stopped/success exit-code sets, all after placeholder
+  substitution (a custom stopped code must not degrade to `unknown` after
+  a restart or profile edit);
+- the built-in fallback contract, pinned like the hooks: effective
+  `stopProcessName` and the graceful/force strategy. An adopted or
+  URL-mode launch may depend on nothing else once the helper exits, and
+  recovery is forbidden from consulting current config — external
+  snapshots pin this too;
+- a runtime schema version stamped into the file at claim creation — the
+  legacy-migration discriminator. Endpoint absence is **not** the
+  predicate: a v4 claim between creation and endpoint allocation, and an
+  external snapshot, both lack an endpoint and must never match the
+  migration path;
+- the in-flight operation: `operationID`, action kind, **executor**
+  instance ID and PID/start fingerprint (the executor is distinct from
+  the claim or attachment owner — a CLI stop executes without taking
+  ownership from the server that owns the live bridge), attempt start
+  time, and pinned absolute deadline (what `operation_in_progress`
+  renders, from any process, after any restart), plus — for `starting`
+  claims — the immutable process-start deadline that governs
+  `unobserved` reclamation;
+- the GABP endpoint (port) alongside the per-launch token — the claim is
+  the normal attachment source for `games_connect` after a CLI start or a
+  server restart; `bridge.json` stays diagnostic;
+- the attachment record: `connectionID`, attachment-owner instance +
+  process fingerprint, `observedAt`, and a renewable lease deadline
+  refreshed while connected; running-evidence for other processes only
+  while fresh and fingerprint-matched;
+- non-reversible expected-context digests (per-launch salt; salted hashes
+  of the argv payload excluding argv[0], the canonical cwd, and each
+  `GABS_FORWARD_ENV`-named env value), pinned at spawn for delayed
+  delivery verification;
+- `lastActionResult` (see above);
+- the existing ownership/lease fields.
+
+Stop/kill/status use this snapshot: callers never repeat or guess the
+profile, and editing or deleting a profile in config never changes how the
+already-running launch is observed or stopped. An active game removed from
+config stays addressable by ID (`configured: false`) — and aggregate
+discovery must surface it: no-argument `games_status` unions configured
+entries with persisted runtime claims, reporting `configured: false` and
+the persisted phase, so a fresh agent can find and stop a launch whose
+config entry was edited away. `games_list` remains the configuration
+surface; the runtime surface is status.
+
+An external snapshot (`source: external`) truthfully lacks everything GABS
+never created: no endpoint, no token, no context digests, no
+process-start deadline; `appliedLaunchInputsState: unavailable` (not
+empty) and `contextDelivery: unknown`. It supports status, stop, and kill
+only — `games_connect` reports attachment `unavailable`, because the
+workload never received this GABS's bridge environment. Its stamped
+runtime schema version keeps it out of the legacy-migration path.
+Handlers must treat these fields as absent-by-nature, never as missing
+data to be filled from current config.
+
+Restart recovery is just liveness: read the snapshot, evaluate the rule.
+Stopped → clear. Running → resume management (bridge starts disconnected;
+`games_connect` reattaches). Unknown → report, keep claim, block starts. A
+snapshot found in phase `stopping`/`killing` after a restart is not
+replayed. Once the attempt's **executor** is provably gone or its pinned
+deadline has expired, recovery **normalizes** the interrupted attempt
+under the transition lock: the orphaned attempt is recorded as
+`lastActionResult` (outcome `interrupted`, facts unknown where unknown),
+the `Operation` field is cleared, and the phase follows liveness —
+running → `active`; stopped → claim removed; unknown → `active` with the
+unknown verdict reported by status. Status therefore never reports
+`operation_in_progress` for a dead attempt, a late completion from the
+old executor is rejected by its `operationID`, and a fresh stop/kill is
+immediately permitted — retrying is exactly what the idempotent-hook
+contract exists for. Escape hatch:
+`gabs games repair <id> --forget-runtime` prints the evidence and removes
+the claim after confirmation. No MCP tool can forget state.
+
+Launch inputs are not a secret store. GABS-authored state, results, and
+log fields never store raw input values — only salted or keyed digests —
+but two qualifications are stated honestly: digests of low-entropy values
+(booleans, enums, bounded integers) can be brute-forced by a local reader
+of these 0600 files, and captured process output is returned unredacted,
+so a wrapper running `set -x` or a game echoing its startup configuration
+places values into evidence. Secrets do not belong in launch inputs.
+
+## Track record and failure attribution
+
+The failure taxonomy above creates a known hazard: an agent that sees a
+start or stop failure reaches for the nearest thing it can change — the
+GABS config — and "fixes" settings that were never broken, because the real
+cause was Steam not running, a stopped container daemon, or a crashing
+save. GABS cannot prevent config edits (the config is a plain file, and
+easy editing is a feature this design depends on), so v4 makes
+misdiagnosis hard and visible instead of building locks. The distinction it
+draws is between *edits as workflow* — adding a profile, declaring an
+input, initial setup: easy, encouraged, hot-reloaded — and *edits as
+failure response*, which on a proven configuration are almost always wrong.
+
+**Track record.** For every game, GABS keeps a small `history.json` beside
+the runtime state (0600, atomic writes; survives claim removal and GABS
+restarts). It is keyed per profile by a hash of the *resolved launch
+context* — target, mode, argv, config-controlled env, cwd, resolved hooks;
+managed variables and launch inputs excluded. Per context it records four
+counters (workload starts verified, bridge connections, verified context
+deliveries, clean stops), last success time, the last failure (outcome,
+class, supplied input names), and a consecutive-failure count. Successes
+are additionally bucketed by supplied-input combination — the sorted input
+names, a hash of those inputs' *declarations*, and a keyed digest of the
+supplied *values*, so `scenario=arena` and `scenario=tutorial` are
+distinct buckets (value variants per input set are capped, evicting
+least-recently-used). Proof therefore distinguishes "proven bare" from
+"proven with this exact input combination". Crucially, an unproven
+combination adjusts *confidence*, not *class*: a first failure with
+`scenario=tutorial` on a proven bare context keeps the class its outcome
+implies (a crash is still `game`), with the unproven combination reported
+as secondary evidence — "first run with this input combination; the input
+is a candidate cause". The `config` class is reserved for static
+binding/substitution failures and direct configuration evidence;
+inferring it from mere novelty would send agents toward exactly the
+speculative config edits this system exists to prevent. Editing an
+input's declaration still resets exactly that input's buckets.
+
+Only failures attributable to a resolved launch or active runtime
+context mutate history at all. `call`-class errors — unknown profile,
+undeclared input, malformed value — happen before any context exists:
+the response still carries track-record evidence, but a caller's typo
+never counts as a context failure, never advances
+`consecutiveFailures`, and can never trigger the edit-visibility notice. Because the hash covers the resolved context,
+an edit resets the track record of exactly the contexts it changes: adding
+profile C leaves profiles A and B proven; editing profile B does not touch
+A's proof. Proof is earned by successful operation and cannot be edited
+into existence — any edit of a proven context visibly resets it to "never
+proven".
+
+**Failure attribution.** Every failure result carries a `causeClass`:
+
+- `call` — the request was wrong (unknown argument, undeclared input,
+  unknown profile). Fix the call, not the config.
+- `config` — the config file is wrong (validation errors, incompatible
+  launch mode, unresolvable paths on a never-proven context, static
+  binding/substitution failures). The result names the exact JSON path.
+- `environment` — host/store/network state (Steam not running or updating,
+  daemon unreachable, hook timeout, a proven target now missing, port
+  exhaustion). Config edits cannot fix these.
+- `game` — the workload itself (crash on start, bad save, anti-cheat, a
+  bridge mod missing while the workload runs fine).
+- `state` — GABS runtime state must be resolved first (already running,
+  unknown liveness, operation in progress, unverified termination).
+
+Classification uses the track record: a missing target on a context that
+has started 14 times is `environment` ("it existed before — moved or
+uninstalled?"); the same error on a never-proven context is `config`
+("probably a typo"). The split counters sharpen the message further:
+"workload starts fine (14×) but the bridge has never connected" points
+game-side, not at launch config. Failure results include the track record
+in one line, and `nextActions` never propose a config edit for a
+non-`config` class.
+
+**Edit visibility.** When a reload changes a proven context whose last
+recorded outcome was a non-`config`-class failure, the next result for that
+game carries a one-line notice: "configuration changed after an
+environment-class failure; the previous context had 14 successful starts —
+verify this edit was intended." A nudge, not a block: legitimate edits
+proceed untouched, and context-hash granularity keeps unrelated proof
+intact, so the notice fires only in the suspicious pattern.
+
+**Agent contract** (codified in the `gabs-mcp` skill and restated in every
+relevant error): edit GABS config only when the failure class is `config`,
+when doing initial setup of a never-proven game, or when the user
+explicitly asked for a config change. For `environment`/`game`/`state`
+failures on a proven context: follow the returned next actions, retry
+within reason, and report to the user if the problem persists — do not
+touch the config.
+
+Doctor prints the full track record, and `doctor --show-last-good` prints
+the last-known-good entry for a game whose proven context was edited, so a
+human (or an instructed agent) can compare or restore by hand. GABS never
+restores automatically.
+
+## Automatic config reload
+
+Replace the captured startup config pointer with a `ConfigStore`:
+
+- On every config-dependent call it re-hashes `config.json` and
+  parses/publishes a new immutable snapshot only when the content hash
+  changed (an invalid hash is parsed once and cached). No filesystem
+  watchers; atomic rename-based saves are caught naturally.
+- Hot vs startup-only is one line: everything under `games` is hot;
+  top-level settings (`apiKey`, `toolNormalization`, `portRanges`,
+  `timeouts`, `stripOutputSchema`) are read at startup and documented as
+  restart-required.
+- Invalid config keeps the last valid snapshot: new starts refused with the
+  exact error and path; read-only calls succeed and surface `configError`;
+  stop/kill/status of active launches work from runtime snapshots. Fixing
+  the file clears the condition on the next call.
+- Startup with an invalid config file fails with the error (no fallback to
+  an empty config — that would silently drop an `apiKey`).
+- Each start pins exactly one snapshot. `tools/list` never changes from
+  config edits.
+- No reload tool. The loop after an edit: edit config → `games_show <id>` →
+  the new state, revision, warnings, or exact error is right there.
+  Structured results of list/show/status include `currentConfigRevision`
+  (the editable file), the game's `activeConfigRevision` (pinned at
+  launch) whenever a launch is active and the two differ, and any
+  `configError` — an agent must be able to tell "what is running" from
+  "what an edit would launch" without guessing which one a single field
+  means.
+
+## MCP surface
+
+No new tools. Every core tool's schema gains `additionalProperties: false`
+and every handler rejects unknown arguments with `unknown_argument`, the
+offending path, and the sorted allowed names.
+
+- `games_start` adds `profile?: string` and `launchInputs?: object` (values
+  boolean/string/integer; the handler validates names, types, constraints,
+  and applicability against the pinned snapshot). Existing `gameId`,
+  `timeout`, `resetEndpoint` keep their meaning; `timeout` validated 1–3600.
+  Results carry: outcome (per the start pipeline), `activeProfile`, applied
+  input names (never values), `adopted` and `contextDelivery` when
+  applicable, warnings, evidence (exit code / output tail where relevant),
+  `causeClass` plus a one-line track record on failure, and next actions.
+- `games_show` returns sorted profile names + descriptions,
+  `defaultProfile`, launch inputs as a JSON-Schema-style map (name → type,
+  description, enum, minimum, maximum, maxLength, pattern, profiles —
+  every declared constraint, with the effective default `maxLength` made
+  explicit when the config omits it, so an agent can form a valid value
+  without trial calls), config warnings for the game,
+  `currentConfigRevision` plus `activeConfigRevision` when they differ,
+  and per-profile proven status (the track-record counters). Arg/env
+  templates omitted — noise, not secret.
+- `games_list` keeps compact text output; structured content adds profile
+  names, default, and warning counts per game.
+- `games_status`, `games_connect`, `games_stop`, `games_kill` report
+  `activeProfile` and `phase`. Status is non-blocking and includes
+  `lastActionResult` when present. Stop/kill act on the runtime snapshot.
+  Multi-game status runs probes concurrently, each under its own timeout.
+- `profiles_not_configured` includes the game ID, requested profile, actual
+  config path, a documentation anchor, and a note that edits apply without
+  restart. GABS never generates patches and never rewrites config.
+
+Stable error/outcome codes:
+`unknown_argument`, `config_invalid`, `game_not_found`,
+`ambiguous_game_reference`, `timeout_out_of_range`,
+`launch_spec_unresolvable`, `profiles_not_configured`,
+`profile_not_found`, `launch_input_not_declared`, `launch_input_invalid`,
+`launch_mode_incompatible`, `already_running`, `blocked_unknown_state`,
+`external_instance_detected`, `spawn_failed`, `exited_during_start`,
+`unobserved`, `started_bridge_pending`, `started_connected`,
+`operation_in_progress`, `kill_unsupported`, `stop_unsupported`,
+`termination_unverified`, `stale_bridge_credential`,
+`endpoint_unavailable`, `spec_too_large`, `action_failed`,
+`action_timed_out`, `action_succeeded_running`, `terminated`,
+`started_attachment_deferred` (CLI).
+
+This list is exhaustive by contract: every terminal branch of the start
+and stop/kill pipelines maps to exactly one code, and adding a branch
+means adding a code — handlers never overload a neighboring code or
+invent one.
+
+## CLI surface
+
+New lifecycle commands share the resolver, lifecycle manager, and runtime
+state with MCP — one implementation, two frontends:
+
+```
+gabs games start <id> [--profile NAME] [--input NAME=VALUE]...
+gabs games status [<id>]
+gabs games stop <id>
+gabs games kill <id>
+gabs games repair <id> [--forget-runtime]
+```
+
+- Repeated `--input` values parse per the declared type; repeating a name is
+  an error.
+- Cross-process safety: the claim + lease plus the per-game transition
+  lock and generation (see Stopping and phases). A CLI stop racing a
+  server stop does not double-run the hook — the second operation observes
+  phase `stopping` under the lock and reports `operation_in_progress`,
+  exactly as over MCP.
+- `start` prepares endpoint/runtime state and verifies through Stage 4,
+  then exits without keeping a GABP client. Its terminal success outcome
+  is `started_attachment_deferred`: workload verified, attachment
+  intentionally not attempted (never mislabeled as `started_bridge_pending`),
+  claim phase `active`, next action `games_connect` from a server
+  session. CLI/MCP parity therefore covers Stages 1–4; Stage 5 outcomes
+  are server-only.
+- `status`/`stop`/`kill` work from the persisted snapshot after the original
+  GABS process exited.
+- `gabs games doctor <id>` (existing) becomes profile-aware: validates
+  profile/input/hook references, resolves hook commands and working
+  directories, flags the docker-style stopped/error conflation risk where
+  detectable, and warns on broadly readable config/runtime files.
+
+## Worked example (the issue's case)
+
+One `adventure`-style entry, `DirectPath` to a wrapper script, one profile
+per isolated data root passing `--data-root <path>` (generic args — no
+`dataDir` concept), and lifecycle hooks invoking the container runtime with
+`name-${profile}`. The status hook is a three-line wrapper that first checks
+the container runtime is reachable (exit 2 = unknown if not), then maps
+container running/absent to exit 0/1 — this wrapper ships in the docs as the
+canonical pattern. `games_start` with `profile: "combat-test"` launches that
+container; the wrapper may exit while the status hook keeps reporting
+running; `games_stop` runs the stop hook with the snapshotted profile and
+verifies via the status hook. The duplicated per-profile game IDs collapse
+into one entry.
+
+## Profile design assessment
+
+Is the profile primitive the right one, and will it hold up?
+
+**Why this shape.** The alternatives were: separate game IDs per context
+(status quo — clutters discovery, splinters identity, no shared tooling),
+free-form launch parameters (an uncontrolled escape hatch), config
+templating/includes (complexity without a runtime concept), or a full
+workspace/instance system (far beyond the need). Profile-as-named-overlay
+gives tooling a stable identity while context varies. The load-bearing line
+is *lifecycle visibility*: anything status/stop/kill must know to find the
+workload is a profile; anything that only changes what the workload does at
+startup is a launch input. That line is principled — it is exactly "what
+must survive in the runtime snapshot" — and it decides every borderline case
+mechanically.
+
+**Future-proofing.** Profiles are a pure config concept; runtime identity
+remains the game ID. That orthogonality is what keeps the design open:
+
+- *Concurrent instances* (client + server, two profiles at once) are not
+  supported — the constraint is structural (one GABP endpoint, one tool
+  namespace, one runtime dir per game ID), not a profile-schema limit. If
+  concurrency is wanted later, it is an additive runtime-side change
+  (instance handles: per-instance runtime dir/endpoint, instance-qualified
+  tool routing) with **no change to the profile schema**. Until then,
+  concurrency remains the separate-game-IDs pattern, stated plainly in docs.
+- *Dynamic environments* (a fresh isolated profile per test run or PR) are
+  handled by config editing plus hot reload: an agent adds a profile, starts
+  it, tears it down, removes it — no restart anywhere. If that proves
+  clunky, parameterized profile templates (a declared variable usable in
+  hooks, i.e. lifecycle-visible by declaration) are an additive extension
+  that preserves the lifecycle-visibility line. Not built now.
+- *Orthogonal context dimensions* (data-root × renderer) multiply into
+  profiles only when both dimensions are lifecycle-relevant; otherwise the
+  second dimension is a launch input. The M×N enumeration case is accepted —
+  inheritance/composition between profiles was considered and rejected as
+  complexity that mostly serves hypothetical configs.
+- *Remote/wrapped control* needs no new concepts: hooks are commands, so
+  ssh/kubectl/podman wrappers already cover remote and non-Docker runtimes.
+
+**Known limits, stated honestly.** URL launch modes get no profiles at all
+(all three delivery channels are severed — the exclusion is principled,
+per the chain-ownership table); Steam titles that force a relaunch through
+the Steam client can drop injected context — no longer *silently*, since
+adoption plus delivery verification exposes it, and `steam_appid.txt` or
+Steam launch options work around it, but GABS cannot fix it; and the
+single-active-instance rule is the one place the issue author's
+container-per-profile setup is more capable than GABS's model — containers
+isolate perfectly well concurrently, and GABS still serializes them per ID.
+That is the price of one bridge identity per game, and the reserved
+instance-handle extension is the honest path out if it ever matters.
+
+**Edge-case checklist:** container-per-profile with profile-aware stop ✓;
+wrapper exits while game lives ✓; test automation via CLI + typed inputs ✓;
+dev loop with config hot-reload ✓; remote control via hook wrappers ✓;
+Steam titles ~ (SteamManaged with re-exec caveat; URL modes excluded);
+concurrent profiles ✗ (separate IDs; reserved extension).
+
+## Compatibility
+
+- Existing configs load, validate, and launch exactly as before; no new
+  warnings for ordinary legacy entries.
+- Existing MCP behavior preserved except: unknown arguments are now
+  rejected (previously silently ignored), `timeout` is range-checked, and
+  config files containing duplicate JSON members are rejected (previously
+  last-value-wins). Release-notes items.
+- `stopProcessName` remains a supported fallback; GABS warns when multiple
+  configured games share a process name.
+- Upgrading GABS while a pre-v4 launch is still running is supported by a
+  narrowly scoped migration: when the runtime claim lacks the v4 runtime
+  schema marker (the explicit discriminator — endpoint absence is not the
+  test, since a freshly created v4 claim or an external snapshot also has
+  none), `games_connect` may read the legacy `bridge.json` endpoint once,
+  under the transition lock, validate it by actually connecting and
+  confirming liveness, and migrate it into the claim — after which the
+  file returns to diagnostic-only status. This is the sole live-attach
+  read of `bridge.json`, and it can never apply to a v4-created claim.
+  The first lifecycle touch (connect, stop, kill, or a start's duplicate
+  check — not read-only status) also performs a one-time **full
+  normalization** under the transition lock, because the legacy claim
+  lacks far more than the endpoint — phase, launch ID, generation,
+  fingerprint, and pinned snapshots: stamp the schema version, mint a
+  launch ID and generation (fencing valid from then on), set phase
+  `active` and profile unprofiled, pin the built-in fallback from the
+  legacy claim's own `stopProcessName` and PID (no fingerprint exists, so
+  that PID remains weak evidence), and — the single recorded exception to
+  never-consult-config — take the launch mode/PID role from the current
+  entry, persisting `normalizedFromLegacy: true` plus the revision used.
+  Before normalization, a legacy claim supports only degraded status and
+  repair.
+- Docs include a consolidation checklist for users collapsing per-profile
+  game IDs into one entry: mirrored game-tool names change (namespace follows
+  the surviving ID), scripts referencing removed IDs must be updated, and
+  formerly independent IDs could run concurrently while one ID is
+  single-instance. GABS does not automate this; it warns about it.
+
+## Decisions and rejected alternatives (do not re-add)
+
+- **No public operation IDs, journal, or background operation model.**
+  Operations are bounded by configured hook timeouts plus the verify
+  window; progress is observable via the persisted `phase`, and the
+  single `lastActionResult` field replaces the journal. An *internal*
+  per-attempt `operationID` does exist — purely as a domain-scoped
+  fencing identity alongside `launchID` and `connectionID` — but it is
+  not a queryable API concept and nothing is journaled by it.
+- **No at-most-once action machinery** (invocation states, hazard tracking).
+  Replaced by the idempotent-hook contract plus tree-kill, the recorded
+  straggler warning, and the pre-start probes as backstop.
+- **No probe-budget machinery.** When no claim exists, GABS does probe all
+  profiles (or one `${profile}`-free game-level hook) concurrently before
+  a start — the one-active-instance invariant demands it — but each probe
+  is bounded only by its own hook timeout: no derived-budget calculus, no
+  probe planning, no probing outside the pre-start moment.
+- **The transition lock is the one concession to new coordination
+  machinery.** The claim + idempotent hooks alone permit last-writer state
+  resurrection between CLI and server (a failed stop finishing after a
+  kill re-persisting `active`). A millisecond-scale advisory lock around
+  state writes plus a persisted generation closes that; everything
+  held-across-waits from v3 stays rejected.
+- **No `GABS_PROFILE_STATE` marker or environment-inspection recovery.** The
+  handshake delivery report proves propagation positively; adoption plus a
+  missing bridge (or an unverified delivery) is the counter-signal.
+- **No pre-launch "prepare" hooks.** A wrapper script subsumes them: it
+  materializes per-profile state (config files, registry keys,
+  directories) under the user's control and is testable without GABS.
+- **No `open`, no ShellExecute fallback, no elevation — for
+  propagation-capable modes.** (URL-only modes use OS URL openers by
+  definition and promise nothing.) Each would
+  silently sacrifice env injection, argv, or PID tracking to make a launch
+  "succeed"; GABS prefers a precise failure over an untracked success.
+- **No migration planner / JSON-patch emitter.** Validation errors,
+  `profiles_not_configured`, doctor, and the documented recipe + checklist
+  are the migration story.
+- **No schema version bump.** New fields are optional; strictness applies
+  where it has no legacy blast radius.
+- **No new MCP tools** (`reload_config`, `doctor`, `recover` rejected);
+  value folded into existing results, the CLI, or automatic behavior.
+- **No start auto-retry and no launcher-UI automation.** GABS reports
+  evidence and next actions; the operator (or agent) decides.
+- **Required `defaultProfile`** eliminates the `profile_required` error
+  path; the "explicit profile always" mode was considered again and
+  rejected — callers wanting that discipline pass a profile explicitly.
+- **No blocking on possible hook stragglers.** Warning + probe backstop is
+  proportionate; a hard block would trade a rare hazard for a common
+  operational annoyance.
+- **No config write-protection, lock files, or `protected: true` flags.**
+  GABS does not own the editor and cannot enforce file immutability; a
+  declared protection flag would be flipped by the same agent it is meant
+  to stop, and it rots. Protection is evidence-based: the earned track
+  record, `causeClass` attribution, visible proof reset on edits, and the
+  skill contract.
+- **No automatic restore of last-known-good config.** Doctor can show it;
+  a human decides. Auto-restore would let GABS and an agent fight over the
+  file.
