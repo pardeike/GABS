@@ -100,13 +100,24 @@ contract, not a scratchpad.
 
 ## Milestone 2 — Lifecycle + liveness + start taxonomy
 
-- [ ] M2.1 RuntimeState extension (full field contract) + atomic
+- [x] M2.1 RuntimeState extension (full field contract) + atomic
       tmp+rename saves + atomic tmp+link claim publication + 0600/0700 +
       legacy chmod-tighten — spec: 07, 05 Stage 2; tests: T-RT, T-FENCE
       (atomic publication)
-- [ ] M2.2 Transition lock + domain-scoped fencing
+      (full schema landed incl. Operation/Attachment/ActionResult/
+      Digests/Delivery types — later M2 items populate them; claims stamp
+      schemaVersion=2, launchID, generation=1, phase, spawnState,
+      pidRole; hammer + exactly-one-winner + hardlink-fallback tests)
+- [~] M2.2 Transition lock + domain-scoped fencing
       (launchID/operationID/connectionID; generation as CAS) — spec: 06;
       tests: T-FENCE
+      (lock primitive done: flock on unix, exclusive-share CreateFile on
+      Windows, stable never-deleted file, bounded acquisition, no lost
+      updates under 8-way contention; TransitionRuntimeState bumps the
+      CAS generation; NewFencingID mints 128-bit identities; the
+      completion-side validation — launchID+operationID for lifecycle,
+      launchID+connectionID for attachment callbacks — lands with the
+      operations that produce completions, M2.5/M2.6)
 - [ ] M2.3 Hook runner (tree-kill, output capture, Windows Job Objects,
       exit-code contract) — spec: 01; tests: T-LIFE
 - [ ] M2.4 Liveness rule incl. attachment lease record, inspection-

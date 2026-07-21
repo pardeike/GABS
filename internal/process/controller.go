@@ -44,6 +44,12 @@ type LaunchSpec struct {
 	// RuntimeDir is the per-game runtime directory (bridge.json,
 	// launch.log). Empty falls back to the default ~/.gabs/<gameId>.
 	RuntimeDir string
+
+	// AppliedInputs are the applied launch-input names (never values) and
+	// ConfigRevision the snapshot pinned at resolution — both persisted
+	// into the runtime claim.
+	AppliedInputs  []string
+	ConfigRevision string
 }
 
 type BridgeInfo struct {
@@ -376,11 +382,8 @@ func (c *Controller) IsRunning() bool {
 		return c.isRunningByName()
 	}
 
-	// Check if the process has already been waited for
-	if c.cmd.ProcessState != nil {
-		return c.isRunningByName()
-	}
-
+	// waitDone is the race-free "already reaped" signal; reading
+	// cmd.ProcessState here would race the waitForExit goroutine's Wait().
 	select {
 	case <-c.waitDone:
 		return c.isRunningByName()
@@ -435,9 +438,6 @@ func (c *Controller) WaitForProcessStart(timeout time.Duration) error {
 				Err:     fmt.Errorf("process not found in system after %v", timeout),
 			}
 		case <-ticker.C:
-			if c.cmd != nil && c.cmd.ProcessState != nil {
-				return nil
-			}
 			select {
 			case <-c.waitDone:
 				return nil
