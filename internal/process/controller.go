@@ -175,12 +175,27 @@ func (c *Controller) Start() error {
 	// which would turn a CLI exit into EPIPE for a logging game
 	// (design/05-start-pipeline.md, Stage 3). Truncated at each spawn; the
 	// capped tail is the "why did it die" evidence in failure results.
-	_ = os.MkdirAll(c.runtimeDir(), 0o700)
-	if logFile, err := os.OpenFile(c.launchLogPath(), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600); err == nil {
-		c.cmd.Stdout = logFile
-		c.cmd.Stderr = logFile
-		defer logFile.Close() // the child keeps its own descriptor
+	if err := os.MkdirAll(c.runtimeDir(), 0o700); err != nil {
+		return &ProcessError{
+			Type:    ProcessErrorTypeStart,
+			Context: fmt.Sprintf("cannot create runtime directory for %s launch log", c.spec.GameId),
+			Err:     err,
+		}
 	}
+	logFile, err := os.OpenFile(c.launchLogPath(), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		// The per-launch log is the mandated evidence channel (design/05
+		// Stage 3): starting a child without it silently discards the
+		// why-did-it-die evidence.
+		return &ProcessError{
+			Type:    ProcessErrorTypeStart,
+			Context: fmt.Sprintf("cannot open per-launch log for %s", c.spec.GameId),
+			Err:     err,
+		}
+	}
+	c.cmd.Stdout = logFile
+	c.cmd.Stderr = logFile
+	defer logFile.Close() // the child keeps its own descriptor
 
 	// Start the process
 	if err := c.cmd.Start(); err != nil {
@@ -205,6 +220,12 @@ func (c *Controller) Start() error {
 // setupEnvironment configures environment variables for the process
 func (c *Controller) setupEnvironment() {
 	c.cmd.Env = c.buildEnvironment()
+}
+
+// FinalEnvironment exposes the fully materialized child environment
+// (config layers + managed layer) for pre-spawn checks.
+func (c *Controller) FinalEnvironment() []string {
+	return c.buildEnvironment()
 }
 
 // buildEnvironment produces the child environment. With a resolved spec
@@ -238,13 +259,21 @@ func (c *Controller) buildEnvironment() []string {
 	if c.spec.Profile != "" {
 		managed["GABS_PROFILE"] = c.spec.Profile
 	}
-	// Windows compatibility fallback only where it applies — the legacy
-	// path injects these unconditionally, but resolved launches must not
-	// leak Windows variables into unix children (they would also pollute
-	// GABS_FORWARD_ENV).
-	if runtime.GOOS == "windows" && env["SystemRoot"] == "" && os.Getenv("SystemRoot") == "" {
-		managed["SystemRoot"] = "C:\\Windows"
-		managed["WINDIR"] = "C:\\Windows"
+	// Windows platform variables are managed: pinned from the parent
+	// value (C:\Windows only as fallback) so config layers can neither
+	// remove nor override them, and they participate in GABS_FORWARD_ENV.
+	// Resolved launches must not leak Windows variables into unix children.
+	if runtime.GOOS == "windows" {
+		systemRoot := os.Getenv("SystemRoot")
+		if systemRoot == "" {
+			systemRoot = "C:\\Windows"
+		}
+		windir := os.Getenv("WINDIR")
+		if windir == "" {
+			windir = systemRoot
+		}
+		managed["SystemRoot"] = systemRoot
+		managed["WINDIR"] = windir
 	}
 	if len(c.spec.AbsentEnvNames) > 0 {
 		managed["GABS_ABSENT_ENV"] = strings.Join(c.spec.AbsentEnvNames, ",")
@@ -263,6 +292,15 @@ func (c *Controller) buildEnvironment() []string {
 	managed["GABS_FORWARD_ENV"] = strings.Join(forward, ",")
 
 	for k, v := range managed {
+		if runtime.GOOS == "windows" {
+			// Windows env keys are case-insensitive: remove case-variants
+			// so the managed spelling is the only survivor.
+			for existing := range env {
+				if existing != k && strings.EqualFold(existing, k) {
+					delete(env, existing)
+				}
+			}
+		}
 		env[k] = v
 	}
 

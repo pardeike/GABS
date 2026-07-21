@@ -228,12 +228,24 @@ Once the server is running, use MCP tools to manage games:
 // === Server Command ===
 
 func runServer(ctx context.Context, log util.Logger, opts options) int {
-	// Load games configuration
-	gamesConfig, err := config.LoadGamesConfigFromDir(opts.configDir)
+	// One load: the seeded store's initial snapshot IS the validated
+	// startup configuration (design/09 — startup with an invalid config
+	// fails; no empty-config fallback that would drop an apiKey).
+	cp, err := config.NewConfigPaths(opts.configDir)
 	if err != nil {
-		log.Errorw("failed to load games config", "error", err)
+		log.Errorw("failed to resolve config path", "error", err)
 		return 1
 	}
+	store, snap, cfgErr := config.NewSeededStore(cp.GetMainConfigPath())
+	if snap == nil {
+		log.Errorw("failed to load games config", "error", cfgErr)
+		return 1
+	}
+	if cfgErr != nil {
+		log.Errorw("failed to load games config", "error", cfgErr)
+		return 1
+	}
+	gamesConfig := snap.Config
 
 	log.Debugw("starting per-session GABS server", "transport", opts.transport, "configDir", opts.configDir)
 	log.Infow("loaded games configuration", "gameCount", len(gamesConfig.Games))
@@ -252,14 +264,9 @@ func runServer(ctx context.Context, log util.Logger, opts options) int {
 	// initial load; per-call config comes from the hot-reload store below)
 	server.RegisterGameManagementTools(gamesConfig, opts.backoffMin, opts.backoffMax)
 
-	// Hot config reload: handlers fetch a fresh snapshot per call. The
-	// initial LoadGamesConfigFromDir above already failed hard on invalid
-	// startup config (no empty-config fallback).
-	if cp, cpErr := config.NewConfigPaths(opts.configDir); cpErr == nil {
-		server.SetConfigStore(config.NewStore(cp.GetMainConfigPath()))
-	} else {
-		log.Warnw("config hot-reload disabled: cannot resolve config path", "error", cpErr)
-	}
+	// Hot config reload: handlers fetch a fresh snapshot per call; the
+	// store already holds the validated startup snapshot as last-known-good.
+	server.SetConfigStore(store)
 
 	// Start serving MCP according to transport
 	errCh := make(chan error, 1)

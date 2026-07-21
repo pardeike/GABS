@@ -8,6 +8,9 @@ package launch
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -371,7 +374,11 @@ func resolveLifecycle(game *config.GameConfig, profile string, profileLC *config
 			return nil
 		}
 		r := &ResolvedHook{
-			Command:    h.Command,
+			// PATH-based commands pin to an absolute path at resolution so
+			// restart recovery never depends on a later process having the
+			// same PATH (design/20). Resolution failure keeps the literal;
+			// static checks and hook execution surface it.
+			Command:    pinHookCommand(h.Command),
 			WorkingDir: sub(h.WorkingDir),
 			UnsetEnv:   append([]string(nil), h.UnsetEnv...),
 		}
@@ -415,6 +422,21 @@ func resolveLifecycle(game *config.GameConfig, profile string, profileLC *config
 		Stop:   resolveHook(stop, "stop"),
 		Kill:   resolveHook(kill, "kill"),
 	}
+}
+
+// pinHookCommand resolves a separator-free hook command through PATH to an
+// absolute path; path-containing commands pass through unchanged.
+func pinHookCommand(command string) string {
+	if command == "" || strings.ContainsRune(command, os.PathSeparator) || strings.ContainsRune(command, '/') {
+		return command
+	}
+	if abs, err := exec.LookPath(command); err == nil {
+		if resolved, err := filepath.Abs(abs); err == nil {
+			return resolved
+		}
+		return abs
+	}
+	return command
 }
 
 // envMap merges environment layers with optional case-insensitive keys.

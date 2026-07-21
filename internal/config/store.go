@@ -53,6 +53,18 @@ func NewStore(configPath string) *Store {
 	return &Store{path: configPath}
 }
 
+// NewSeededStore creates a store and performs the initial load in one step,
+// so the caller's validated startup configuration and the store's
+// last-known-good snapshot are the same bytes — no window in which the file
+// can turn invalid between a separate startup load and store creation.
+// Returns the store plus the initial snapshot/error with Snapshot()
+// semantics.
+func NewSeededStore(configPath string) (*Store, *Snapshot, *ConfigError) {
+	s := NewStore(configPath)
+	snap, cerr := s.Snapshot()
+	return s, snap, cerr
+}
+
 // Path returns the config file path this store watches.
 func (s *Store) Path() string { return s.path }
 

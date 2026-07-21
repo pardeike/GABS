@@ -52,12 +52,12 @@ contract, not a scratchpad.
       resolution, static resolvability, platform-size check — spec: 02,
       03; tests: T-RES
       (managed layer + GABS_FORWARD_ENV/GABS_ABSENT_ENV emitted by
-      controller buildEnvironment; static resolvability covers DirectPath
-      targets incl. .app resolution and working directories;
-      SteamManaged/CustomCommand target resolvability remains spawn-time
-      per staticcheck.go doc comment — CustomCommand target semantics are
-      launcher-defined and Steam resolution happens in the Steam
-      resolver; hook PATH pinning lands with M2 hook execution)
+      controller buildEnvironment; static resolvability covers all three
+      propagation-capable modes — DirectPath/CustomCommand targets incl.
+      .app resolution, relative targets resolved against the effective
+      workingDir, empty-target rejection, SteamManaged via the read-only
+      Steam resolver — plus working directories; hook commands PATH-pin
+      to absolute at resolution)
 - [x] M1.7 Platform spawn rules: macOS .app inner-binary resolution, no
       open/ShellExecute for propagation-capable modes, elevation → hint,
       Windows quoting — spec: 03; tests: T-DELIV (Windows/macOS cells)
@@ -84,15 +84,19 @@ contract, not a scratchpad.
       refusal on stale config, activeProfile/appliedLaunchInputs/
       configRevision in results; end-to-end test proves profile args
       reach the child process)
-- [x] M1.11 show/list/status metadata: profiles, input constraints incl.
+- [~] M1.11 show/list/status metadata: profiles, input constraints incl.
       maxLength/pattern, warnings, revisions — spec: 10, 09; tests: T-MCP
+      (complete except activeConfigRevision, which requires the persisted
+      launch revision from M2.1's runtime-claim extension; reopened per
+      review — currentConfigRevision alone cannot distinguish what is
+      running from what the next start would use)
 - [x] M1.12 Conformance probe helper + direct/forwarding-wrapper cells —
       spec: 03; tests: T-DELIV
       (probe records argv/env/cwd; direct cell asserts all three channels
-      + the GABS_FORWARD_ENV drift assertion; forwarding sh-wrapper cell
-      proves the hop; the cmd.exe wrapper variant and the remaining cells
-      — env-dropping, filtering, absent-reintroduction, detached — are
-      M2.12 as planned)
+      + the GABS_FORWARD_ENV drift assertion; forwarding wrapper cells
+      exist for both platforms — sh on unix, a build-tagged cmd.exe /c %*
+      variant for Windows CI; the remaining cells — env-dropping,
+      filtering, absent-reintroduction, detached — are M2.12 as planned)
 
 ## Milestone 2 — Lifecycle + liveness + start taxonomy
 
@@ -155,6 +159,13 @@ contract, not a scratchpad.
 
 ## Deviations
 
+- 2026-07-21, M1.6 + M1.11, protocol §rules: both items were marked [x]
+  with parenthetical scope-narrowing notes instead of remaining open or
+  carrying Deviations entries — caught in review. Resolution: M1.6's
+  missing scope (SteamManaged/CustomCommand/empty-target checks,
+  relative-target resolution, hook PATH pinning) was implemented rather
+  than deferred; M1.11 reopened to [~] until M2.1 supplies the persisted
+  activeConfigRevision. A parenthetical note is not a Deviations entry.
 - 2026-07-21, M1.3, protocol §rules: the first checkpoint reworded M1.3's
   item text to drop "URL-mode ... hook relaxation" instead of marking the
   deferral, violating the never-reword rule. Caught in review. Resolution:

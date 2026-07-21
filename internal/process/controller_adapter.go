@@ -14,6 +14,8 @@ type ControllerInterface interface {
 	GetLaunchMode() string
 	GetStopProcessName() string
 	IsLauncherProcessRunning() bool
+	FinalEnvironment() []string
+	LaunchLogTail(maxBytes int64) string
 }
 
 // NewController creates a new controller instance

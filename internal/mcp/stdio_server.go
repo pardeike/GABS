@@ -715,12 +715,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		game, exists := s.resolveGameId(gamesConfig, gameIdOrTarget)
-		if !exists {
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIdOrTarget)}},
-				IsError: true,
-			}, nil
+		game, resolveFail := resolveGameResult(gamesConfig, gameIdOrTarget)
+		if resolveFail != nil {
+			return resolveFail, nil
 		}
 
 		var content strings.Builder
@@ -814,12 +811,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		var content strings.Builder
 		if hasGameID {
 			// Check specific game
-			game, exists := s.resolveGameId(gamesConfig, gameIdOrTarget)
-			if !exists {
-				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIdOrTarget)}},
-					IsError: true,
-				}, nil
+			game, resolveFail := resolveGameResult(gamesConfig, gameIdOrTarget)
+			if resolveFail != nil {
+				return resolveFail, nil
 			}
 
 			// Get status once to avoid double mutex lock
@@ -936,17 +930,28 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		game, exists := s.resolveGameId(gamesConfig, gameIdOrTarget)
-		if !exists {
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIdOrTarget)}},
-				IsError: true,
-			}, nil
+		game, resolveFail := resolveGameResult(gamesConfig, gameIdOrTarget)
+		if resolveFail != nil {
+			return resolveFail, nil
 		}
 
-		startupGABPTimeout, invalidTimeout := parseOptionalTimeoutSecondsArg(args, "timeout", 0)
-		if invalidTimeout != nil {
-			return invalidTimeout, nil
+		// timeout: integral 1..3600 (release-noted validation tightening).
+		var startupGABPTimeout time.Duration
+		if raw, exists := args["timeout"]; exists && raw != nil {
+			seconds, ok, invalidTimeout := parseOptionalPositiveIntValue(raw, "timeout")
+			if invalidTimeout != nil {
+				return invalidTimeout, nil
+			}
+			if !ok || seconds < 1 || seconds > 3600 {
+				return &ToolResult{
+					Content: []Content{{Type: "text", Text: "Argument 'timeout' must be an integer between 1 and 3600 seconds"}},
+					IsError: true,
+					StructuredContent: map[string]interface{}{
+						"code": "timeout_out_of_range", "minimum": 1, "maximum": 3600,
+					},
+				}, nil
+			}
+			startupGABPTimeout = time.Duration(seconds) * time.Second
 		}
 		resetEndpoint, _, resetEndpointErr := parseOptionalBoolArg(args, "resetEndpoint")
 		if resetEndpointErr != nil {
@@ -990,8 +995,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				structured["candidates"] = rerr.Candidates
 			}
 			if rerr.Code == "profiles_not_configured" {
+				structured["requestedProfile"] = profileArg
 				structured["configPath"] = s.configFilePathHint()
 				structured["documentation"] = "docs/CONFIGURATION.md#profiles"
+				structured["note"] = "Config edits apply automatically; no GABS or client restart is needed."
 			}
 			return &ToolResult{
 				Content:           []Content{{Type: "text", Text: rerr.Message}},
@@ -1047,6 +1054,28 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			var endpointErr *config.BridgeEndpointInUseError
 			if errors.As(err, &endpointErr) {
 				return bridgeEndpointInUseResult(*game, endpointErr), nil
+			}
+			var sizeIssue *launch.SpecSizeIssue
+			if errors.As(err, &sizeIssue) {
+				return &ToolResult{
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("Refusing to start %s: %s", game.ID, sizeIssue.Message)}},
+					IsError: true,
+					StructuredContent: map[string]interface{}{
+						"code": "spec_too_large", "part": sizeIssue.Part, "gameId": game.ID,
+					},
+				}, nil
+			}
+			var procErr *process.ProcessError
+			if errors.As(err, &procErr) && (procErr.Type == process.ProcessErrorTypeStart || procErr.Type == process.ProcessErrorTypeConfiguration) {
+				// OS process creation failed on a valid resolved spec:
+				// spawn_failed with the OS evidence (incl. elevation hint).
+				return &ToolResult{
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to start %s: %v", game.ID, err)}},
+					IsError: true,
+					StructuredContent: map[string]interface{}{
+						"code": "spawn_failed", "gameId": game.ID, "osError": procErr.Err.Error(),
+					},
+				}, nil
 			}
 
 			return &ToolResult{
@@ -1143,12 +1172,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		game, exists := s.resolveGameId(gamesConfig, gameIdOrTarget)
-		if !exists {
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIdOrTarget)}},
-				IsError: true,
-			}, nil
+		game, resolveFail := resolveGameResult(gamesConfig, gameIdOrTarget)
+		if resolveFail != nil {
+			return resolveFail, nil
 		}
 
 		err := s.stopGame(*game, false)
@@ -1203,12 +1229,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		game, exists := s.resolveGameId(gamesConfig, gameIdOrTarget)
-		if !exists {
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIdOrTarget)}},
-				IsError: true,
-			}, nil
+		game, resolveFail := resolveGameResult(gamesConfig, gameIdOrTarget)
+		if resolveFail != nil {
+			return resolveFail, nil
 		}
 
 		err := s.stopGame(*game, true)
@@ -1386,19 +1409,19 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		return cursor, nil
 	}
 
-	getSortedGames := func() []config.GameConfig {
-		games := gamesConfig.ListGames()
+	getSortedGames := func(cfg *config.GamesConfig) []config.GameConfig {
+		games := cfg.ListGames()
 		sort.Slice(games, func(i, j int) bool {
 			return games[i].ID < games[j].ID
 		})
 		return games
 	}
 
-	listToolsForDiscovery := func(gameID string, hasGameID bool, forceInitialSync bool) ([]listedGameTool, *config.GameConfig, *ToolResult) {
+	listToolsForDiscovery := func(cfg *config.GamesConfig, gameID string, hasGameID bool, forceInitialSync bool) ([]listedGameTool, *config.GameConfig, *ToolResult) {
 		entries := make([]listedGameTool, 0)
 
 		if hasGameID {
-			game, exists := s.resolveGameId(gamesConfig, gameID)
+			game, exists := s.resolveGameId(cfg, gameID)
 			if !exists {
 				return nil, nil, &ToolResult{
 					Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameID)}},
@@ -1431,7 +1454,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			return entries, game, nil
 		}
 
-		for _, game := range getSortedGames() {
+		for _, game := range getSortedGames(cfg) {
 			if forceInitialSync {
 				if err := s.ensureGameToolsMirrored(game.ID, 10*time.Second); err != nil {
 					s.log.Debugw("failed to sync GABP tools during discovery", "gameId", game.ID, "error", err)
@@ -1679,7 +1702,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}
 
 		if hasGameID {
-			entries, game, listErr := listToolsForDiscovery(gameID, true, forceInitialSync)
+			entries, game, listErr := listToolsForDiscovery(gamesConfig, gameID, true, forceInitialSync)
 			if listErr != nil {
 				return listedGameTool{}, listErr
 			}
@@ -1693,7 +1716,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			return entry, nil
 		}
 
-		entries, _, listErr := listToolsForDiscovery("", false, forceInitialSync)
+		entries, _, listErr := listToolsForDiscovery(gamesConfig, "", false, forceInitialSync)
 		if listErr != nil {
 			return listedGameTool{}, listErr
 		}
@@ -1788,7 +1811,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			return invalidArg, nil
 		}
 
-		entries, game, listErr := listToolsForDiscovery(gameID, hasGameID, true)
+		entries, game, listErr := listToolsForDiscovery(gamesConfig, gameID, hasGameID, true)
 		if listErr != nil {
 			return listErr, nil
 		}
@@ -2003,7 +2026,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			return invalidArg, nil
 		}
 
-		entries, game, listErr := listToolsForDiscovery(gameID, hasGameID, true)
+		entries, game, listErr := listToolsForDiscovery(gamesConfig, gameID, hasGameID, true)
 		if listErr != nil {
 			return listErr, nil
 		}
@@ -2137,12 +2160,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		game, exists := s.resolveGameId(gamesConfig, gameIdArg)
-		if !exists {
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIdArg)}},
-				IsError: true,
-			}, nil
+		game, resolveFail := resolveGameResult(gamesConfig, gameIdArg)
+		if resolveFail != nil {
+			return resolveFail, nil
 		}
 
 		forceTakeover, _, forceTakeoverErr := getOptionalBoolArg(args, "forceTakeover")
@@ -2685,20 +2705,67 @@ func (s *Server) getGameFromController(controller process.ControllerInterface) *
 
 // resolveGameId tries to find a game by ID or by target (for better UX)
 // Returns the actual game config and whether it was found
-func (s *Server) resolveGameId(gamesConfig *config.GamesConfig, gameIdOrTarget string) (*config.GameConfig, bool) {
-	// First try direct lookup by game ID
-	if game, exists := gamesConfig.GetGame(gameIdOrTarget); exists {
-		return game, true
+// resolveGameReference resolves a game reference with full Stage 1
+// semantics: exact ID, unique target match, ambiguity, or absence.
+// code is "" on success, else game_not_found | ambiguous_game_reference
+// with sorted candidates (design/05-start-pipeline.md).
+func resolveGameReference(cfg *config.GamesConfig, ref string) (*config.GameConfig, string, []string) {
+	if game, exists := cfg.GetGame(ref); exists {
+		return game, "", nil
 	}
-
-	// If not found, try to find by target (Steam App ID, path, etc.)
-	for _, game := range gamesConfig.ListGames() {
-		if game.Target == gameIdOrTarget {
-			return &game, true
+	var matches []config.GameConfig
+	for _, game := range cfg.ListGames() {
+		if game.Target == ref {
+			matches = append(matches, game)
 		}
 	}
+	switch len(matches) {
+	case 1:
+		g := matches[0]
+		return &g, "", nil
+	case 0:
+		ids := make([]string, 0, len(cfg.Games))
+		for id := range cfg.Games {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		return nil, "game_not_found", ids
+	default:
+		ids := make([]string, 0, len(matches))
+		for _, g := range matches {
+			ids = append(ids, g.ID)
+		}
+		sort.Strings(ids)
+		return nil, "ambiguous_game_reference", ids
+	}
+}
 
-	return nil, false
+// resolveGameResult wraps resolveGameReference into a structured tool error.
+func resolveGameResult(cfg *config.GamesConfig, ref string) (*config.GameConfig, *ToolResult) {
+	game, code, candidates := resolveGameReference(cfg, ref)
+	if game != nil {
+		return game, nil
+	}
+	msg := fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", ref)
+	if code == "ambiguous_game_reference" {
+		msg = fmt.Sprintf("Game reference '%s' matches multiple configured games (%s). Use the exact game ID.", ref, strings.Join(candidates, ", "))
+	}
+	structured := map[string]interface{}{"code": code}
+	if len(candidates) > 0 {
+		structured["candidates"] = candidates
+	}
+	return nil, &ToolResult{
+		Content:           []Content{{Type: "text", Text: msg}},
+		IsError:           true,
+		StructuredContent: structured,
+	}
+}
+
+func (s *Server) resolveGameId(gamesConfig *config.GamesConfig, gameIdOrTarget string) (*config.GameConfig, bool) {
+	// Deterministic wrapper: an ambiguous target reference resolves to
+	// nothing rather than to a map-iteration-order pick.
+	game, _, _ := resolveGameReference(gamesConfig, gameIdOrTarget)
+	return game, game != nil
 }
 
 func mcpNextAction(tool string, arguments map[string]interface{}, reason string) map[string]interface{} {
@@ -2883,7 +2950,11 @@ func attachConfigHealth(structured map[string]interface{}, cfg *config.GamesConf
 		}
 	}
 	if len(global) > 0 {
-		structured["configWarnings"] = global
+		if existing, ok := structured["configWarnings"].([]string); ok {
+			structured["configWarnings"] = append(existing, global...)
+		} else {
+			structured["configWarnings"] = global
+		}
 	}
 	if cfgErr != nil {
 		structured["configError"] = cfgErr.Err.Error()
@@ -4054,7 +4125,9 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	delete(s.games, game.ID)
 	s.mu.Unlock()
 
-	port, token, bridgePath, reusedBridge, err := config.PrepareBridgeEndpointForStart(game.ID, s.configDir, gamesConfig, resetEndpoint)
+	// portRanges is startup-only (design/09): endpoint allocation uses the
+	// configuration pinned at process start, never the hot-reload snapshot.
+	port, token, bridgePath, reusedBridge, err := config.PrepareBridgeEndpointForStart(game.ID, s.configDir, s.gamesConfig, resetEndpoint)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare GABS endpoint cache for game '%s': %w", game.ID, err)
 	}
@@ -4066,6 +4139,22 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	}
 
 	controller.SetBridgeInfo(port, token)
+
+	// Pre-spawn size check on the fully materialized spec (managed env
+	// layer + executable included): a structured spec_too_large beats an
+	// opaque E2BIG/CreateProcess failure (design/03).
+	if resolved != nil {
+		finalEnv := map[string]string{}
+		for _, kv := range controller.FinalEnvironment() {
+			if i := strings.IndexByte(kv, '='); i > 0 {
+				finalEnv[kv[:i]] = kv[i+1:]
+			}
+		}
+		finalArgv := append([]string{launchSpec.PathOrId}, launchSpec.Args...)
+		if iss := launch.CheckProcessSize(finalArgv, finalEnv); iss != nil {
+			return nil, iss
+		}
+	}
 
 	result := s.starter.StartWithVerificationWithTimeouts(controller, nil, game.ID, port, token, 0, 0)
 	if result.Error != nil {
