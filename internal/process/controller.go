@@ -2,6 +2,7 @@ package process
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -39,6 +40,10 @@ type LaunchSpec struct {
 	Env            map[string]string
 	ContextEnvKeys []string
 	AbsentEnvNames []string
+
+	// RuntimeDir is the per-game runtime directory (bridge.json,
+	// launch.log). Empty falls back to the default ~/.gabs/<gameId>.
+	RuntimeDir string
 }
 
 type BridgeInfo struct {
@@ -165,11 +170,27 @@ func (c *Controller) Start() error {
 	// Set up environment variables
 	c.setupEnvironment()
 
+	// Child stdout/stderr go to a per-launch log file whose descriptors
+	// stay valid after any GABS process exits — never parent-owned pipes,
+	// which would turn a CLI exit into EPIPE for a logging game
+	// (design/05-start-pipeline.md, Stage 3). Truncated at each spawn; the
+	// capped tail is the "why did it die" evidence in failure results.
+	_ = os.MkdirAll(c.runtimeDir(), 0o700)
+	if logFile, err := os.OpenFile(c.launchLogPath(), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600); err == nil {
+		c.cmd.Stdout = logFile
+		c.cmd.Stderr = logFile
+		defer logFile.Close() // the child keeps its own descriptor
+	}
+
 	// Start the process
 	if err := c.cmd.Start(); err != nil {
+		ctxMsg := fmt.Sprintf("failed to start %s (mode: %s, target: %s)", c.spec.GameId, c.spec.Mode, c.spec.PathOrId)
+		if hint := startErrorHintFor(err, runtime.GOOS); hint != "" {
+			ctxMsg += "; " + hint
+		}
 		return &ProcessError{
 			Type:    ProcessErrorTypeStart,
-			Context: fmt.Sprintf("failed to start %s (mode: %s, target: %s)", c.spec.GameId, c.spec.Mode, c.spec.PathOrId),
+			Context: ctxMsg,
 			Err:     err,
 		}
 	}
@@ -217,7 +238,11 @@ func (c *Controller) buildEnvironment() []string {
 	if c.spec.Profile != "" {
 		managed["GABS_PROFILE"] = c.spec.Profile
 	}
-	if env["SystemRoot"] == "" && os.Getenv("SystemRoot") == "" {
+	// Windows compatibility fallback only where it applies — the legacy
+	// path injects these unconditionally, but resolved launches must not
+	// leak Windows variables into unix children (they would also pollute
+	// GABS_FORWARD_ENV).
+	if runtime.GOOS == "windows" && env["SystemRoot"] == "" && os.Getenv("SystemRoot") == "" {
 		managed["SystemRoot"] = "C:\\Windows"
 		managed["WINDIR"] = "C:\\Windows"
 	}
@@ -607,6 +632,56 @@ func SetLaunchCommandFactoriesForTesting(
 		steamLaunchCommandFactory = prevSteam
 		epicLaunchCommandFactory = prevEpic
 	}
+}
+
+// launchLogPath is the per-launch child output file beside bridge.json.
+func (c *Controller) launchLogPath() string {
+	return filepath.Join(c.runtimeDir(), "launch.log")
+}
+
+// runtimeDir returns the per-game runtime directory.
+func (c *Controller) runtimeDir() string {
+	if c.spec.RuntimeDir != "" {
+		return c.spec.RuntimeDir
+	}
+	return filepath.Dir(c.getBridgePath())
+}
+
+// LaunchLogTail returns up to maxBytes from the end of the child output
+// log — evidence for spawn/exit failures.
+func (c *Controller) LaunchLogTail(maxBytes int64) string {
+	f, err := os.Open(c.launchLogPath())
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	offset := int64(0)
+	if fi.Size() > maxBytes {
+		offset = fi.Size() - maxBytes
+	}
+	buf := make([]byte, fi.Size()-offset)
+	if _, err := f.ReadAt(buf, offset); err != nil {
+		return ""
+	}
+	return string(buf)
+}
+
+// startErrorHintFor maps platform-specific spawn errors to precise hints.
+// ERROR_ELEVATION_REQUIRED (740): the target requires elevation and GABS
+// deliberately does not elevate (design/03, platform rules).
+func startErrorHintFor(err error, goos string) string {
+	if goos != "windows" {
+		return ""
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) && int(errno) == 740 {
+		return "the target requires elevation; GABS does not elevate — remove the elevation requirement or launch it outside GABS"
+	}
+	return ""
 }
 
 func (c *Controller) getBridgePath() string {

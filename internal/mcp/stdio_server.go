@@ -4024,7 +4024,7 @@ func (s *Server) cleanupStoppedGame(gameID string) {
 // startGame starts a game process using the serialized starter approach
 // This implements @pardeike's requirements for serialized, verified process starting
 func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration, startupGABPTimeout time.Duration, resetEndpoint bool, resolved *launch.Resolved) (*process.ProcessStartResult, error) {
-	launchSpec := launchSpecFromResolved(game, resolved)
+	launchSpec := s.launchSpecWithRuntimeDir(launchSpecFromResolved(game, resolved))
 
 	controller := process.NewController()
 	if err := controller.Configure(launchSpec); err != nil {
@@ -4375,6 +4375,13 @@ func launchSpecFromGame(game config.GameConfig) process.LaunchSpec {
 		WorkingDir:      game.WorkingDir,
 		StopProcessName: game.StopProcessName,
 	}
+}
+
+func (s *Server) launchSpecWithRuntimeDir(spec process.LaunchSpec) process.LaunchSpec {
+	if cp, err := config.NewConfigPaths(s.configDir); err == nil {
+		spec.RuntimeDir = cp.GetGameDir(spec.GameId)
+	}
+	return spec
 }
 
 // launchSpecFromResolved builds the process spec from the resolver output:

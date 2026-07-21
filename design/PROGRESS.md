@@ -58,15 +58,21 @@ contract, not a scratchpad.
       per staticcheck.go doc comment — CustomCommand target semantics are
       launcher-defined and Steam resolution happens in the Steam
       resolver; hook PATH pinning lands with M2 hook execution)
-- [~] M1.7 Platform spawn rules: macOS .app inner-binary resolution, no
+- [x] M1.7 Platform spawn rules: macOS .app inner-binary resolution, no
       open/ShellExecute for propagation-capable modes, elevation → hint,
       Windows quoting — spec: 03; tests: T-DELIV (Windows/macOS cells)
-      (.app inner-binary resolution implemented + wired into DirectPath
-      spec construction; propagation-capable modes already exec directly
-      in the controller — no open/ShellExecute paths exist for them;
-      remaining: Windows elevation-error 740 → spawn_failed hint)
-- [ ] M1.8 Child I/O to per-launch log file (no parent-owned pipes) —
+      (.app inner-binary resolution wired into DirectPath spec
+      construction; propagation-capable modes exec directly — no
+      open/ShellExecute paths exist for them; elevation errno 740 maps to
+      a precise hint, unit-tested cross-platform; Windows quoting counted
+      exactly in CheckProcessSize)
+- [x] M1.8 Child I/O to per-launch log file (no parent-owned pipes) —
       spec: 05 Stage 3; tests: T-DELIV (I/O survival)
+      (child stdout/stderr inherit a 0600 launch.log descriptor in the
+      per-game runtime dir, truncated at spawn; LaunchLogTail provides
+      the capped evidence tail; resolved launches only add
+      platform-appropriate managed vars — the legacy unconditional
+      SystemRoot injection stays legacy-path-only)
 - [x] M1.9 Strict MCP argument validation on all core tools
       (additionalProperties:false + shared helper) — spec: 10; tests:
       T-MCP
@@ -80,8 +86,13 @@ contract, not a scratchpad.
       reach the child process)
 - [x] M1.11 show/list/status metadata: profiles, input constraints incl.
       maxLength/pattern, warnings, revisions — spec: 10, 09; tests: T-MCP
-- [ ] M1.12 Conformance probe helper + direct/forwarding-wrapper cells —
+- [x] M1.12 Conformance probe helper + direct/forwarding-wrapper cells —
       spec: 03; tests: T-DELIV
+      (probe records argv/env/cwd; direct cell asserts all three channels
+      + the GABS_FORWARD_ENV drift assertion; forwarding sh-wrapper cell
+      proves the hop; the cmd.exe wrapper variant and the remaining cells
+      — env-dropping, filtering, absent-reintroduction, detached — are
+      M2.12 as planned)
 
 ## Milestone 2 — Lifecycle + liveness + start taxonomy
 
