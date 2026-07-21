@@ -109,27 +109,37 @@ func LoadGamesConfigFromDir(configDir string) (*GamesConfig, error) {
 	return LoadGamesConfigFromPath(cp.GetMainConfigPath())
 }
 
+// defaultGamesConfig is the empty configuration used when no file exists.
+func defaultGamesConfig() *GamesConfig {
+	return &GamesConfig{
+		Version: "1.0",
+		Games:   make(map[string]GameConfig),
+		ToolNormalization: &ToolNormalizationConfig{
+			EnableOpenAINormalization: true, // Strict-safe by default
+			MaxToolNameLength:         64,   // OpenAI limit
+			PreserveOriginalName:      true, // Always preserve original name
+		},
+		PortRanges: &PortRangeConfig{}, // Empty - will use defaults
+	}
+}
+
 // LoadGamesConfigFromPath loads games configuration from a specific path (for testing)
 func LoadGamesConfigFromPath(configPath string) (*GamesConfig, error) {
 	// If config doesn't exist, return empty config with defaults
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		return &GamesConfig{
-			Version: "1.0",
-			Games:   make(map[string]GameConfig),
-			ToolNormalization: &ToolNormalizationConfig{
-				EnableOpenAINormalization: true, // Strict-safe by default
-				MaxToolNameLength:         64,   // OpenAI limit
-				PreserveOriginalName:      true, // Always preserve original name
-			},
-			PortRanges: &PortRangeConfig{}, // Empty - will use defaults
-		}, nil
+		return defaultGamesConfig(), nil
 	}
 
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
+	return parseGamesConfig(data)
+}
 
+// parseGamesConfig parses and validates raw config bytes: duplicate-member
+// scan, struct decode, unknown-key check, and extension validation.
+func parseGamesConfig(data []byte) (*GamesConfig, error) {
 	// Duplicate object members must be rejected before any decoded form is
 	// accepted: both struct and map decoding silently keep the last value.
 	dupes, err := scanDuplicateMembers(data)

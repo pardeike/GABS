@@ -39,9 +39,11 @@ contract, not a scratchpad.
       M2.14 with the gate removal, since hooks cannot be configured in M1)
 - [x] M1.4 M1 lifecycle feature gate (reject `lifecycle` until M2) —
       spec: 21; tests: T-VAL
-- [ ] M1.5 ConfigStore: hash-per-call reload, last-known-good, revisions,
+- [~] M1.5 ConfigStore: hash-per-call reload, last-known-good, revisions,
       snapshot immutability; replace captured config pointers — spec: 09;
       tests: T-RELOAD
+      (store complete with tests; handler pointer replacement lands
+      together with M1.9–M1.11 server wiring)
 - [ ] M1.6 Pure resolver: selection, arg order, env merge (unsetEnv
       layers, managed layer, GABS_FORWARD_ENV/GABS_ABSENT_ENV), cwd, hook
       resolution, static resolvability, platform-size check — spec: 02,
