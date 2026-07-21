@@ -171,9 +171,19 @@ wait
 	if err != nil {
 		t.Fatalf("failed to read internal bridge endpoint: %v", err)
 	}
-	if adoptedPort != freshPort || adoptedToken != freshToken {
+	// The port is reusable, but the token rotates per launch (design/03) —
+	// so the file must carry a freshly minted token, and adoption of the
+	// stale process environment must never write the adopted endpoint into
+	// the debug-only bridge file.
+	if adoptedPort != freshPort {
 		statusText := marshalMessage(t, server.HandleMessage(toolCallMessage("status-stale-launcher", "games.status", game.ID)))
-		t.Fatalf("expected internal bridge endpoint to remain debug-only %d/%s, got %d/%s; status: %s", freshPort, freshToken, adoptedPort, adoptedToken, statusText)
+		t.Fatalf("expected internal bridge endpoint to keep port %d, got %d; status: %s", freshPort, adoptedPort, statusText)
+	}
+	if adoptedToken == staleToken {
+		t.Fatalf("adopted stale process-env token must never be written into the bridge file")
+	}
+	if adoptedToken == freshToken {
+		t.Fatalf("the per-launch token must rotate on start; the pre-start token is still in the bridge file")
 	}
 }
 

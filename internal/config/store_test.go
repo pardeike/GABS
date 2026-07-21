@@ -230,3 +230,26 @@ func TestSaveConfigAlwaysPrivate(t *testing.T) {
 		}
 	}
 }
+
+func TestBridgeEndpointTokenRotatesPerLaunch(t *testing.T) {
+	dir := t.TempDir()
+	port1, token1, _, _, err := PrepareBridgeEndpointForStart("g", dir, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port2, token2, _, reused, err := PrepareBridgeEndpointForStart("g", dir, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reused || port2 != port1 {
+		t.Fatalf("the port may be reused: %d vs %d (reused=%v)", port1, port2, reused)
+	}
+	if token2 == token1 {
+		t.Fatalf("the token must rotate per launch — a superseded process's credentials must never remain valid")
+	}
+	// bridge.json reflects the rotated token
+	_, _, diskToken, err := ReadBridgeJSON("g", dir)
+	if err != nil || diskToken != token2 {
+		t.Fatalf("bridge.json must carry the rotated token: %q vs %q (%v)", diskToken, token2, err)
+	}
+}

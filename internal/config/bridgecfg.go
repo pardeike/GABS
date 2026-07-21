@@ -108,7 +108,17 @@ func PrepareBridgeEndpointForStart(gameID, configDir string, gamesConfig *GamesC
 				ConfigPath: cfgPath,
 			}
 		}
-		return bridge.Port, bridge.Token, cfgPath, true, nil
+		// The port may be reused; the token is per-launch and always
+		// rotates, so a superseded process's credentials can never attach
+		// to a newer claim (design/03).
+		token, err := generateToken()
+		if err != nil {
+			return 0, "", "", false, fmt.Errorf("failed to generate token: %w", err)
+		}
+		if _, err := WriteBridgeJSONWithEndpoint(gameID, configDir, bridge.Port, token); err != nil {
+			return 0, "", "", false, err
+		}
+		return bridge.Port, token, cfgPath, true, nil
 	}
 
 	port, token, path, err := WriteBridgeJSONWithConfig(gameID, configDir, gamesConfig)

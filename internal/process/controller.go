@@ -72,7 +72,9 @@ type Controller struct {
 	waitDone   chan struct{}
 
 	// Stage 3 spawnState observers (design/05); nil for legacy callers.
-	beforeSpawn func()
+	// beforeSpawn returning an error ABORTS the spawn: OS process creation
+	// must not run against an unpublished or superseded claim.
+	beforeSpawn func() error
 	afterSpawn  func(pid int, startTime int64, spawnErr error)
 }
 
@@ -216,7 +218,9 @@ func (c *Controller) Start() error {
 	// (design/05 Stage 3): immediately before → spawning, immediately
 	// after → spawned with PID + fingerprint, or failed.
 	if c.beforeSpawn != nil {
-		c.beforeSpawn()
+		if err := c.beforeSpawn(); err != nil {
+			return err
+		}
 	}
 	if err := c.cmd.Start(); err != nil {
 		if c.afterSpawn != nil {
@@ -251,7 +255,7 @@ func (c *Controller) Start() error {
 // SetSpawnObservers installs the Stage 3 spawnState callbacks: before runs
 // immediately before OS process creation, after immediately after with the
 // PID + start-time fingerprint (or the spawn error).
-func (c *Controller) SetSpawnObservers(before func(), after func(pid int, startTime int64, spawnErr error)) {
+func (c *Controller) SetSpawnObservers(before func() error, after func(pid int, startTime int64, spawnErr error)) {
 	c.beforeSpawn = before
 	c.afterSpawn = after
 }

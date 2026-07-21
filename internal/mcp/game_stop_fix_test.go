@@ -213,9 +213,15 @@ func TestGameStopFix(t *testing.T) {
 			t.Log("✓ Steam game status shows expected limitation message")
 		} else if strings.Contains(responseStr, "stopped") {
 			t.Log("✓ Steam game status shows stopped (acceptable with stateless approach)")
+		} else if strings.Contains(responseStr, "starting") {
+			// An unresolved URL launch keeps its claim in phase starting
+			// (the unobserved policy, design/05): absence of evidence is
+			// not stopped, and only positive observation, supersession, or
+			// repair resolves it.
+			t.Log("✓ Steam game status shows the unresolved launch as starting (unobserved claim kept)")
 		} else {
 			t.Logf("Got status: %s", responseStr)
-			t.Error("Steam game status should show launcher active, tracking limitation, or stopped")
+			t.Error("Steam game status should show launcher active, tracking limitation, starting, or stopped")
 		}
 	})
 

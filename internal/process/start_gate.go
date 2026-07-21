@@ -47,6 +47,7 @@ type StartGate struct {
 type StartRefusal struct {
 	Code              string
 	Message           string
+	Phase             string
 	ActiveProfile     string
 	RequestedProfile  string
 	Candidates        []string
@@ -64,70 +65,86 @@ type StartGateResult struct {
 }
 
 // GateStart implements design/05 Stage 2: evaluate an existing claim by the
-// liveness rule (running → already_running; unknown → blocked; stopped →
-// clear and proceed), honor in-flight operations and the unobserved
-// supersession policy, publish the complete pre-spawn claim, then probe
-// every profile's status hook plus stopProcessName as the lost-claim
-// backstop before any spawn.
+// liveness rule over its pinned context, honor in-flight operations and
+// the unobserved supersession policy, publish the complete pre-spawn
+// claim, then probe every profile's status hook plus stopProcessName as
+// the lost-claim backstop before any spawn. A lost claim race re-evaluates
+// the winner instead of fabricating an outcome.
 func GateStart(g StartGate) (*StartGateResult, error) {
 	now := time.Now().UTC()
+	var warnings []string
+	var state RuntimeState
+	claimed := false
 
-	claim, err := LoadRuntimeState(g.GameID, g.ConfigDir)
-	if err != nil {
-		// A claim exists but cannot be read: GABS started something and
-		// cannot tell what — uncertainty blocks (design/05).
-		return &StartGateResult{Refusal: &StartRefusal{
-			Code:    RefusalBlockedUnknown,
-			Message: fmt.Sprintf("runtime claim for %s is unreadable: %v; inspect it or run repair --forget-runtime", g.GameID, err),
-		}}, nil
-	}
-	if claim != nil {
-		if ref := gateExistingClaim(g, claim, now); ref != nil {
-			return &StartGateResult{Refusal: ref}, nil
-		}
-		// stale or superseded: clear it and proceed
-		if err := RemoveRuntimeState(g.GameID, g.ConfigDir); err != nil {
-			return nil, fmt.Errorf("failed to clear stale claim for %s: %w", g.GameID, err)
-		}
-	}
-
-	state := NewRuntimeState(g.Spec, RuntimeStateStatusStarting)
-	state.OwnerInstanceID = g.InstanceID
-	execPID := os.Getpid()
-	execStart, _ := ProcessStartTime(execPID)
-	state.Operation = &RuntimeOperation{
-		OperationID:          NewFencingID(),
-		Action:               OperationActionStart,
-		ExecutorInstanceID:   g.InstanceID,
-		ExecutorPID:          execPID,
-		ExecutorPIDStartTime: execStart,
-		AttemptStartedAt:     now,
-		Deadline:             now.Add(g.Budget),
-	}
-	state.ProcessStartDeadline = now.Add(g.Budget)
-
-	if err := ClaimRuntimeState(g.GameID, g.ConfigDir, state); err != nil {
-		if errors.Is(err, ErrRuntimeStateExists) {
-			// Lost the claim race: the concurrent start's preflight claim
-			// carries the operation timing (design/05).
-			if racing, lerr := LoadRuntimeState(g.GameID, g.ConfigDir); lerr == nil && racing != nil {
-				return &StartGateResult{Refusal: &StartRefusal{
-					Code:      RefusalOperationInFlight,
-					Message:   fmt.Sprintf("%s is already starting in a concurrent operation", g.GameID),
-					Operation: racing.Operation,
-				}}, nil
-			}
+	for attempt := 0; attempt < 3 && !claimed; attempt++ {
+		claim, err := LoadRuntimeState(g.GameID, g.ConfigDir)
+		if err != nil {
+			// A claim exists but cannot be read: GABS started something and
+			// cannot tell what — uncertainty blocks (design/05).
 			return &StartGateResult{Refusal: &StartRefusal{
-				Code:    RefusalOperationInFlight,
-				Message: fmt.Sprintf("%s is already starting in a concurrent operation", g.GameID),
-			}}, nil
+				Code:    RefusalBlockedUnknown,
+				Message: fmt.Sprintf("runtime claim for %s is unreadable: %v; inspect it or run repair --forget-runtime", g.GameID, err),
+			}, Warnings: warnings}, nil
 		}
-		return nil, err
+		if claim != nil {
+			refusal, ws := gateExistingClaim(g, claim, now)
+			warnings = append(warnings, ws...)
+			if refusal != nil {
+				return &StartGateResult{Refusal: refusal, Warnings: warnings}, nil
+			}
+			// Clear the stale claim — only the exact launch identity that
+			// was just evaluated; a racing start's fresh claim survives.
+			if rerr := removeRuntimeStateIfLaunch(g.GameID, g.ConfigDir, claim.LaunchID); rerr != nil {
+				if errors.Is(rerr, ErrFencingViolation) {
+					continue // someone replaced it mid-evaluation; re-evaluate
+				}
+				return nil, fmt.Errorf("failed to clear stale claim for %s: %w", g.GameID, rerr)
+			}
+		}
+
+		state = NewRuntimeState(g.Spec, RuntimeStateStatusStarting)
+		state.OwnerInstanceID = g.InstanceID
+		execPID := os.Getpid()
+		execStart, _ := ProcessStartTime(execPID)
+		state.Operation = &RuntimeOperation{
+			OperationID:          NewFencingID(),
+			Action:               OperationActionStart,
+			ExecutorInstanceID:   g.InstanceID,
+			ExecutorPID:          execPID,
+			ExecutorPIDStartTime: execStart,
+			AttemptStartedAt:     now,
+			Deadline:             now.Add(g.Budget),
+		}
+		state.ProcessStartDeadline = now.Add(g.Budget)
+
+		cerr := ClaimRuntimeState(g.GameID, g.ConfigDir, state)
+		if cerr == nil {
+			claimed = true
+			break
+		}
+		if !errors.Is(cerr, ErrRuntimeStateExists) {
+			return nil, cerr
+		}
+		// Lost the claim race: loop and judge the winner like any existing
+		// claim — it may be a preflight start, an external snapshot, or
+		// already stale again.
+	}
+	if !claimed {
+		refusal := &StartRefusal{
+			Code:    RefusalOperationInFlight,
+			Message: fmt.Sprintf("%s is already starting in a concurrent operation", g.GameID),
+		}
+		if cur, err := LoadRuntimeState(g.GameID, g.ConfigDir); err == nil && cur != nil {
+			refusal.Operation = cur.Operation
+			refusal.Phase = cur.Phase
+		}
+		return &StartGateResult{Refusal: refusal, Warnings: warnings}, nil
 	}
 
-	warnings, refusal, err := runPreStartProbes(g, now)
+	probeWarnings, refusal, err := runPreStartProbes(g, &state, now)
+	warnings = append(warnings, probeWarnings...)
 	if err != nil {
-		_ = RemoveRuntimeState(g.GameID, g.ConfigDir)
+		_ = removeRuntimeStateIfLaunch(g.GameID, g.ConfigDir, state.LaunchID)
 		return nil, err
 	}
 	if refusal != nil {
@@ -136,41 +153,78 @@ func GateStart(g StartGate) (*StartGateResult, error) {
 	return &StartGateResult{Claim: &state, Warnings: warnings}, nil
 }
 
-// gateExistingClaim returns a refusal, or nil when the claim is stale (or
-// superseded per the unobserved policy) and the caller may clear it.
-func gateExistingClaim(g StartGate, claim *RuntimeState, now time.Time) *StartRefusal {
-	if op := claim.Operation; op != nil && !op.Deadline.IsZero() && now.Before(op.Deadline) {
-		// An in-flight operation blocks only while its executor is provably
-		// alive; a dead executor's orphaned attempt falls through to the
-		// liveness rule (design/06, refined by M2.7 recovery).
-		if op.ExecutorPID > 0 {
-			if v, _ := VerifyPIDFingerprint(op.ExecutorPID, op.ExecutorPIDStartTime); v == StatusRunning {
-				verb := op.Action + " operation"
-				if op.Action == OperationActionStart {
-					verb = "already starting: a start operation"
-				}
-				return &StartRefusal{
-					Code:      RefusalOperationInFlight,
-					Message:   fmt.Sprintf("%s is %s begun %s is still in progress (deadline %s)", g.GameID, verb, op.AttemptStartedAt.Format(time.RFC3339), op.Deadline.Format(time.RFC3339)),
-					Operation: op,
-				}
+// gateExistingClaim returns a refusal, or nil when the claim may be cleared
+// and the start may proceed (possibly with warnings, e.g. supersession).
+func gateExistingClaim(g StartGate, claim *RuntimeState, now time.Time) (*StartRefusal, []string) {
+	if op := claim.Operation; op != nil && !op.Deadline.IsZero() && now.Before(op.Deadline) && op.ExecutorPID > 0 {
+		switch v, detail := VerifyPIDFingerprint(op.ExecutorPID, op.ExecutorPIDStartTime); v {
+		case StatusRunning:
+			verb := op.Action + " operation"
+			if op.Action == OperationActionStart {
+				verb = "already starting: a start operation"
+			}
+			return &StartRefusal{
+				Code:      RefusalOperationInFlight,
+				Message:   fmt.Sprintf("%s is %s begun %s is still in progress (deadline %s)", g.GameID, verb, op.AttemptStartedAt.Format(time.RFC3339), op.Deadline.Format(time.RFC3339)),
+				Phase:     claim.Phase,
+				Operation: op,
+			}, nil
+		case StatusUnknown:
+			// An uninspectable executor is not a proven-dead executor: the
+			// operation may still be running (design/04: inspection failure
+			// is unknown, never stopped).
+			return &StartRefusal{
+				Code:    RefusalBlockedUnknown,
+				Message: fmt.Sprintf("an in-flight %s operation on %s has an executor that cannot be inspected (%s); uncertainty blocks the start", op.Action, g.GameID, detail),
+				Phase:   claim.Phase,
+			}, nil
+		}
+		// executor provably stopped: an orphaned attempt, judged below
+	}
+
+	// A preflight claim whose executor is provably gone is the one safe
+	// removal: spawnState preflight proves process creation was never
+	// attempted (design/05 Stage 2).
+	if claim.Source == SourceGABS && claim.SpawnState == SpawnStatePreflight {
+		if op := claim.Operation; op != nil && op.ExecutorPID > 0 {
+			if v, _ := VerifyPIDFingerprint(op.ExecutorPID, op.ExecutorPIDStartTime); v == StatusStopped {
+				return nil, nil
 			}
 		}
 	}
 
-	// Unobserved supersession (design/05 Stage 4): a starting claim older
-	// than its process-start budget may be reclaimed if fresh evidence
-	// again finds nothing observable.
-	superseded := claim.Phase == PhaseStarting &&
+	// Completed-unobserved markers (design/05 Stage 4): Stage 4 finished
+	// with nothing observable — the operation was cleared and the spawn
+	// itself succeeded. Only such claims are supersedable, and only past
+	// their pinned budget.
+	completedUnobserved := claim.Phase == PhaseStarting &&
+		claim.Operation == nil && claim.SpawnState == SpawnStateSpawned
+	supersedable := completedUnobserved &&
 		!claim.ProcessStartDeadline.IsZero() && now.After(claim.ProcessStartDeadline)
+	supersedeWarning := fmt.Sprintf("superseded an unobserved launch of %s past its start budget; the abandoned store launch could still appear later", g.GameID)
+
+	// External snapshots' pinned hooks execute in the observed profile's
+	// context — GABS_PROFILE must carry the attribution, not an empty
+	// GABS-selected profile.
+	profile := claim.Profile
+	if claim.Source == SourceExternal && claim.ObservedProfile != "" && claim.ObservedProfile != ObservedProfileUnknown {
+		profile = claim.ObservedProfile
+	}
+	// Claimed-context evaluation uses only the snapshot: a hot config edit
+	// must never change how an existing launch is classified. Current
+	// config is a fallback only for legacy (pre-schema) claims.
+	name := claim.StopProcessName
+	if name == "" && claim.SchemaVersion == 0 {
+		name = g.StopProcessName
+	}
 
 	ev := EvaluateLiveness(LivenessInput{
 		GABPLive:        g.GABPLive,
 		Claim:           claim,
 		StatusHook:      claimStatusHook(claim),
 		GameID:          g.GameID,
-		Profile:         claim.Profile,
-		StopProcessName: g.StopProcessName,
+		Profile:         profile,
+		StopProcessName: name,
 		Now:             now,
 	})
 	switch ev.Verdict {
@@ -178,24 +232,43 @@ func gateExistingClaim(g StartGate, claim *RuntimeState, now time.Time) *StartRe
 		return &StartRefusal{
 			Code:             RefusalAlreadyRunning,
 			Message:          fmt.Sprintf("%s is already running (%s)", g.GameID, ev.Detail),
-			ActiveProfile:    claim.Profile,
+			Phase:            claim.Phase,
+			ActiveProfile:    profile,
 			RequestedProfile: g.RequestedProfile,
 			Evidence:         &ev,
-		}
+		}, nil
 	case StatusUnknown:
-		// "Nothing observable" on a superseded starting claim is the same
-		// absence that produced unobserved — reclaim. Unknown from failing
-		// evidence (a hook error, an uninspectable PID) still blocks.
-		if superseded && ev.Source == LivenessSourceNone {
-			return nil
+		if supersedable && ev.Source == LivenessSourceNone {
+			return nil, []string{supersedeWarning}
 		}
 		return &StartRefusal{
 			Code:     RefusalBlockedUnknown,
 			Message:  fmt.Sprintf("cannot determine whether %s is still running (%s); a claim exists, so uncertainty blocks the start — verify manually, then repair --forget-runtime if it is truly gone", g.GameID, ev.Detail),
+			Phase:    claim.Phase,
 			Evidence: &ev,
+		}, nil
+	default: // stopped
+		// Asymmetry for completed-unobserved claims (design/05 Stage 4):
+		// the same absence that produced unobserved must not read as
+		// stopped now — the store may still launch the game. Only positive
+		// stopped-evidence (a status hook verdict, or a recorded workload
+		// PID proven gone) clears early; absence waits for the threshold.
+		if completedUnobserved {
+			positive := ev.Source == LivenessSourceStatusHook ||
+				(ev.Source == LivenessSourcePID && claim.PIDRole == PIDRoleWorkload)
+			if !positive {
+				if supersedable {
+					return nil, []string{supersedeWarning}
+				}
+				return &StartRefusal{
+					Code:     RefusalBlockedUnknown,
+					Message:  fmt.Sprintf("a launch of %s is still unobserved within its start budget; the store launcher may yet start it — absence of evidence is not stopped here. Re-check games_status, or wait out the budget", g.GameID),
+					Phase:    claim.Phase,
+					Evidence: &ev,
+				}, nil
+			}
 		}
-	default: // stopped: stale claim, clear and proceed
-		return nil
+		return nil, nil
 	}
 }
 
@@ -206,12 +279,35 @@ func claimStatusHook(claim *RuntimeState) *launch.ResolvedHook {
 	return claim.Lifecycle.Status
 }
 
+// removeRuntimeStateIfLaunch removes the claim only while it still carries
+// the evaluated launch identity — a racing start's fresh claim survives.
+func removeRuntimeStateIfLaunch(gameID, configDir, launchID string) error {
+	lock, err := AcquireTransitionLock(gameID, configDir, transitionLockGateTimeout)
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+	cur, err := LoadRuntimeState(gameID, configDir)
+	if err != nil {
+		return err
+	}
+	if cur == nil {
+		return nil
+	}
+	if cur.LaunchID != launchID {
+		return ErrFencingViolation
+	}
+	return RemoveRuntimeState(gameID, configDir)
+}
+
 // runPreStartProbes probes every profile's status hook concurrently, each
 // under its own timeout and with its own GABS_PROFILE, plus the
 // stopProcessName check — the backstop for lost claims and straggler hooks.
 // The fresh claim is already held: concurrent starts see
-// operation_in_progress while probes run.
-func runPreStartProbes(g StartGate, now time.Time) ([]string, *StartRefusal, error) {
+// operation_in_progress while probes run. All claim rewrites carry the
+// fresh claim's fence identities: a slow probe must never convert a
+// successor launch into an unrelated snapshot.
+func runPreStartProbes(g StartGate, state *RuntimeState, now time.Time) ([]string, *StartRefusal, error) {
 	var warnings []string
 
 	type probeOutcome struct {
@@ -252,7 +348,10 @@ func runPreStartProbes(g StartGate, now time.Time) ([]string, *StartRefusal, err
 
 	if len(running) == 1 {
 		profile := running[0]
-		if err := persistExternalSnapshot(g, profile, g.Probes[profile], now); err != nil {
+		if err := persistExternalSnapshot(g, state, profile, g.Probes[profile], now); err != nil {
+			if errors.Is(err, ErrFencingViolation) {
+				return warnings, supersededDuringProbeRefusal(g), nil
+			}
 			return warnings, nil, err
 		}
 		return warnings, &StartRefusal{
@@ -265,7 +364,9 @@ func runPreStartProbes(g StartGate, now time.Time) ([]string, *StartRefusal, err
 	}
 	if len(running) > 1 {
 		// GABS never guesses among candidates: report all, persist nothing.
-		_ = RemoveRuntimeState(g.GameID, g.ConfigDir)
+		if err := removeRuntimeStateIfLaunch(g.GameID, g.ConfigDir, state.LaunchID); err != nil && !errors.Is(err, ErrFencingViolation) {
+			return warnings, nil, err
+		}
 		return warnings, &StartRefusal{
 			Code:             RefusalExternalInstance,
 			Message:          fmt.Sprintf("multiple profiles of %s report running (%s); resolve manually before starting", g.GameID, strings.Join(running, ", ")),
@@ -286,7 +387,10 @@ func runPreStartProbes(g StartGate, now time.Time) ([]string, *StartRefusal, err
 		case err != nil:
 			warnings = append(warnings, fmt.Sprintf("process scan for %q failed before starting: %v", g.StopProcessName, err))
 		case len(pids) == 1:
-			if err := persistExternalSnapshot(g, ObservedProfileUnknown, nil, now); err != nil {
+			if err := persistExternalSnapshot(g, state, ObservedProfileUnknown, nil, now); err != nil {
+				if errors.Is(err, ErrFencingViolation) {
+					return warnings, supersededDuringProbeRefusal(g), nil
+				}
 				return warnings, nil, err
 			}
 			return warnings, &StartRefusal{
@@ -296,7 +400,9 @@ func runPreStartProbes(g StartGate, now time.Time) ([]string, *StartRefusal, err
 				SnapshotPersisted: true,
 			}, nil
 		case len(pids) > 1:
-			_ = RemoveRuntimeState(g.GameID, g.ConfigDir)
+			if err := removeRuntimeStateIfLaunch(g.GameID, g.ConfigDir, state.LaunchID); err != nil && !errors.Is(err, ErrFencingViolation) {
+				return warnings, nil, err
+			}
 			candidates := make([]string, 0, len(pids))
 			for _, p := range pids {
 				candidates = append(candidates, fmt.Sprintf("pid %d", p))
@@ -313,6 +419,13 @@ func runPreStartProbes(g StartGate, now time.Time) ([]string, *StartRefusal, err
 	return warnings, nil, nil
 }
 
+func supersededDuringProbeRefusal(g StartGate) *StartRefusal {
+	return &StartRefusal{
+		Code:    RefusalOperationInFlight,
+		Message: fmt.Sprintf("the start of %s was superseded while pre-start probes ran; re-check games_status", g.GameID),
+	}
+}
+
 func profileLabel(profile string) string {
 	if profile == "" {
 		return "none"
@@ -324,8 +437,9 @@ func profileLabel(profile string) string {
 // external snapshot (design/07): phase active, source external, observed
 // profile, hooks pinned from current config, and truthfully absent
 // GABS-only fields — appliedLaunchInputsState is unavailable, never empty.
-func persistExternalSnapshot(g StartGate, observedProfile string, lc *launch.ResolvedLifecycle, now time.Time) error {
-	_, err := TransitionRuntimeState(g.GameID, g.ConfigDir, transitionLockGateTimeout, func(s *RuntimeState) error {
+// The rewrite is fenced on the fresh claim's identities.
+func persistExternalSnapshot(g StartGate, state *RuntimeState, observedProfile string, lc *launch.ResolvedLifecycle, now time.Time) error {
+	_, err := FencedTransition(g.GameID, g.ConfigDir, state.LaunchID, state.Operation.OperationID, func(s *RuntimeState) error {
 		s.Status = RuntimeStateStatusRunning
 		s.Phase = PhaseActive
 		s.Source = SourceExternal

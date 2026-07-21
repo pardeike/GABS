@@ -1,6 +1,7 @@
 package process
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -151,31 +152,130 @@ func TestGateStartDeadExecutorFallsThrough(t *testing.T) {
 	}
 }
 
+// completedUnobservedClaim models a Stage 4 unobserved outcome: spawn
+// succeeded, the attempt's operation was cleared, nothing was observed.
+func completedUnobservedClaim(gameID string, deadline time.Time) RuntimeState {
+	state := NewRuntimeState(m2Spec(gameID), RuntimeStateStatusStarting)
+	state.SpawnState = SpawnStateSpawned
+	state.Operation = nil
+	state.GamePID = 0
+	state.ProcessStartDeadline = deadline
+	return state
+}
+
 func TestGateStartUnobservedSupersession(t *testing.T) {
 	dir := t.TempDir()
-	// an unobserved starting claim past its budget, with nothing observable
-	spec := m2Spec("g7")
-	state := NewRuntimeState(spec, RuntimeStateStatusStarting)
-	state.GamePID = 0
-	state.ProcessStartDeadline = time.Now().Add(-time.Minute)
-	if err := ClaimRuntimeState("g7", dir, state); err != nil {
+	if err := ClaimRuntimeState("g7", dir, completedUnobservedClaim("g7", time.Now().Add(-time.Minute))); err != nil {
 		t.Fatal(err)
 	}
 	res, err := GateStart(gateFor("g7", dir))
 	if err != nil || res.Refusal != nil || res.Claim == nil {
 		t.Fatalf("expired unobserved claim with no evidence must be reclaimable: %+v %v", res, err)
 	}
+	// the reclaim is never silent: the abandoned launch may still appear
+	found := false
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "superseded") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("supersession must warn: %v", res.Warnings)
+	}
 
 	// the same claim within its budget still blocks
-	state2 := NewRuntimeState(spec, RuntimeStateStatusStarting)
-	state2.ProcessStartDeadline = time.Now().Add(time.Hour)
 	_ = RemoveRuntimeState("g7", dir)
-	if err := ClaimRuntimeState("g7", dir, state2); err != nil {
+	if err := ClaimRuntimeState("g7", dir, completedUnobservedClaim("g7", time.Now().Add(time.Hour))); err != nil {
 		t.Fatal(err)
 	}
 	res, err = GateStart(gateFor("g7", dir))
 	if err != nil || res.Refusal == nil || res.Refusal.Code != RefusalBlockedUnknown {
-		t.Fatalf("an unexpired starting claim must still block: %+v %v", res, err)
+		t.Fatalf("an unexpired unobserved claim must still block: %+v %v", res, err)
+	}
+}
+
+func TestGateStartSpawningCrashWindowNotSupersedable(t *testing.T) {
+	dir := t.TempDir()
+	// a crash during spawn: operation still present (dead executor),
+	// spawnState=spawning, budget long past — the genuinely-unknown window
+	// must remain occupied, never be reclaimed as unobserved (design/05
+	// Stage 3).
+	state := NewRuntimeState(m2Spec("g7s"), RuntimeStateStatusStarting)
+	state.SpawnState = SpawnStateSpawning
+	state.Operation = &RuntimeOperation{
+		OperationID: NewFencingID(), Action: OperationActionStart,
+		ExecutorPID: 99999999, ExecutorPIDStartTime: 12345,
+		AttemptStartedAt: time.Now().Add(-time.Hour), Deadline: time.Now().Add(-time.Hour),
+	}
+	state.ProcessStartDeadline = time.Now().Add(-time.Hour)
+	if err := ClaimRuntimeState("g7s", dir, state); err != nil {
+		t.Fatal(err)
+	}
+	res, err := GateStart(gateFor("g7s", dir))
+	if err != nil || res.Refusal == nil || res.Refusal.Code != RefusalBlockedUnknown {
+		t.Fatalf("the spawning crash window must stay occupied: %+v %v", res, err)
+	}
+}
+
+func TestGateStartUnobservedAbsenceIsNotStopped(t *testing.T) {
+	dir := t.TempDir()
+	// URL-mode unobserved claim within budget, with a pinned name whose
+	// scan cleanly finds nothing: that absence produced unobserved in the
+	// first place and must not clear the claim now (design/05 Stage 4).
+	swapLivenessProbes(t, nil, nil, func(string) ([]int, error) { return nil, nil })
+	state := completedUnobservedClaim("g7a", time.Now().Add(time.Hour))
+	state.PIDRole = PIDRoleHelper
+	state.StopProcessName = "game-bin"
+	if err := ClaimRuntimeState("g7a", dir, state); err != nil {
+		t.Fatal(err)
+	}
+	res, err := GateStart(gateFor("g7a", dir))
+	if err != nil || res.Refusal == nil || res.Refusal.Code != RefusalBlockedUnknown {
+		t.Fatalf("absence-based stopped must not clear an unobserved claim early: %+v %v", res, err)
+	}
+
+	// past the budget the same absence supersedes, with the warning
+	_ = RemoveRuntimeState("g7a", dir)
+	state = completedUnobservedClaim("g7a", time.Now().Add(-time.Minute))
+	state.PIDRole = PIDRoleHelper
+	state.StopProcessName = "game-bin"
+	if err := ClaimRuntimeState("g7a", dir, state); err != nil {
+		t.Fatal(err)
+	}
+	res, err = GateStart(gateFor("g7a", dir))
+	if err != nil || res.Refusal != nil || res.Claim == nil {
+		t.Fatalf("past the budget the absence supersedes: %+v %v", res, err)
+	}
+
+	// but a positive hook-stopped verdict clears even within budget
+	installProbeFake(t)
+	_ = RemoveRuntimeState("g7a", dir)
+	state = completedUnobservedClaim("g7a", time.Now().Add(time.Hour))
+	state.Lifecycle = probeHookLifecycle(StatusStopped)
+	if err := ClaimRuntimeState("g7a", dir, state); err != nil {
+		t.Fatal(err)
+	}
+	res, err = GateStart(gateFor("g7a", dir))
+	if err != nil || res.Refusal != nil || res.Claim == nil {
+		t.Fatalf("positive hook-stopped evidence clears an unobserved claim: %+v %v", res, err)
+	}
+}
+
+func TestGateStartExecutorInspectionFailureBlocks(t *testing.T) {
+	dir := t.TempDir()
+	swapLivenessProbes(t, nil, func(int) (int64, error) { return 0, errors.New("EPERM") }, nil)
+	state := NewRuntimeState(m2Spec("g7e"), RuntimeStateStatusStarting)
+	state.Operation = &RuntimeOperation{
+		OperationID: NewFencingID(), Action: OperationActionStart,
+		ExecutorPID: 12345, ExecutorPIDStartTime: 99,
+		AttemptStartedAt: time.Now().UTC(), Deadline: time.Now().Add(time.Hour),
+	}
+	if err := ClaimRuntimeState("g7e", dir, state); err != nil {
+		t.Fatal(err)
+	}
+	res, err := GateStart(gateFor("g7e", dir))
+	if err != nil || res.Refusal == nil || res.Refusal.Code != RefusalBlockedUnknown {
+		t.Fatalf("an uninspectable executor is not a dead executor: %+v %v", res, err)
 	}
 }
 
@@ -318,5 +418,54 @@ func TestFencedTransition(t *testing.T) {
 	}
 	if after, _ := LoadRuntimeState("g13", dir); after.SpawnState != SpawnStateSpawning {
 		t.Fatalf("fenced-off mutations must not persist: %+v", after)
+	}
+}
+
+func TestRemoveRuntimeStateIfLaunchFenced(t *testing.T) {
+	dir := t.TempDir()
+	state := NewRuntimeState(m2Spec("g14"), RuntimeStateStatusStarting)
+	if err := ClaimRuntimeState("g14", dir, state); err != nil {
+		t.Fatal(err)
+	}
+	// a mismatched identity must not remove someone else's claim
+	if err := removeRuntimeStateIfLaunch("g14", dir, NewFencingID()); err != ErrFencingViolation {
+		t.Fatalf("mismatched launch identity must be fenced: %v", err)
+	}
+	if claim, _ := LoadRuntimeState("g14", dir); claim == nil {
+		t.Fatalf("fenced removal must not delete the claim")
+	}
+	if err := removeRuntimeStateIfLaunch("g14", dir, state.LaunchID); err != nil {
+		t.Fatal(err)
+	}
+	if claim, _ := LoadRuntimeState("g14", dir); claim != nil {
+		t.Fatalf("matching identity must remove")
+	}
+}
+
+func TestGateStartSnapshotFencedAgainstMidProbeReplacement(t *testing.T) {
+	dir := t.TempDir()
+	// the probe hook replaces the claim while running — the stale probe
+	// must NOT convert the successor into an external snapshot
+	prev := runStatusHookFunc
+	runStatusHookFunc = func(h *launch.ResolvedHook, gameID, profile string) (string, HookResult) {
+		_ = RemoveRuntimeState("g15", dir)
+		replacement := NewRuntimeState(m2Spec("g15"), RuntimeStateStatusStarting)
+		_ = ClaimRuntimeState("g15", dir, replacement)
+		return StatusRunning, HookResult{}
+	}
+	t.Cleanup(func() { runStatusHookFunc = prev })
+
+	g := gateFor("g15", dir)
+	g.Probes = map[string]*launch.ResolvedLifecycle{"p": probeHookLifecycle(StatusRunning)}
+	res, err := GateStart(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Refusal == nil || res.Refusal.SnapshotPersisted {
+		t.Fatalf("a superseded probe must not persist a snapshot: %+v", res.Refusal)
+	}
+	claim, _ := LoadRuntimeState("g15", dir)
+	if claim == nil || claim.Source == SourceExternal {
+		t.Fatalf("the successor claim must survive untouched: %+v", claim)
 	}
 }

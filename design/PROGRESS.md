@@ -214,11 +214,40 @@ contract, not a scratchpad.
       verification and bridge-wait paths, unobserved (URL modes,
       ProcessErrorTypeUnobserved) keeps the claim in phase starting
       with the operation cleared; Stage 5 outcome codes
-      started_connected / started_bridge_pending. Remaining: the Steam
+      started_connected / started_bridge_pending. Review round 5 closed
+      the contract holes: supersession now requires the completed-
+      unobserved markers (Operation nil + spawnState spawned) so the
+      spawning crash window stays occupied; absence-based stopped
+      (empty name scan) never clears a completed-unobserved claim
+      before its threshold and the reclaim carries a warning; stale-
+      claim deletion and external-snapshot publication are fenced on
+      the evaluated/held launch identity (a mid-probe replacement can
+      no longer be converted or deleted); a failed spawning transition
+      ABORTS the spawn (beforeSpawn returns error); the GABP token
+      rotates every launch with only the port reusable; the runtime
+      claim is the authoritative games_connect endpoint source
+      (bridge.json demoted to fallback); one configured budget feeds
+      both the claim deadlines and the starter's verification wait;
+      Stage 4 assesses through the unified pinned liveness rule (hook
+      consulted — wrapper-exit-with-hook-running is adopted-verified,
+      hook-stopped is exited with hook evidence, absence is unobserved
+      for any mode) and Stage 5 death is judged by liveness (unknown
+      keeps the claim as bridge-pending); adoption is defined by
+      child-exit + observation, not launch mode; external snapshots'
+      hooks execute with the observed profile; GABP evidence requires
+      a connected client, not map membership; an uninspectable
+      executor blocks instead of reading as dead; claim-race losers
+      re-evaluate the winner instead of fabricating a result;
+      schema-2 claims are status-resolved by the liveness rule (hook-
+      only external snapshots stay addressable; a mutex self-deadlock
+      in that path was caught by the suite and fixed by threading
+      GABP liveness); operation_in_progress renders phase;
+      endpoint_unavailable is a stable code on all endpoint failures;
+      exited_during_start carries resolved context, probe warnings,
+      hook evidence, and next actions. Remaining: the Steam
       not-running advisory lands with M2.15's EnsureClientRunning
-      demotion; post-spawn stopped-by-hook verification and the passive
-      unobserved→active promotion on a later bridge connection land
-      with M2.6/M2.7's status+connect work)
+      demotion; the passive unobserved→active promotion on a later
+      bridge connection lands with M2.6/M2.7's status+connect work)
 - [ ] M2.6 Stop/kill: verification matrix, probe clipping,
       lastActionResult, stop_unsupported/kill_unsupported,
       operation_in_progress semantics — spec: 06; tests: T-LIFE, T-FENCE

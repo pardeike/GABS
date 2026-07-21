@@ -16,7 +16,7 @@ type ControllerInterface interface {
 	IsLauncherProcessRunning() bool
 	FinalEnvironment() []string
 	LaunchLogTail(maxBytes int64) string
-	SetSpawnObservers(before func(), after func(pid int, startTime int64, spawnErr error))
+	SetSpawnObservers(before func() error, after func(pid int, startTime int64, spawnErr error))
 	DirectChildExited() bool
 	ExitCode() int
 }

@@ -555,3 +555,22 @@ func TestStartPipelineExitedDuringStart(t *testing.T) {
 		t.Fatalf("claim must be released on exited_during_start: %+v", claim)
 	}
 }
+
+func TestConnectEndpointComesFromRuntimeClaim(t *testing.T) {
+	s := newProfiledServer(t)
+	game := config.GameConfig{ID: "a", Name: "A", LaunchMode: "DirectPath", Target: "/bin/echo"}
+
+	// The claim is the authoritative attachment source (design/07): after a
+	// CLI start or a server restart it carries the per-launch endpoint.
+	claim := &process.RuntimeState{
+		GameID: "a", SchemaVersion: process.RuntimeSchemaVersion,
+		Endpoint: &process.RuntimeEndpoint{Port: 45678, Token: "claim-token"},
+	}
+	endpoint, err := s.resolveConnectBridgeEndpoint(game, claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if endpoint.Port != 45678 || endpoint.Token != "claim-token" || endpoint.Source != "runtime-claim" {
+		t.Fatalf("claim endpoint must win: %+v", endpoint)
+	}
+}

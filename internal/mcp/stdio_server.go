@@ -453,6 +453,7 @@ func bridgeEndpointInUseResult(game config.GameConfig, endpointErr *config.Bridg
 			Text: fmt.Sprintf("GABS endpoint cache for game '%s' uses port %d, but that port is already listening. This session did not start another process because the cached endpoint may belong to an already-running game-side bridge. Use games_connect to attach, or start again with resetEndpoint only after confirming that the cached endpoint should be rotated.", game.ID, endpointErr.Port),
 		}},
 		StructuredContent: map[string]interface{}{
+			"code":   "endpoint_unavailable",
 			"gameId": game.ID,
 			"status": "endpoint_cache_in_use",
 			"port":   endpointErr.Port,
@@ -1079,11 +1080,21 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 					"code":     "exited_during_start",
 					"gameId":   game.ID,
 					"exitCode": exitedErr.exitCode,
+					"nextActions": []map[string]interface{}{
+						mcpNextAction("games_show", map[string]interface{}{"gameId": game.ID}, "Review the launch configuration that produced this exit."),
+					},
 				}
 				if exitedErr.tail != "" {
 					structured["outputTail"] = exitedErr.tail
 				}
+				if exitedErr.hookEvidence != "" {
+					structured["hookEvidence"] = exitedErr.hookEvidence
+				}
+				if len(exitedErr.warnings) > 0 {
+					structured["startWarnings"] = exitedErr.warnings
+				}
 				addValidationWarnings(structured, validationWarnings)
+				addResolvedContext(structured, resolved)
 				return &ToolResult{
 					Content:           []Content{{Type: "text", Text: fmt.Sprintf("'%s' exited during start (exit code %d). Typical causes: crash, missing or corrupt data/save, mod loader failure, DRM refusing to run outside its launcher, anti-cheat rejecting a modified process, or a required online login. Output tail:\n%s", game.ID, exitedErr.exitCode, exitedErr.tail)}},
 					IsError:           true,
@@ -1115,6 +1126,16 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			var endpointErr *config.BridgeEndpointInUseError
 			if errors.As(err, &endpointErr) {
 				return bridgeEndpointInUseResult(*game, endpointErr), nil
+			}
+			var epErr *endpointUnavailableError
+			if errors.As(err, &epErr) {
+				return &ToolResult{
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("Cannot start %s: %v", game.ID, epErr)}},
+					IsError: true,
+					StructuredContent: map[string]interface{}{
+						"code": "endpoint_unavailable", "gameId": game.ID, "detail": epErr.err.Error(),
+					},
+				}, nil
 			}
 			var sizeIssue *launch.SpecSizeIssue
 			if errors.As(err, &sizeIssue) {
@@ -3852,6 +3873,57 @@ func (s *Server) HandleUnexpectedGABPDisconnect(gameID string, client *gabp.Clie
 	s.log.Warnw("unexpected GABP disconnect", "gameId", gameID, "error", err)
 }
 
+// resolveClaimStatusByLiveness judges a current-schema claim by the one
+// liveness rule over its pinned context (design/04) — never the legacy
+// PID/name-only resolver, which would delete a hook-only external snapshot
+// as stale without ever running its pinned status hook. unknown never
+// cleans state; absence never clears a completed-unobserved claim.
+func (s *Server) resolveClaimStatusByLiveness(gameID string, claim *process.RuntimeState, gabpLive bool) string {
+	var hook *launch.ResolvedHook
+	if claim.Lifecycle != nil {
+		hook = claim.Lifecycle.Status
+	}
+	profile := claim.Profile
+	if claim.Source == process.SourceExternal && claim.ObservedProfile != "" && claim.ObservedProfile != process.ObservedProfileUnknown {
+		profile = claim.ObservedProfile
+	}
+	ev := process.EvaluateLiveness(process.LivenessInput{
+		GABPLive:   gabpLive,
+		Claim:      claim,
+		StatusHook: hook,
+		GameID:     gameID,
+		Profile:    profile,
+	})
+	switch ev.Verdict {
+	case process.StatusRunning:
+		if claim.Phase == process.PhaseStarting {
+			return process.RuntimeStateStatusStarting
+		}
+		return process.RuntimeStateStatusRunning
+	case process.StatusUnknown:
+		if claim.Phase == process.PhaseStarting {
+			return process.RuntimeStateStatusStarting
+		}
+		return "unknown"
+	default: // stopped
+		// Completed-unobserved asymmetry (design/05 Stage 4): absence-based
+		// stopped never clears the claim — only positive evidence does.
+		if claim.Phase == process.PhaseStarting && claim.Operation == nil && claim.SpawnState == process.SpawnStateSpawned {
+			positive := ev.Source == process.LivenessSourceStatusHook ||
+				(ev.Source == process.LivenessSourcePID && claim.PIDRole == process.PIDRoleWorkload)
+			if !positive {
+				return process.RuntimeStateStatusStarting
+			}
+		}
+		if err := process.RemoveRuntimeState(gameID, s.configDir); err != nil {
+			s.log.Warnw("failed to remove stopped runtime claim", "gameId", gameID, "error", err)
+			return ""
+		}
+		s.log.Debugw("removed stopped runtime claim", "gameId", gameID, "evidence", ev.Detail)
+		return "stale-runtime-cleaned"
+	}
+}
+
 func (s *Server) resolveSharedRuntimeStatus(gameID string) string {
 	runtimeState, err := process.LoadRuntimeState(gameID, s.configDir)
 	if err != nil {
@@ -3860,6 +3932,13 @@ func (s *Server) resolveSharedRuntimeStatus(gameID string) string {
 	}
 	if runtimeState == nil {
 		return ""
+	}
+
+	if runtimeState.SchemaVersion >= process.RuntimeSchemaVersion {
+		// Reaching here means no GABP client entry exists for this game
+		// (checkGameStatus returns earlier otherwise) — and this path runs
+		// under s.mu, so it must not re-acquire the lock itself.
+		return s.resolveClaimStatusByLiveness(gameID, runtimeState, false)
 	}
 
 	status := process.ResolveRuntimeStateStatus(runtimeState)
@@ -3929,6 +4008,9 @@ func (s *Server) startRefusalResult(game config.GameConfig, e *startRefusalError
 			"detail":  ref.Evidence.Detail,
 		}
 	}
+	if ref.Phase != "" {
+		structured["phase"] = ref.Phase
+	}
 	if op := ref.Operation; op != nil {
 		structured["operation"] = map[string]interface{}{
 			"action":           op.Action,
@@ -3986,13 +4068,28 @@ func (e *unobservedStartError) Error() string {
 
 // exitedDuringStartError carries the Stage 4 exit evidence.
 type exitedDuringStartError struct {
-	exitCode int
-	tail     string
+	exitCode     int
+	tail         string
+	hookEvidence string
+	warnings     []string
 }
 
 func (e *exitedDuringStartError) Error() string {
 	return fmt.Sprintf("exited during start (exit code %d)", e.exitCode)
 }
+
+// endpointUnavailableError is the structured Stage 2 endpoint-allocation
+// failure (design/05): port exhaustion, filesystem failure, occupied cache.
+type endpointUnavailableError struct {
+	gameID string
+	err    error
+}
+
+func (e *endpointUnavailableError) Error() string {
+	return fmt.Sprintf("failed to prepare GABS endpoint for game '%s': %v", e.gameID, e.err)
+}
+
+func (e *endpointUnavailableError) Unwrap() error { return e.err }
 
 func (s *Server) cleanupRuntimeStateInternal(gameId string) {
 	if err := process.RemoveRuntimeState(gameId, s.configDir); err != nil {
@@ -4038,6 +4135,19 @@ func (s *Server) adoptProcessBridgeEndpointFromDiagnostic(game config.GameConfig
 }
 
 func (s *Server) resolveConnectBridgeEndpoint(game config.GameConfig, runtimeState *process.RuntimeState) (bridgeEndpoint, error) {
+	// The runtime claim is the authoritative attachment source (design/07):
+	// it carries the per-launch endpoint after a CLI start or a server
+	// restart. Process-environment inspection and bridge.json are
+	// corroboration/diagnostic fallbacks for claims without an endpoint.
+	if runtimeState != nil && runtimeState.Endpoint != nil &&
+		runtimeState.Endpoint.Port > 0 && strings.TrimSpace(runtimeState.Endpoint.Token) != "" {
+		return bridgeEndpoint{
+			Port:   runtimeState.Endpoint.Port,
+			Token:  runtimeState.Endpoint.Token,
+			Source: "runtime-claim",
+			PID:    runtimeState.GamePID,
+		}, nil
+	}
 	processEnv := s.inspectGameBridgeEnvironment(game, runtimeState)
 	endpoint, _ := s.adoptProcessBridgeEndpointFromDiagnostic(game, processEnv, bridgeEndpoint{})
 	if endpoint.Port > 0 && strings.TrimSpace(endpoint.Token) != "" {
@@ -4285,13 +4395,27 @@ func processStartBudget(mode string) time.Duration {
 	return 10 * time.Second
 }
 
+// startBudgetFor returns the single process-start budget used for BOTH the
+// claim's pinned deadlines and the starter's verification wait — a claim
+// deadline that outlives (or undercuts) the actual wait enables incorrect
+// concurrent gating and supersession. Explicit config wins for all modes.
+func (s *Server) startBudgetFor(mode string) time.Duration {
+	if s.gamesConfig != nil && s.gamesConfig.Timeouts != nil &&
+		s.gamesConfig.Timeouts.Startup != nil && s.gamesConfig.Timeouts.Startup.ProcessStartSeconds > 0 {
+		return time.Duration(s.gamesConfig.Timeouts.Startup.ProcessStartSeconds) * time.Second
+	}
+	return processStartBudget(mode)
+}
+
 func isURLMode(mode string) bool { return mode == "SteamAppId" || mode == "EpicAppId" }
 
 func (s *Server) hasLiveGABPClient(gameID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, ok := s.gabpClients[gameID]
-	return ok
+	client, ok := s.gabpClients[gameID]
+	// A disconnected client can linger in the map: membership is not proof
+	// of a live bridge, and stale GABP evidence would refuse starts forever.
+	return ok && client != nil && client.IsConnected()
 }
 
 // stampSpawnState applies a fenced claim mutation; a fencing violation
@@ -4318,6 +4442,7 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	// Stage 2 (design/05): claim gating by the liveness rule, complete
 	// pre-spawn claim with operation stamping, then all-profile probing +
 	// stopProcessName as the lost-claim backstop.
+	startBudget := s.startBudgetFor(game.LaunchMode)
 	gateRes, err := process.GateStart(process.StartGate{
 		GameID:           game.ID,
 		ConfigDir:        s.configDir,
@@ -4325,7 +4450,7 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 		RequestedProfile: launchSpec.Profile,
 		GABPLive:         s.hasLiveGABPClient(game.ID),
 		Spec:             launchSpec,
-		Budget:           processStartBudget(game.LaunchMode),
+		Budget:           startBudget,
 		Probes:           launch.ResolveProfileLifecycles(&game),
 		StopProcessName:  game.StopProcessName,
 	})
@@ -4362,7 +4487,7 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	// Failure is structured and the claim is released (deferred cleanup).
 	port, token, bridgePath, reusedBridge, err := config.PrepareBridgeEndpointForStart(game.ID, s.configDir, s.gamesConfig, resetEndpoint)
 	if err != nil {
-		return nil, fmt.Errorf("failed to prepare GABS endpoint cache for game '%s': %w", game.ID, err)
+		return nil, &endpointUnavailableError{gameID: game.ID, err: err}
 	}
 
 	if reusedBridge {
@@ -4399,12 +4524,17 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 		}
 	}
 
-	// Stage 3: spawnState transitions bracket OS process creation.
+	// Stage 3: spawnState transitions bracket OS process creation. The
+	// pre-spawn transition must succeed — spawning against an unpublished
+	// or superseded claim would orphan a real workload behind a claim that
+	// recovery considers safely removable.
 	controller.SetSpawnObservers(
-		func() {
-			s.stampSpawnState(game.ID, launchID, opID, func(st *process.RuntimeState) {
+		func() error {
+			_, terr := process.FencedTransition(game.ID, s.configDir, launchID, opID, func(st *process.RuntimeState) error {
 				st.SpawnState = process.SpawnStateSpawning
+				return nil
 			})
+			return terr
 		},
 		func(pid int, startTime int64, spawnErr error) {
 			s.stampSpawnState(game.ID, launchID, opID, func(st *process.RuntimeState) {
@@ -4418,39 +4548,99 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 			})
 		})
 
-	result := s.starter.StartWithVerificationWithTimeouts(controller, nil, game.ID, port, token, 0, 0)
+	result := s.starter.StartWithVerificationWithTimeouts(controller, nil, game.ID, port, token, startBudget, 0)
 	if result != nil {
 		result.StartWarnings = startWarnings
 	}
-	if result.Error != nil {
-		var procErr *process.ProcessError
-		if errors.As(result.Error, &procErr) && procErr.Type == process.ProcessErrorTypeUnobserved && isURLMode(game.LaunchMode) {
-			// Stage 4 unobserved: the claim is KEPT in phase starting; a
-			// later observation promotes it, the supersession policy or
-			// repair clears it — never a no-evidence status pass (design/05).
-			cleanupRuntimeState = false
-			if _, ferr := process.FencedTransition(game.ID, s.configDir, launchID, opID, func(st *process.RuntimeState) error {
-				st.Operation = nil // the attempt is over; the deadline governs reclaim
-				return nil
-			}); ferr != nil {
-				s.log.Warnw("failed to finalize unobserved claim", "gameId", game.ID, "error", ferr)
-			}
-			return result, &unobservedStartError{warnings: startWarnings}
+
+	// assessWorkload runs Stage 4 over the unified, pinned liveness
+	// sources (design/05): the claim's status hook and built-in evidence —
+	// never just the direct PID and current-config name.
+	assessWorkload := func() process.LivenessEvidence {
+		claim, _ := process.LoadRuntimeState(game.ID, s.configDir)
+		if claim == nil {
+			claim = &runtimeState
 		}
-		return result, fmt.Errorf("failed to start game '%s' (mode: %s, target: %s): %w",
-			game.ID, game.LaunchMode, game.Target, result.Error)
+		var hook *launch.ResolvedHook
+		if launchSpec.Lifecycle != nil {
+			hook = launchSpec.Lifecycle.Status
+		}
+		return process.EvaluateLiveness(process.LivenessInput{
+			Claim:      claim,
+			StatusHook: hook,
+			GameID:     game.ID,
+			Profile:    launchSpec.Profile,
+		})
 	}
-	if !result.GameStillRunning {
-		return result, &exitedDuringStartError{
+	// keepClaimUnobserved finalizes the Stage 4 unobserved outcome: the
+	// claim is KEPT in phase starting; a later observation promotes it,
+	// the supersession policy or repair clears it — never a no-evidence
+	// status pass (design/05).
+	keepClaimUnobserved := func() (*process.ProcessStartResult, error) {
+		cleanupRuntimeState = false
+		if _, ferr := process.FencedTransition(game.ID, s.configDir, launchID, opID, func(st *process.RuntimeState) error {
+			st.Operation = nil // the attempt is over; the deadline governs reclaim
+			return nil
+		}); ferr != nil {
+			s.log.Warnw("failed to finalize unobserved claim", "gameId", game.ID, "error", ferr)
+		}
+		return result, &unobservedStartError{warnings: startWarnings}
+	}
+	exitedFailure := func(ev *process.LivenessEvidence) (*process.ProcessStartResult, error) {
+		e := &exitedDuringStartError{
 			exitCode: controller.ExitCode(),
 			tail:     controller.LaunchLogTail(16 * 1024),
+			warnings: startWarnings,
+		}
+		if ev != nil && ev.Source == process.LivenessSourceStatusHook {
+			e.hookEvidence = ev.Detail
+		}
+		return result, e
+	}
+
+	if result.Error != nil {
+		var procErr *process.ProcessError
+		if errors.As(result.Error, &procErr) && procErr.Type == process.ProcessErrorTypeUnobserved {
+			ev := assessWorkload()
+			switch ev.Verdict {
+			case process.StatusRunning:
+				// the workload is observable (hook or name) even though the
+				// starter's own tracking gave up — verified, likely adopted
+				result.Error = nil
+				result.ProcessStarted = true
+				result.GameStillRunning = true
+			case process.StatusStopped:
+				if ev.Source == process.LivenessSourceStatusHook {
+					return exitedFailure(&ev) // stopped-by-hook after spawn
+				}
+				return keepClaimUnobserved() // absence, not positive evidence
+			default:
+				return keepClaimUnobserved()
+			}
+		} else if errors.Is(result.Error, process.ErrFencingViolation) {
+			cleanupRuntimeState = false
+			return result, fmt.Errorf("launch of '%s' was superseded before spawn", game.ID)
+		} else {
+			return result, fmt.Errorf("failed to start game '%s' (mode: %s, target: %s): %w",
+				game.ID, game.LaunchMode, game.Target, result.Error)
+		}
+	}
+	if !result.GameStillRunning {
+		ev := assessWorkload()
+		switch ev.Verdict {
+		case process.StatusRunning:
+			result.GameStillRunning = true // adopted: workload observed
+		case process.StatusUnknown:
+			return keepClaimUnobserved() // nothing observable is not an exit
+		default:
+			return exitedFailure(&ev)
 		}
 	}
 
-	// Adoption (design/05 Stage 4): the direct child exited but the
-	// workload is observable — normal for launcher chains and Steam
-	// re-execs; injected context may not have survived.
-	adopted := (isURLMode(game.LaunchMode) || game.LaunchMode == "SteamManaged") && controller.DirectChildExited()
+	// Adoption (design/05 Stage 4): defined by the direct child exiting
+	// while the workload stays observable — wrappers on ANY mode cross
+	// exactly the boundary where injected args/env can be lost.
+	adopted := controller.DirectChildExited()
 	result.Adopted = adopted
 
 	_, defaultGABPTimeout := s.starter.GetTimeouts()
@@ -4502,12 +4692,20 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	result.ProcessExitedDuringGABP = connectResult.ProcessExitedDuringGABP
 
 	if !result.GameStillRunning {
-		// Stage 5: workload died while waiting for the bridge — failure
-		// with exit evidence, claim cleared (design/05).
-		cleanupRuntimeState = true
-		return result, &exitedDuringStartError{
-			exitCode: controller.ExitCode(),
-			tail:     controller.LaunchLogTail(16 * 1024),
+		// Stage 5: the workload looks dead while waiting for the bridge —
+		// judged by the pinned liveness rule: proven death fails with exit
+		// evidence and clears the claim; unknown keeps the claim and falls
+		// through as bridge-pending (design/05).
+		ev := assessWorkload()
+		switch ev.Verdict {
+		case process.StatusRunning:
+			result.GameStillRunning = true
+			result.Adopted = result.Adopted || controller.DirectChildExited()
+		case process.StatusStopped:
+			cleanupRuntimeState = true
+			return exitedFailure(&ev)
+		default:
+			// unknown never cleans state; status/connect will resolve it
 		}
 	}
 
