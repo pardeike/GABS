@@ -252,7 +252,17 @@ func NewNewlineFrameReader(r io.Reader) *NewlineFrameReader {
 func UnmarshalPreservingNumbers(data []byte, obj interface{}) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
-	return dec.Decode(obj)
+	if err := dec.Decode(obj); err != nil {
+		return err
+	}
+	// json.Unmarshal semantics: exactly one value. Decoder.Decode stops at
+	// the first value, so trailing data must be rejected explicitly or a
+	// second message would be silently discarded.
+	var trailing json.RawMessage
+	if err := dec.Decode(&trailing); err != io.EOF {
+		return fmt.Errorf("unexpected data after JSON message")
+	}
+	return nil
 }
 
 // ReadJSON reads one newline-delimited JSON message

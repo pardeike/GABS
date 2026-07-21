@@ -286,8 +286,25 @@ func (c *Controller) buildEnvironment() []string {
 		managed["SystemRoot"] = systemRoot
 		managed["WINDIR"] = windir
 	}
-	if len(c.spec.AbsentEnvNames) > 0 {
-		managed["GABS_ABSENT_ENV"] = strings.Join(c.spec.AbsentEnvNames, ",")
+	// Final absence is computed against the managed layer: a config unset
+	// of a managed name (SteamAppId, SystemRoot) is re-added above, and
+	// exporting it as both present and must-be-absent would hand wrappers
+	// and delivery verification contradictory metadata (design/03).
+	absent := make([]string, 0, len(c.spec.AbsentEnvNames))
+	for _, name := range c.spec.AbsentEnvNames {
+		reAdded := false
+		for k := range managed {
+			if k == name || (runtime.GOOS == "windows" && strings.EqualFold(k, name)) {
+				reAdded = true
+				break
+			}
+		}
+		if !reAdded {
+			absent = append(absent, name)
+		}
+	}
+	if len(absent) > 0 {
+		managed["GABS_ABSENT_ENV"] = strings.Join(absent, ",")
 	}
 
 	// GABS_FORWARD_ENV: every name a wrapper must carry across a filtering

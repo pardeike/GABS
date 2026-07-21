@@ -252,15 +252,29 @@ func SaveGamesConfigToPath(config *GamesConfig, configPath string) error {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	// Write atomically
-	tempPath := configPath + ".tmp"
-	// 0600: config may hold environment values (design/20).
-	if err := os.WriteFile(tempPath, data, 0600); err != nil {
+	// Write atomically via a fresh uniquely named temp file. A fixed name
+	// reused across saves could carry an old loose mode through the rename
+	// (os.WriteFile only applies 0600 on create); config may hold
+	// environment values (design/20) and must never publish world-readable.
+	tmp, err := os.CreateTemp(configDir, ".config-*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temp config: %w", err)
+	}
+	tempPath := tmp.Name()
+	defer os.Remove(tempPath)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
 		return fmt.Errorf("failed to write temp config: %w", err)
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("failed to set temp config mode: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("failed to close temp config: %w", err)
 	}
 
 	if err := os.Rename(tempPath, configPath); err != nil {
-		os.Remove(tempPath) // cleanup
 		return fmt.Errorf("failed to rename temp config: %w", err)
 	}
 

@@ -123,3 +123,53 @@ func TestHookCommandPathPinning(t *testing.T) {
 		t.Fatalf("unresolvable command must keep literal, got %q", r.Lifecycle.Status.Command)
 	}
 }
+
+func TestCheckResolvabilityHooks(t *testing.T) {
+	dir := t.TempDir()
+	target := writeExec(t, dir, "game-bin")
+	hookExe := writeExec(t, dir, "status-hook")
+
+	game := config.GameConfig{ID: "g", Name: "G", LaunchMode: "DirectPath", Target: target}
+
+	// bare command absent from PATH: the resolution-time pin failed and
+	// Stage 1 must say so, not persist an unusable hook
+	r := &Resolved{Lifecycle: &ResolvedLifecycle{
+		Status: &ResolvedHook{Command: "definitely-not-on-path-xyz"},
+	}}
+	issues := CheckResolvability(&game, r)
+	if len(issues) != 1 || issues[0].JSONPath != "/games/g/lifecycle/status/command" {
+		t.Fatalf("missing PATH hook must fail Stage 1 with its JSON path: %v", issues)
+	}
+
+	// path-containing missing command
+	r = &Resolved{Lifecycle: &ResolvedLifecycle{
+		Stop: &ResolvedHook{Command: filepath.Join(dir, "missing-hook")},
+	}}
+	issues = CheckResolvability(&game, r)
+	if len(issues) != 1 || issues[0].JSONPath != "/games/g/lifecycle/stop/command" ||
+		issues[0].FSPath != filepath.Join(dir, "missing-hook") {
+		t.Fatalf("missing hook path must fail with fs path: %v", issues)
+	}
+
+	// resolvable hook passes
+	r = &Resolved{Lifecycle: &ResolvedLifecycle{
+		Status: &ResolvedHook{Command: hookExe},
+	}}
+	if issues = CheckResolvability(&game, r); len(issues) != 0 {
+		t.Fatalf("existing executable hook must pass: %v", issues)
+	}
+
+	// profile override reports the profile's JSON path
+	game.Profiles = map[string]config.ProfileConfig{
+		"p": {Description: "d", Lifecycle: &config.LifecycleConfig{
+			Kill: &config.HookConfig{Command: "x"},
+		}},
+	}
+	r = &Resolved{Profile: "p", Lifecycle: &ResolvedLifecycle{
+		Kill: &ResolvedHook{Command: filepath.Join(dir, "gone")},
+	}}
+	issues = CheckResolvability(&game, r)
+	if len(issues) != 1 || issues[0].JSONPath != "/games/g/profiles/p/lifecycle/kill/command" {
+		t.Fatalf("profile-override hook must report the profile path: %v", issues)
+	}
+}

@@ -12,10 +12,7 @@ permissions:
 
 jobs:
   test:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v6.0.2
@@ -30,3 +27,30 @@ jobs:
 
       - name: Run tests
         run: go test -v ./...
+
+  # Windows runs vet/build plus the process package, where all the
+  # Windows-specific lifecycle code lives (Job Objects, LockFileEx,
+  # GetProcessTimes, cmd.exe hooks). The wider suite's fixtures are
+  # unix-pathed and not yet ported; widen this lane as they are.
+  test-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@v6.3.0
+        with:
+          go-version: '1.22'
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Run process lifecycle tests
+        run: go test -v ./internal/process/

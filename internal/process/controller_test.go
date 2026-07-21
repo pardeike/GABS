@@ -208,6 +208,7 @@ func TestSteamClientStartHelper(t *testing.T) {
 }
 
 func TestLauncherWaitForProcessStartUsesStopProcessName(t *testing.T) {
+	skipWithoutUnixTools(t)
 	controller := &Controller{}
 	spec := LaunchSpec{
 		GameId:          "steam-test",

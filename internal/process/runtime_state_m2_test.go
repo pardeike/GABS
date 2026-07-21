@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -83,7 +84,7 @@ func TestClaimPublishesAtomicallyWithMode0600(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Fatalf("claim must be 0600, got %v", fi.Mode().Perm())
 	}
 	// no temp files linger
@@ -184,7 +185,7 @@ func TestSaveAtomicAnd0600(t *testing.T) {
 	}
 	path := filepath.Join(dir, "save", "runtime.json")
 	fi, _ := os.Stat(path)
-	if fi.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Fatalf("saved claim must be 0600, got %v", fi.Mode().Perm())
 	}
 	loaded, err := LoadRuntimeState("save", dir)
@@ -194,6 +195,9 @@ func TestSaveAtomicAnd0600(t *testing.T) {
 }
 
 func TestLegacyClaimTightenedOnLoad(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission-bit semantics")
+	}
 	dir := t.TempDir()
 	gameDir := filepath.Join(dir, "legacy")
 	if err := os.MkdirAll(gameDir, 0o755); err != nil {
@@ -402,6 +406,9 @@ func TestLoadTornClaimWaitsForFallbackPublication(t *testing.T) {
 }
 
 func TestGameDirIsPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission-bit semantics")
+	}
 	dir := t.TempDir()
 	if err := ClaimRuntimeState("g-perm", dir, NewRuntimeState(m2Spec("g-perm"), RuntimeStateStatusStarting)); err != nil {
 		t.Fatal(err)
@@ -432,5 +439,29 @@ func TestGameDirIsPrivate(t *testing.T) {
 	}
 	if fi.Mode().Perm() != 0o700 {
 		t.Fatalf("loose game dir must be tightened to 0700, got %v", fi.Mode().Perm())
+	}
+}
+
+func TestExternalSnapshotInputsStateRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	state := NewRuntimeState(m2Spec("g-ext"), RuntimeStateStatusRunning)
+	state.Source = SourceExternal
+	state.AppliedInputNames = nil
+	// External snapshots must say "unknowable", never an empty list that
+	// reads as a GABS launch known to have used no inputs (design/07).
+	state.AppliedInputsState = AppliedInputsStateUnavailable
+	if err := ClaimRuntimeState("g-ext", dir, state); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadRuntimeState("g-ext", dir)
+	if err != nil || loaded == nil {
+		t.Fatalf("load: %v %v", loaded, err)
+	}
+	if loaded.AppliedInputsState != AppliedInputsStateUnavailable {
+		t.Fatalf("appliedLaunchInputsState lost: %+v", loaded)
+	}
+	data, _ := json.Marshal(loaded)
+	if !strings.Contains(string(data), `"appliedLaunchInputsState":"unavailable"`) {
+		t.Fatalf("persisted marker missing: %s", data)
 	}
 }

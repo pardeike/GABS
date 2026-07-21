@@ -57,7 +57,12 @@ contract, not a scratchpad.
       .app resolution, relative targets resolved against the effective
       workingDir, empty-target rejection, SteamManaged via the read-only
       Steam resolver — plus working directories; hook commands PATH-pin
-      to absolute at resolution)
+      to absolute at resolution, and review round 4 made unresolved hook
+      commands fail Stage 1 with the hook's JSON path — game-level or
+      profile-override — and checked filesystem path; final env absence
+      (GABS_ABSENT_ENV) is now computed after the managed layer so a
+      config unset of a managed name is never exported as
+      present-and-absent)
 - [x] M1.7 Platform spawn rules: macOS .app inner-binary resolution, no
       open/ShellExecute for propagation-capable modes, elevation → hint,
       Windows quoting — spec: 03; tests: T-DELIV (Windows/macOS cells)
@@ -83,13 +88,19 @@ contract, not a scratchpad.
       launch_spec_unresolvable with JSON+fs paths, config_invalid start
       refusal on stale config, activeProfile/appliedLaunchInputs/
       configRevision in results; end-to-end test proves profile args
-      reach the child process)
-- [~] M1.11 show/list/status metadata: profiles, input constraints incl.
+      reach the child process; review round 4 made
+      launch_mode_incompatible reachable — a hot edit giving a URL-mode
+      game context fields maps to it via issue classification
+      (ConfigIssue.Code) instead of collapsing into config_invalid,
+      with mixed failures staying generic)
+- [x] M1.11 show/list/status metadata: profiles, input constraints incl.
       maxLength/pattern, warnings, revisions — spec: 10, 09; tests: T-MCP
-      (complete except activeConfigRevision, which requires the persisted
-      launch revision from M2.1's runtime-claim extension; reopened per
-      review — currentConfigRevision alone cannot distinguish what is
-      running from what the next start would use)
+      (was blocked on the persisted launch revision; M2.1 supplies it and
+      review round 4 closed the gap: games_show and games_status — single
+      game and all-games — surface activeConfigRevision from the claim,
+      distinct from currentConfigRevision, tested; warning-path matching
+      also now escapes game IDs per RFC 6901 so IDs containing ~ or /
+      keep their per-game warnings)
 - [x] M1.12 Conformance probe helper + direct/forwarding-wrapper cells —
       spec: 03; tests: T-DELIV
       (probe records argv/env/cwd; direct cell asserts all three channels
@@ -116,7 +127,9 @@ contract, not a scratchpad.
       loose modes tightened with errors surfaced, and legacy-claim
       chmod failures now propagate instead of being discarded; the
       built-in graceful/force strategy pin lands with M2.6, which
-      defines the strategy)
+      defines the strategy; review round 4 added the
+      appliedLaunchInputsState field ("unavailable" for external
+      snapshots, distinct from an empty list) with a round-trip test)
 - [~] M2.2 Transition lock + domain-scoped fencing
       (launchID/operationID/connectionID; generation as CAS) — spec: 06;
       tests: T-FENCE
@@ -144,9 +157,14 @@ contract, not a scratchpad.
       review round 3: Windows behavioral tests written
       (hookrunner_windows_test.go — Job Object tree-kill with grandchild
       marker, exit-code contract, folded env, stderr tail) and a
-      windows-latest CI lane added to test.yml; flip to [x] when that
-      lane is green — unix cells verified locally, Windows cells are
-      written-but-unexecuted until CI runs)
+      windows-latest CI lane added to test.yml; round 4 made that lane
+      actually runnable — it runs vet + build + ./internal/process,
+      where all Windows lifecycle code lives, with unix-only tests
+      (unix binaries, POSIX mode bits, chmod-0000 semantics) gated by
+      GOOS skips; the wider suite's unix-pathed fixtures are future
+      porting work; flip to [x] when the lane is green — unix cells
+      verified locally, Windows cells are written-but-unexecuted until
+      CI runs)
 - [x] M2.4 Liveness rule incl. attachment lease record, inspection-
       failure=unknown, URL helper PID exclusion — spec: 04; tests:
       T-LIFE, T-FENCE (attachment evidence)
@@ -243,3 +261,18 @@ contract, not a scratchpad.
   ordinary readers like antivirus would cause false
   operation_in_progress), M2.3 reopened to [~] until the new
   windows-latest CI lane runs the new Windows tests.
+- 2026-07-21, M1.10 + M1.11 + M2.1 + test.yml, protocol §rules +
+  design/21 ordering: review round 4 caught four more
+  completeness/ordering violations — M1.10's launch_mode_incompatible
+  was unreachable (no code path emitted it) despite the item being [x];
+  M1.11 stayed open while M2.1–M2.4 advanced, violating strict
+  milestone order after its M2.1 dependency had landed; M2.1's "full
+  field contract" lacked appliedLaunchInputsState; and round 3's
+  windows-latest CI lane ran the full unix-fixtured suite and could
+  never pass. Resolutions: launch_mode_incompatible emitted via
+  ConfigIssue.Code classification with a mixed-failure guard; M1.11
+  completed (activeConfigRevision in show/status from the claim) and
+  closed; appliedLaunchInputsState added with round-trip coverage; the
+  Windows lane scoped to vet + build + ./internal/process with GOOS
+  gates on POSIX-only tests, wider fixture porting recorded as future
+  work rather than claimed.

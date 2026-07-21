@@ -165,3 +165,19 @@ func (w *overlapDetectingWriter) Bytes() []byte {
 
 	return append([]byte(nil), w.data.Bytes()...)
 }
+
+func TestUnmarshalPreservingNumbersRejectsTrailingData(t *testing.T) {
+	var v map[string]interface{}
+	if err := UnmarshalPreservingNumbers([]byte(` {"a":1} `+"\n"), &v); err != nil {
+		t.Fatalf("surrounding whitespace must be accepted: %v", err)
+	}
+	for _, bad := range []string{
+		`{"a":1}{"b":2}`,
+		`{"a":1}garbage`,
+		`{"a":1} 2`,
+	} {
+		if err := UnmarshalPreservingNumbers([]byte(bad), &v); err == nil {
+			t.Fatalf("trailing data must be rejected: %q", bad)
+		}
+	}
+}

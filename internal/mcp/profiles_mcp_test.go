@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/pardeike/gabs/internal/config"
+	"github.com/pardeike/gabs/internal/launch"
+	"github.com/pardeike/gabs/internal/process"
 	"github.com/pardeike/gabs/internal/util"
 )
 
@@ -373,5 +376,119 @@ func TestDiscoveryUsesPerCallConfig(t *testing.T) {
 	raw, _ = callTool(t, s, "games.tool_names", map[string]interface{}{"gameId": "a", "brief": true})
 	if !strings.Contains(raw, "not found") && !strings.Contains(raw, "game_not_found") {
 		t.Fatalf("games.tool_names must not resolve removed game a, got %s", raw)
+	}
+}
+
+func TestStartLaunchModeIncompatible(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	valid := `{"version":"1.0","games":{"u":{"id":"u","name":"U","launchMode":"SteamAppId","target":"12345","stopProcessName":"game-bin"}}}`
+	if err := os.WriteFile(cfgPath, []byte(valid), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := NewServerForTesting(util.NewLogger("error"))
+	s.SetConfigDir(dir)
+	initial, err := config.LoadGamesConfigFromPath(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.RegisterGameManagementTools(initial, 0, 0)
+	s.SetConfigStore(config.NewStore(cfgPath))
+
+	// hot edit: the URL-mode game gains context fields it cannot deliver
+	incompatible := `{"version":"1.0","games":{"u":{"id":"u","name":"U","launchMode":"SteamAppId","target":"12345","stopProcessName":"game-bin","env":{"A":"1"},"defaultProfile":"x","profiles":{"x":{"description":"d"}}}}}`
+	if err := os.WriteFile(cfgPath, []byte(incompatible), 0600); err != nil {
+		t.Fatal(err)
+	}
+	raw, structured := callTool(t, s, "games.start", map[string]interface{}{"gameId": "u"})
+	if structured["code"] != "launch_mode_incompatible" {
+		t.Fatalf("mode-incompatible edit must map to launch_mode_incompatible, got %s", raw)
+	}
+
+	// mixed failure (mode issue + unrelated grammar error) stays generic
+	mixed := `{"version":"1.0","games":{"u":{"id":"u","name":"U","launchMode":"SteamAppId","target":"12345","stopProcessName":"game-bin","env":{"A":"1"},"launchInputs":{"bad name!":{"type":"boolean","description":"d","arg":"--x"}}}}}`
+	if err := os.WriteFile(cfgPath, []byte(mixed), 0600); err != nil {
+		t.Fatal(err)
+	}
+	raw, structured = callTool(t, s, "games.start", map[string]interface{}{"gameId": "u"})
+	if structured["code"] != "config_invalid" {
+		t.Fatalf("mixed validation failure must stay config_invalid, got %s", raw)
+	}
+}
+
+func TestActiveConfigRevisionSurfaced(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	valid := `{"version":"1.0","games":{"a":{"id":"a","name":"A","launchMode":"DirectPath","target":"/bin/echo"}}}`
+	if err := os.WriteFile(cfgPath, []byte(valid), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := NewServerForTesting(util.NewLogger("error"))
+	s.SetConfigDir(dir)
+	initial, err := config.LoadGamesConfigFromPath(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.RegisterGameManagementTools(initial, 0, 0)
+	s.SetConfigStore(config.NewStore(cfgPath))
+
+	// a persisted claim pins the revision the RUNNING launch used
+	claim := process.NewRuntimeState(process.LaunchSpec{
+		GameId: "a", Mode: "DirectPath", PathOrId: "/bin/echo",
+		Env: map[string]string{}, ConfigRevision: "sha256:runningrev00",
+	}, process.RuntimeStateStatusRunning)
+	claim.GamePID = os.Getpid() // alive, so status logic keeps the claim
+	if err := process.ClaimRuntimeState("a", dir, claim); err != nil {
+		t.Fatal(err)
+	}
+
+	_, structured := callTool(t, s, "games.show", map[string]interface{}{"gameId": "a"})
+	if structured["activeConfigRevision"] != "sha256:runningrev00" {
+		t.Fatalf("show must surface the running launch's revision: %v", structured)
+	}
+	if structured["currentConfigRevision"] == structured["activeConfigRevision"] {
+		t.Fatalf("active and current revisions must be distinguishable: %v", structured)
+	}
+
+	_, statusStructured := callTool(t, s, "games.status", map[string]interface{}{"gameId": "a"})
+	if statusStructured["activeConfigRevision"] != "sha256:runningrev00" {
+		t.Fatalf("status must surface the running launch's revision: %v", statusStructured)
+	}
+}
+
+func TestGameConfigWarningsEscapeIDs(t *testing.T) {
+	cfg := &config.GamesConfig{Warnings: []config.ConfigIssue{
+		{Path: "/games/factory~0old/unknownKey", Message: "unknown key"},
+	}}
+	warns := gameConfigWarnings(cfg, "factory~old")
+	if len(warns) != 1 {
+		t.Fatalf("escaped-ID warning must match its game: %v", warns)
+	}
+	if warns := gameConfigWarnings(cfg, "factory"); len(warns) != 0 {
+		t.Fatalf("prefix must not leak across IDs: %v", warns)
+	}
+}
+
+// Bundle resolution applies to every propagation-capable path mode: Stage 1
+// checks the inner executable, so the spawn must exec the same target.
+func TestLaunchSpecResolvesBundlesForCustomCommand(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS bundle semantics")
+	}
+	dir := t.TempDir()
+	bundle := filepath.Join(dir, "Game.app")
+	macOS := filepath.Join(bundle, "Contents", "MacOS")
+	if err := os.MkdirAll(macOS, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inner := filepath.Join(macOS, "Game")
+	if err := os.WriteFile(inner, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	game := config.GameConfig{ID: "g", Name: "G", LaunchMode: "CustomCommand", Target: bundle}
+	spec := launchSpecFromResolved(game, &launch.Resolved{GameID: "g"})
+	if spec.PathOrId != inner {
+		t.Fatalf("CustomCommand bundle must resolve to the inner executable: %q", spec.PathOrId)
 	}
 }

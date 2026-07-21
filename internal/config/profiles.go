@@ -72,10 +72,17 @@ const (
 	InputMaxLengthMax        = 65536
 )
 
+// IssueCodeModeIncompatible marks issues where the launch mode rejects
+// profiles/inputs/env — games_start maps them to the stable Stage 1 code
+// launch_mode_incompatible instead of the generic config_invalid (design/05).
+const IssueCodeModeIncompatible = "mode_incompatible"
+
 // ConfigIssue is one validation finding with an RFC 6901 JSON pointer path.
+// Code optionally classifies the issue for stable-outcome mapping.
 type ConfigIssue struct {
 	Path    string
 	Message string
+	Code    string
 }
 
 func (i ConfigIssue) String() string { return i.Path + ": " + i.Message }
@@ -155,17 +162,20 @@ func ValidateGameExtensions(gameID string, g *GameConfig, opts ValidationOptions
 	// URL launch modes cannot deliver args/env/cwd to the game: context
 	// fields must not validate silently. Lifecycle hooks remain valid.
 	if isURLLaunchMode(g.LaunchMode) {
+		addModeErr := func(path, msg string) {
+			errs = append(errs, ConfigIssue{Path: path, Message: msg, Code: IssueCodeModeIncompatible})
+		}
 		if len(g.Profiles) > 0 || g.DefaultProfile != "" {
-			addErr(base+"/profiles", g.LaunchMode+" "+urlModeHint)
+			addModeErr(base+"/profiles", g.LaunchMode+" "+urlModeHint)
 		}
 		if len(g.LaunchInputs) > 0 {
-			addErr(base+"/launchInputs", g.LaunchMode+" "+urlModeHint)
+			addModeErr(base+"/launchInputs", g.LaunchMode+" "+urlModeHint)
 		}
 		if len(g.Env) > 0 {
-			addErr(base+"/env", g.LaunchMode+" "+urlModeHint)
+			addModeErr(base+"/env", g.LaunchMode+" "+urlModeHint)
 		}
 		if len(g.UnsetEnv) > 0 {
-			addErr(base+"/unsetEnv", g.LaunchMode+" "+urlModeHint)
+			addModeErr(base+"/unsetEnv", g.LaunchMode+" "+urlModeHint)
 		}
 		errs = append(errs, validateLifecycleSlot(base, g.Lifecycle, len(g.Profiles) > 0, opts)...)
 		// One observation/control mechanism stays mandatory for URL modes:

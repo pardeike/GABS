@@ -110,7 +110,71 @@ func CheckResolvability(game *config.GameConfig, r *Resolved) []SpecIssue {
 				Message: "working directory is not a directory"})
 		}
 	}
+
+	// Lifecycle hooks fail Stage 1 too: persisting an unusable hook into
+	// the claim would surface later as unknown/action failures instead of
+	// the precise launch_spec_unresolvable with a path (design/05 Stage 1).
+	if r.Lifecycle != nil {
+		for _, hk := range []struct {
+			kind string
+			hook *ResolvedHook
+		}{{"status", r.Lifecycle.Status}, {"stop", r.Lifecycle.Stop}, {"kill", r.Lifecycle.Kill}} {
+			if hk.hook == nil {
+				continue
+			}
+			issues = append(issues, checkHookResolvability(game, r, hk.kind, hk.hook)...)
+		}
+	}
 	return issues
+}
+
+// checkHookResolvability mirrors how the hook runner executes the command:
+// separator-containing paths relative to the hook's working directory,
+// bare names via PATH (already pinned to absolute at resolution when found
+// — a still-bare command means the pin failed).
+func checkHookResolvability(game *config.GameConfig, r *Resolved, kind string, h *ResolvedHook) []SpecIssue {
+	base := "/games/" + escapeJSONPointer(game.ID)
+	jsonPath := base + "/lifecycle/" + kind + "/command"
+	if r.Profile != "" {
+		if p, ok := game.Profiles[r.Profile]; ok && p.Lifecycle != nil {
+			override := false
+			switch kind {
+			case "status":
+				override = p.Lifecycle.Status != nil
+			case "stop":
+				override = p.Lifecycle.Stop != nil
+			case "kill":
+				override = p.Lifecycle.Kill != nil
+			}
+			if override {
+				jsonPath = base + "/profiles/" + escapeJSONPointer(r.Profile) + "/lifecycle/" + kind + "/command"
+			}
+		}
+	}
+
+	cmd := h.Command
+	if strings.ContainsRune(cmd, os.PathSeparator) || strings.ContainsRune(cmd, '/') {
+		checkPath := cmd
+		if !filepath.IsAbs(checkPath) && h.WorkingDir != "" {
+			checkPath = filepath.Join(h.WorkingDir, checkPath)
+		}
+		if fi, err := os.Stat(checkPath); err != nil {
+			return []SpecIssue{{Code: "launch_spec_unresolvable", JSONPath: jsonPath, FSPath: checkPath,
+				Message: kind + " hook command does not exist"}}
+		} else if fi.IsDir() {
+			return []SpecIssue{{Code: "launch_spec_unresolvable", JSONPath: jsonPath, FSPath: checkPath,
+				Message: kind + " hook command is a directory, not an executable"}}
+		} else if runtime.GOOS != "windows" && fi.Mode()&0o111 == 0 {
+			return []SpecIssue{{Code: "launch_spec_unresolvable", JSONPath: jsonPath, FSPath: checkPath,
+				Message: kind + " hook command is not executable"}}
+		}
+		return nil
+	}
+	if _, err := exec.LookPath(cmd); err != nil {
+		return []SpecIssue{{Code: "launch_spec_unresolvable", JSONPath: jsonPath, FSPath: cmd,
+			Message: kind + " hook command is not resolvable via PATH"}}
+	}
+	return nil
 }
 
 func escapeJSONPointer(s string) string {

@@ -46,6 +46,10 @@ const (
 
 	PIDRoleWorkload = "workload"
 	PIDRoleHelper   = "helper"
+
+	// AppliedInputsStateUnavailable marks claims whose launch inputs are
+	// unknowable (external snapshots) — distinct from an empty list.
+	AppliedInputsStateUnavailable = "unavailable"
 )
 
 var ErrRuntimeStateExists = errors.New("runtime state already exists")
@@ -142,7 +146,12 @@ type RuntimeState struct {
 
 	Profile           string   `json:"profile,omitempty"`
 	AppliedInputNames []string `json:"appliedInputNames,omitempty"` // names only, never values
-	ConfigRevision    string   `json:"configRevision,omitempty"`
+	// AppliedInputsState distinguishes "known to have used no inputs"
+	// (empty) from "unknowable" — external snapshots must serialize
+	// appliedLaunchInputsState: unavailable, never an empty list that
+	// reads as a GABS launch without inputs (design/07).
+	AppliedInputsState string `json:"appliedLaunchInputsState,omitempty"`
+	ConfigRevision     string `json:"configRevision,omitempty"`
 
 	// Lifecycle is the resolved hook snapshot pinned at claim creation —
 	// every field affecting execution or result interpretation, so a custom

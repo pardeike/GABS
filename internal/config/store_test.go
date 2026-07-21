@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -195,5 +196,37 @@ func TestStoreMissingThenEmptyFile(t *testing.T) {
 	snap, cerr := s.Snapshot()
 	if cerr == nil {
 		t.Fatalf("empty file must surface a ConfigError, got clean snapshot %+v", snap)
+	}
+}
+
+func TestSaveConfigAlwaysPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission-bit semantics")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	// an interrupted old-style save left a loose fixed-name temp file
+	if err := os.WriteFile(path+".tmp", []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &GamesConfig{Version: "1.0", Games: map[string]GameConfig{
+		"a": {ID: "a", Name: "A", LaunchMode: "DirectPath", Target: "/bin/echo",
+			Env: map[string]string{"SECRET": "value"}},
+	}}
+	if err := SaveGamesConfigToPath(cfg, path); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("published config must be 0600, got %v", fi.Mode().Perm())
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".config-") {
+			t.Fatalf("temp file lingers: %s", e.Name())
+		}
 	}
 }

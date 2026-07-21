@@ -43,3 +43,35 @@ func TestHookEnvironmentCaseFoldingWindows(t *testing.T) {
 		t.Fatalf("exact-case platforms must not fold:\n%s", joined)
 	}
 }
+
+// A config unset of a managed name (SteamAppId here) is re-added by the
+// managed layer; exporting it as absent too would be contradictory
+// metadata, so final absence is computed after the managed layer.
+func TestAbsentEnvNamesFilteredAgainstManagedLayer(t *testing.T) {
+	c := NewController().(*Controller)
+	err := c.Configure(LaunchSpec{
+		GameId:         "g",
+		Mode:           "SteamManaged",
+		PathOrId:       "12345",
+		Env:            map[string]string{},
+		AbsentEnvNames: []string{"SteamAppId", "TRULY_ABSENT"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var absent, steam string
+	for _, kv := range c.FinalEnvironment() {
+		if strings.HasPrefix(kv, "GABS_ABSENT_ENV=") {
+			absent = strings.TrimPrefix(kv, "GABS_ABSENT_ENV=")
+		}
+		if strings.HasPrefix(kv, "SteamAppId=") {
+			steam = kv
+		}
+	}
+	if steam != "SteamAppId=12345" {
+		t.Fatalf("managed SteamAppId must be present, got %q", steam)
+	}
+	if absent != "TRULY_ABSENT" {
+		t.Fatalf("GABS_ABSENT_ENV must exclude managed re-adds, got %q", absent)
+	}
+}

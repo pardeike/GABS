@@ -766,6 +766,12 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			"nextActions":        s.nextActionsForGameStatus(*game, status, len(s.getGameSpecificTools(game.ID))),
 		}
 		structured["currentConfigRevision"] = configRevision
+		// activeConfigRevision: the revision the RUNNING launch was resolved
+		// from (persisted in the claim), distinct from what the next start
+		// would use (design/09, M1.11).
+		if rs, rsErr := process.LoadRuntimeState(game.ID, s.configDir); rsErr == nil && rs != nil && rs.ConfigRevision != "" {
+			structured["activeConfigRevision"] = rs.ConfigRevision
+		}
 		if len(game.Profiles) > 0 {
 			structured["profiles"] = profilesStructured(game.Profiles)
 			structured["defaultProfile"] = game.DefaultProfile
@@ -821,6 +827,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			statusDesc := s.getStatusDescriptionFromStatus(status, game)
 			statusItem := s.gameStatusStructured(*game, status)
 			statusItem["currentConfigRevision"] = configRevision
+			if rs, rsErr := process.LoadRuntimeState(game.ID, s.configDir); rsErr == nil && rs != nil && rs.ConfigRevision != "" {
+				statusItem["activeConfigRevision"] = rs.ConfigRevision
+			}
 			attachConfigHealth(statusItem, gamesConfig, cfgErr)
 			content.WriteString(fmt.Sprintf("**%s** (%s): %s\n", game.ID, game.Name, statusDesc))
 			if diagnosticMessage := gameStateDiagnosticMessage(statusItem); diagnosticMessage != "" {
@@ -852,6 +861,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				status := s.checkGameStatus(game.ID)
 				statusDesc := s.getStatusDescriptionFromStatus(status, &game)
 				statusItem := s.gameStatusStructured(game, status)
+				if rs, rsErr := process.LoadRuntimeState(game.ID, s.configDir); rsErr == nil && rs != nil && rs.ConfigRevision != "" {
+					statusItem["activeConfigRevision"] = rs.ConfigRevision
+				}
 				if diagnosticMessage := gameStateDiagnosticMessage(statusItem); diagnosticMessage != "" {
 					content.WriteString(fmt.Sprintf("• **%s**: %s — %s\n", game.ID, statusDesc, diagnosticMessage))
 				} else {
@@ -912,7 +924,23 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		if snap == nil {
 			return configUnavailableResult(cfgErr), nil
 		}
+		gameIdOrTarget, ok := args["gameId"].(string)
+		if !ok {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: "gameId parameter is required"}},
+				IsError: true,
+			}, nil
+		}
 		if cfgErr != nil {
+			// A hot edit that gave a URL-mode game context fields is the
+			// specific, stable outcome — not a generic stale-config refusal.
+			if issues := modeIncompatibleIssues(cfgErr, gameIdOrTarget); len(issues) > 0 {
+				return &ToolResult{
+					Content:           []Content{{Type: "text", Text: fmt.Sprintf("The launch mode of %q cannot deliver launch context; remove the incompatible fields or switch modes:\n  %s", gameIdOrTarget, strings.Join(issues, "\n  "))}},
+					IsError:           true,
+					StructuredContent: map[string]interface{}{"code": "launch_mode_incompatible", "issues": issues, "invalidRevision": cfgErr.Revision},
+				}, nil
+			}
 			// Starts are refused on stale config: launching from an outdated
 			// snapshot is worse than failing with the exact error (design/09).
 			return &ToolResult{
@@ -922,13 +950,6 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 		gamesConfig := snap.Config
-		gameIdOrTarget, ok := args["gameId"].(string)
-		if !ok {
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: "gameId parameter is required"}},
-				IsError: true,
-			}, nil
-		}
 
 		game, resolveFail := resolveGameResult(gamesConfig, gameIdOrTarget)
 		if resolveFail != nil {
@@ -2927,9 +2948,17 @@ func launchInputsStructured(inputs map[string]config.LaunchInputConfig) map[stri
 	return out
 }
 
+// escapeJSONPointerToken escapes one RFC 6901 token — warning paths are
+// emitted escaped, so unescaped prefixes would never match an ID containing
+// ~ or /.
+func escapeJSONPointerToken(s string) string {
+	s = strings.ReplaceAll(s, "~", "~0")
+	return strings.ReplaceAll(s, "/", "~1")
+}
+
 // gameConfigWarnings filters load warnings owned by one game.
 func gameConfigWarnings(cfg *config.GamesConfig, gameID string) []string {
-	prefix := "/games/" + gameID
+	prefix := "/games/" + escapeJSONPointerToken(gameID)
 	var out []string
 	for _, w := range cfg.Warnings {
 		if strings.HasPrefix(w.Path, prefix+"/") || w.Path == prefix {
@@ -2937,6 +2966,29 @@ func gameConfigWarnings(cfg *config.GamesConfig, gameID string) []string {
 		}
 	}
 	return out
+}
+
+// modeIncompatibleIssues returns the requested game's validation issues iff
+// they are all mode-incompatibility findings — the Stage 1 code
+// launch_mode_incompatible must be emitted for "mode rejects profiles/
+// inputs/env" instead of the generic config_invalid (design/05).
+func modeIncompatibleIssues(cfgErr *config.ConfigError, gameID string) []string {
+	var ve *config.ValidationError
+	if cfgErr == nil || !errors.As(cfgErr.Err, &ve) {
+		return nil
+	}
+	prefix := "/games/" + escapeJSONPointerToken(gameID)
+	var msgs []string
+	for _, is := range ve.Issues {
+		if is.Path != prefix && !strings.HasPrefix(is.Path, prefix+"/") {
+			continue
+		}
+		if is.Code != config.IssueCodeModeIncompatible {
+			return nil // mixed failure: the generic stale-config refusal stands
+		}
+		msgs = append(msgs, is.String())
+	}
+	return msgs
 }
 
 // attachConfigHealth adds global config warnings (those without an owning
@@ -4478,7 +4530,10 @@ func (s *Server) launchSpecWithRuntimeDir(spec process.LaunchSpec) process.Launc
 // resolved to their inner executable for propagation-capable modes.
 func launchSpecFromResolved(game config.GameConfig, r *launch.Resolved) process.LaunchSpec {
 	spec := launchSpecFromGame(game)
-	if game.LaunchMode == "DirectPath" || game.LaunchMode == "" {
+	// Bundle resolution applies to every propagation-capable path mode:
+	// Stage 1 checks the inner executable, so the spawn must exec the same
+	// effective target or a passing check would still spawn_fail.
+	if game.LaunchMode == "DirectPath" || game.LaunchMode == "" || game.LaunchMode == "CustomCommand" {
 		spec.PathOrId = launch.EffectiveDirectPathTarget(game.Target)
 	}
 	if r == nil {

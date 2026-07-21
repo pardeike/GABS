@@ -3,6 +3,7 @@ package process
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -10,6 +11,9 @@ import (
 // under hidepid) as errors so liveness reports unknown, never a false
 // stopped; process-disappearance races stay silent (design/04, design/20).
 func TestLinuxScanPropagatesInspectionFailures(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 0000 does not block reads on Windows")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores file modes")
 	}
