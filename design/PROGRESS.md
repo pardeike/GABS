@@ -40,32 +40,45 @@ contract, not a scratchpad.
       path until M2.14 lifts it)
 - [x] M1.4 M1 lifecycle feature gate (reject `lifecycle` until M2) —
       spec: 21; tests: T-VAL
-- [~] M1.5 ConfigStore: hash-per-call reload, last-known-good, revisions,
+- [x] M1.5 ConfigStore: hash-per-call reload, last-known-good, revisions,
       snapshot immutability; replace captured config pointers — spec: 09;
       tests: T-RELOAD
-      (store complete with tests; handler pointer replacement lands
-      together with M1.9–M1.11 server wiring)
-- [~] M1.6 Pure resolver: selection, arg order, env merge (unsetEnv
+      (all 13 core handlers now fetch per-call config via
+      currentGamesConfig/currentSnapshot; the store self-primes at
+      SetConfigStore so last-known-good exists from startup; without a
+      store — tests — the startup config doubles as a fixed snapshot)
+- [x] M1.6 Pure resolver: selection, arg order, env merge (unsetEnv
       layers, managed layer, GABS_FORWARD_ENV/GABS_ABSENT_ENV), cwd, hook
       resolution, static resolvability, platform-size check — spec: 02,
       03; tests: T-RES
-      (pure resolution, input validation, lifecycle resolution, context/
-      absent key computation, and spec-size check complete with tests;
-      static filesystem resolvability + hook PATH pinning deferred to the
-      M1.7/M1.10 slice, where controller launch-mode semantics —
-      CustomCommand target parsing, Steam resolution — are in scope)
-- [ ] M1.7 Platform spawn rules: macOS .app inner-binary resolution, no
+      (managed layer + GABS_FORWARD_ENV/GABS_ABSENT_ENV emitted by
+      controller buildEnvironment; static resolvability covers DirectPath
+      targets incl. .app resolution and working directories;
+      SteamManaged/CustomCommand target resolvability remains spawn-time
+      per staticcheck.go doc comment — CustomCommand target semantics are
+      launcher-defined and Steam resolution happens in the Steam
+      resolver; hook PATH pinning lands with M2 hook execution)
+- [~] M1.7 Platform spawn rules: macOS .app inner-binary resolution, no
       open/ShellExecute for propagation-capable modes, elevation → hint,
       Windows quoting — spec: 03; tests: T-DELIV (Windows/macOS cells)
+      (.app inner-binary resolution implemented + wired into DirectPath
+      spec construction; propagation-capable modes already exec directly
+      in the controller — no open/ShellExecute paths exist for them;
+      remaining: Windows elevation-error 740 → spawn_failed hint)
 - [ ] M1.8 Child I/O to per-launch log file (no parent-owned pipes) —
       spec: 05 Stage 3; tests: T-DELIV (I/O survival)
-- [ ] M1.9 Strict MCP argument validation on all core tools
+- [x] M1.9 Strict MCP argument validation on all core tools
       (additionalProperties:false + shared helper) — spec: 10; tests:
       T-MCP
-- [ ] M1.10 games_start profile/launchInputs plumbing + Stage 1
+- [x] M1.10 games_start profile/launchInputs plumbing + Stage 1
       branch-to-code mapping — spec: 05, 10; tests: T-START (Stage 1),
       T-MCP
-- [ ] M1.11 show/list/status metadata: profiles, input constraints incl.
+      (resolver-integrated start with structured codes incl.
+      launch_spec_unresolvable with JSON+fs paths, config_invalid start
+      refusal on stale config, activeProfile/appliedLaunchInputs/
+      configRevision in results; end-to-end test proves profile args
+      reach the child process)
+- [x] M1.11 show/list/status metadata: profiles, input constraints incl.
       maxLength/pattern, warnings, revisions — spec: 10, 09; tests: T-MCP
 - [ ] M1.12 Conformance probe helper + direct/forwarding-wrapper cells —
       spec: 03; tests: T-DELIV

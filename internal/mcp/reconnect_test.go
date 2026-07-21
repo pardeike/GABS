@@ -162,7 +162,7 @@ func TestGamesConnectPrefersReadableProcessEnvironmentOverBridgeFile(t *testing.
 	}
 	cmd := exec.Command(exe, "-test.run=TestSharedRuntimeStateHelperProcess")
 	cmd.Env = append(os.Environ(),
-		"GABS_HELPER_PROCESS=1",
+		"GABSTEST_HELPER_PROCESS=1",
 		fmt.Sprintf("GABP_SERVER_PORT=%d", listener.Addr().(*net.TCPAddr).Port),
 		"GABP_TOKEN="+processToken,
 		"GABS_GAME_ID=adventure",
@@ -238,7 +238,7 @@ func TestGamesConnectDoesNotUseBridgeFileWhenReadableProcessEnvironmentLacksEndp
 		t.Fatalf("failed to locate helper executable: %v", err)
 	}
 	cmd := exec.Command(exe, "-test.run=TestSharedRuntimeStateHelperProcess")
-	cmd.Env = append(os.Environ(), "GABS_HELPER_PROCESS=1")
+	cmd.Env = append(os.Environ(), "GABSTEST_HELPER_PROCESS=1")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("failed to start helper process: %v", err)
 	}

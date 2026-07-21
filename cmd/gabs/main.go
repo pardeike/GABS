@@ -248,8 +248,18 @@ func runServer(ctx context.Context, log util.Logger, opts options) int {
 		log.Infow("API key authentication enabled for HTTP server")
 	}
 
-	// Register game management tools
+	// Register game management tools (startup-only settings come from the
+	// initial load; per-call config comes from the hot-reload store below)
 	server.RegisterGameManagementTools(gamesConfig, opts.backoffMin, opts.backoffMax)
+
+	// Hot config reload: handlers fetch a fresh snapshot per call. The
+	// initial LoadGamesConfigFromDir above already failed hard on invalid
+	// startup config (no empty-config fallback).
+	if cp, cpErr := config.NewConfigPaths(opts.configDir); cpErr == nil {
+		server.SetConfigStore(config.NewStore(cp.GetMainConfigPath()))
+	} else {
+		log.Warnw("config hot-reload disabled: cannot resolve config path", "error", cpErr)
+	}
 
 	// Start serving MCP according to transport
 	errCh := make(chan error, 1)

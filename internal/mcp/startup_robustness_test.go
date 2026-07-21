@@ -105,7 +105,7 @@ func TestGamesStartUsesLauncherReusedBridgeEnvironmentWithoutMutatingBridgeFile(
 	pidPath := filepath.Join(tmpDir, "game.pid")
 	scriptPath := filepath.Join(tmpDir, "launch-stale-env.sh")
 	script := fmt.Sprintf(`#!/bin/sh
-GABP_SERVER_PORT=%d GABP_TOKEN=%s GABS_GAME_ID=%s GABS_BRIDGE_PATH=%s GABS_HELPER_PROCESS=1 %s -test.run=TestSharedRuntimeStateHelperProcess &
+GABP_SERVER_PORT=%d GABP_TOKEN=%s GABS_GAME_ID=%s GABS_BRIDGE_PATH=%s GABSTEST_HELPER_PROCESS=1 %s -test.run=TestSharedRuntimeStateHelperProcess &
 echo $! > %s
 wait
 `, stalePort, staleToken, game.ID, shellQuote(bridgePath), shellQuote(exe), shellQuote(pidPath))

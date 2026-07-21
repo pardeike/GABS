@@ -64,8 +64,8 @@ func TestEscapeWindowsArg(t *testing.T) {
 		{`say "hi"`, `"say \"hi\""`},
 		{`back\slash "q`, `"back\slash \"q"`}, // backslash not before a quote stays single
 		{`a\"b c`, `"a\\\"b c"`},              // backslash before a quote doubles, quote escapes
-		{`trail\`, `trail\`},          // no quoting needed, unchanged
-		{`trail me\`, `"trail me\\"`}, // quoted: trailing backslash doubled
+		{`trail\`, `trail\`},                  // no quoting needed, unchanged
+		{`trail me\`, `"trail me\\"`},         // quoted: trailing backslash doubled
 	}
 	for _, c := range cases {
 		if got := escapeWindowsArg(c.in); got != c.want {

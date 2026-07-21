@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +30,15 @@ type LaunchSpec struct {
 	Args            []string
 	WorkingDir      string
 	StopProcessName string // Optional process name for stopping the game
+
+	// Resolved launch-profile context (design/02-launch-resolution.md).
+	// Env nil = legacy behavior (inherit os.Environ). Non-nil = the
+	// resolver's config-layer environment; the controller adds only the
+	// managed layer on top.
+	Profile        string
+	Env            map[string]string
+	ContextEnvKeys []string
+	AbsentEnvNames []string
 }
 
 type BridgeInfo struct {
@@ -173,6 +183,79 @@ func (c *Controller) Start() error {
 
 // setupEnvironment configures environment variables for the process
 func (c *Controller) setupEnvironment() {
+	c.cmd.Env = c.buildEnvironment()
+}
+
+// buildEnvironment produces the child environment. With a resolved spec
+// (Env non-nil), the config layers come from the launch resolver and the
+// controller adds only the managed layer — GABS identity, GABP endpoint,
+// platform requirements, and the delivery-contract variables
+// GABS_FORWARD_ENV / GABS_ABSENT_ENV (design/03-context-delivery.md).
+// Managed variables always win; output ordering is deterministic.
+func (c *Controller) buildEnvironment() []string {
+	if c.spec.Env == nil {
+		return c.buildLegacyEnvironment()
+	}
+
+	env := make(map[string]string, len(c.spec.Env)+10)
+	for k, v := range c.spec.Env {
+		env[k] = v
+	}
+
+	managed := map[string]string{
+		"GABS_GAME_ID":     c.spec.GameId,
+		"GABS_BRIDGE_PATH": c.getBridgePath(),
+	}
+	if c.spec.Mode == "SteamManaged" {
+		managed["SteamAppId"] = c.spec.PathOrId
+		managed["SteamGameId"] = c.spec.PathOrId
+	}
+	if c.bridgeInfo != nil {
+		managed["GABP_SERVER_PORT"] = strconv.Itoa(c.bridgeInfo.Port)
+		managed["GABP_TOKEN"] = c.bridgeInfo.Token
+	}
+	if c.spec.Profile != "" {
+		managed["GABS_PROFILE"] = c.spec.Profile
+	}
+	if env["SystemRoot"] == "" && os.Getenv("SystemRoot") == "" {
+		managed["SystemRoot"] = "C:\\Windows"
+		managed["WINDIR"] = "C:\\Windows"
+	}
+	if len(c.spec.AbsentEnvNames) > 0 {
+		managed["GABS_ABSENT_ENV"] = strings.Join(c.spec.AbsentEnvNames, ",")
+	}
+
+	// GABS_FORWARD_ENV: every name a wrapper must carry across a filtering
+	// boundary — the managed names plus the config-context key names.
+	forward := make([]string, 0, len(managed)+len(c.spec.ContextEnvKeys)+1)
+	for k := range managed {
+		forward = append(forward, k)
+	}
+	forward = append(forward, "GABS_FORWARD_ENV")
+	forward = append(forward, c.spec.ContextEnvKeys...)
+	sort.Strings(forward)
+	forward = dedupeSorted(forward)
+	managed["GABS_FORWARD_ENV"] = strings.Join(forward, ",")
+
+	for k, v := range managed {
+		env[k] = v
+	}
+
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, k+"="+env[k])
+	}
+	return out
+}
+
+// buildLegacyEnvironment preserves the pre-profile behavior bit-for-bit for
+// launches without resolved context.
+func (c *Controller) buildLegacyEnvironment() []string {
 	bridgePath := c.getBridgePath()
 	bridgeEnvVars := []string{
 		fmt.Sprintf("GABS_GAME_ID=%s", c.spec.GameId),
@@ -196,7 +279,17 @@ func (c *Controller) setupEnvironment() {
 	if os.Getenv("SystemRoot") == "" {
 		env = append(env, "SystemRoot=C:\\Windows", "WINDIR=C:\\Windows")
 	}
-	c.cmd.Env = append(env, bridgeEnvVars...)
+	return append(env, bridgeEnvVars...)
+}
+
+func dedupeSorted(in []string) []string {
+	out := in[:0]
+	for i, v := range in {
+		if i == 0 || in[i-1] != v {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // IsRunning queries the actual system state to determine if the process is running

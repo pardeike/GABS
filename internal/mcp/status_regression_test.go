@@ -292,7 +292,7 @@ func TestGamesStatusIgnoresBridgeFileMismatchWhenProcessEnvironmentIsReadable(t 
 	}
 	cmd := exec.Command(exe, "-test.run=TestSharedRuntimeStateHelperProcess")
 	cmd.Env = append(os.Environ(),
-		"GABS_HELPER_PROCESS=1",
+		"GABSTEST_HELPER_PROCESS=1",
 		"GABP_SERVER_PORT=49153",
 		"GABP_TOKEN=process-token",
 		"GABS_GAME_ID="+game.ID,
@@ -359,7 +359,7 @@ func TestGamesStatusWarnsWhenReadableProcessEnvironmentLacksEndpoint(t *testing.
 		t.Fatalf("failed to locate test executable: %v", err)
 	}
 	cmd := exec.Command(exe, "-test.run=TestSharedRuntimeStateHelperProcess")
-	cmd.Env = append(os.Environ(), "GABS_HELPER_PROCESS=1")
+	cmd.Env = append(os.Environ(), "GABSTEST_HELPER_PROCESS=1")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("failed to start helper process: %v", err)
 	}

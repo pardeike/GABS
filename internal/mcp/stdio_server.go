@@ -14,8 +14,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"runtime"
+
 	"github.com/pardeike/gabs/internal/config"
 	"github.com/pardeike/gabs/internal/gabp"
+	"github.com/pardeike/gabs/internal/launch"
 	"github.com/pardeike/gabs/internal/process"
 	"github.com/pardeike/gabs/internal/util"
 	"github.com/pardeike/gabs/internal/version"
@@ -28,6 +31,7 @@ type Server struct {
 	resources         map[string]*ResourceHandler
 	games             map[string]process.ControllerInterface // Track running games
 	configDir         string                                 // Config directory for bridge files
+	configStore       *config.Store                          // Hot-reload snapshot source (nil in tests)
 	apiKey            string                                 // API key for HTTP authentication
 	mu                sync.RWMutex
 	writers           []util.FrameWriter       // Track client connections for notifications
@@ -270,6 +274,40 @@ func (s *Server) ensureRuntimeOwnershipForGameCall(gameID, action string, operat
 	return nil
 }
 
+// strictArgs rejects unknown tool arguments with the stable unknown_argument
+// code, the offending path, and the sorted allowed names. Every core handler
+// enforces this independently of client-side schema validation
+// (design/10-mcp-surface.md).
+func strictArgs(args map[string]interface{}, allowed ...string) *ToolResult {
+	allowedSet := make(map[string]bool, len(allowed))
+	for _, a := range allowed {
+		allowedSet[a] = true
+	}
+	var unknown []string
+	for k := range args {
+		if !allowedSet[k] {
+			unknown = append(unknown, k)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+	sortedAllowed := append([]string(nil), allowed...)
+	sort.Strings(sortedAllowed)
+	return &ToolResult{
+		Content: []Content{{Type: "text", Text: fmt.Sprintf(
+			"Unknown argument %q. Allowed arguments: %s", unknown[0], strings.Join(sortedAllowed, ", "))}},
+		IsError: true,
+		StructuredContent: map[string]interface{}{
+			"code":    "unknown_argument",
+			"path":    "/" + unknown[0],
+			"unknown": unknown,
+			"allowed": sortedAllowed,
+		},
+	}
+}
+
 func parseOptionalPositiveIntValue(raw interface{}, key string) (int, bool, *ToolResult) {
 	if raw == nil {
 		return 0, false, nil
@@ -502,6 +540,59 @@ func (s *Server) SetConfigDir(configDir string) {
 	s.configDir = configDir
 }
 
+// configUnavailableResult reports a startup-invalid configuration with no
+// last-known-good snapshot.
+func configUnavailableResult(cerr *config.ConfigError) *ToolResult {
+	msg := "Configuration is invalid and no last-known-good snapshot exists."
+	if cerr != nil {
+		msg = fmt.Sprintf("%s %v", msg, cerr.Err)
+	}
+	return &ToolResult{
+		Content: []Content{{Type: "text", Text: msg}},
+		IsError: true,
+		StructuredContent: map[string]interface{}{
+			"code": "config_invalid",
+		},
+	}
+}
+
+// SetConfigStore enables hot config reload: handlers fetch a fresh snapshot
+// per call instead of using the pointer captured at registration. Without a
+// store (tests), the startup config doubles as an immutable snapshot.
+func (s *Server) SetConfigStore(store *config.Store) {
+	s.configStore = store
+	// Prime the last-known-good snapshot immediately: startup validated the
+	// config already, and without priming, a config that turns invalid
+	// before the first tool call would leave the store with no
+	// last-known-good to serve read-only callers.
+	if store != nil {
+		_, _ = store.Snapshot()
+	}
+}
+
+// currentGamesConfig returns the per-call configuration plus any config
+// error. Semantics per design/09: (cfg, nil) valid; (cfg, err) disk invalid,
+// last-known-good served — reads proceed, starts must refuse; (nil, err)
+// startup-invalid with no last-known-good.
+func (s *Server) currentGamesConfig() (*config.GamesConfig, string, *config.ConfigError) {
+	if s.configStore == nil {
+		return s.gamesConfig, "startup", nil
+	}
+	snap, cerr := s.configStore.Snapshot()
+	if snap == nil {
+		return nil, "", cerr
+	}
+	return snap.Config, snap.Revision, cerr
+}
+
+// currentSnapshot returns the launch-resolution snapshot for games_start.
+func (s *Server) currentSnapshot() (*config.Snapshot, *config.ConfigError) {
+	if s.configStore == nil {
+		return &config.Snapshot{Config: s.gamesConfig, Revision: "startup", ConfigDir: s.configDir}, nil
+	}
+	return s.configStore.Snapshot()
+}
+
 // SetAPIKey sets the API key for HTTP authentication
 func (s *Server) SetAPIKey(apiKey string) {
 	s.apiKey = apiKey
@@ -523,10 +614,18 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.list",
 		Description: "List all configured game IDs",
 		InputSchema: map[string]interface{}{
-			"type":       "object",
-			"properties": map[string]interface{}{},
+			"additionalProperties": false,
+			"type":                 "object",
+			"properties":           map[string]interface{}{},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args); res != nil {
+			return res, nil
+		}
+		gamesConfig, configRevision, cfgErr := s.currentGamesConfig()
+		if gamesConfig == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
 		games := gamesConfig.ListGames()
 
 		var content strings.Builder
@@ -550,13 +649,22 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			if game.Description != "" {
 				item["description"] = game.Description
 			}
+			if len(game.Profiles) > 0 {
+				item["profiles"] = sortedProfileNames(game.Profiles)
+				item["defaultProfile"] = game.DefaultProfile
+			}
+			if n := len(gameConfigWarnings(gamesConfig, game.ID)); n > 0 {
+				item["warningCount"] = n
+			}
 			gameItems = append(gameItems, item)
 		}
 
 		structured := map[string]interface{}{
-			"count": len(games),
-			"games": gameItems,
+			"count":                 len(games),
+			"games":                 gameItems,
+			"currentConfigRevision": configRevision,
 		}
+		attachConfigHealth(structured, gamesConfig, cfgErr)
 		if len(games) == 0 {
 			structured["nextActions"] = []map[string]interface{}{
 				{
@@ -581,7 +689,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.show",
 		Description: "Show detailed configuration and validation status for a specific game",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"additionalProperties": false,
+			"type":                 "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
@@ -591,6 +700,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			"required": []string{"gameId"},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args, "gameId"); res != nil {
+			return res, nil
+		}
+		gamesConfig, configRevision, cfgErr := s.currentGamesConfig()
+		if gamesConfig == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
 		gameIdOrTarget, ok := args["gameId"].(string)
 		if !ok {
 			return &ToolResult{
@@ -652,6 +768,18 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			"validationWarnings": validationWarnings,
 			"nextActions":        s.nextActionsForGameStatus(*game, status, len(s.getGameSpecificTools(game.ID))),
 		}
+		structured["currentConfigRevision"] = configRevision
+		if len(game.Profiles) > 0 {
+			structured["profiles"] = profilesStructured(game.Profiles)
+			structured["defaultProfile"] = game.DefaultProfile
+		}
+		if len(game.LaunchInputs) > 0 {
+			structured["launchInputs"] = launchInputsStructured(game.LaunchInputs)
+		}
+		if warns := gameConfigWarnings(gamesConfig, game.ID); len(warns) > 0 {
+			structured["configWarnings"] = warns
+		}
+		attachConfigHealth(structured, gamesConfig, cfgErr)
 
 		return &ToolResult{
 			Content:           []Content{{Type: "text", Text: content.String()}},
@@ -664,7 +792,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.status",
 		Description: "Check the status of one or more games using game ID or launch target",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"additionalProperties": false,
+			"type":                 "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
@@ -673,6 +802,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args, "gameId"); res != nil {
+			return res, nil
+		}
+		gamesConfig, configRevision, cfgErr := s.currentGamesConfig()
+		if gamesConfig == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
 		gameIdOrTarget, hasGameID := args["gameId"].(string)
 
 		var content strings.Builder
@@ -690,6 +826,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			status := s.checkGameStatus(game.ID)
 			statusDesc := s.getStatusDescriptionFromStatus(status, game)
 			statusItem := s.gameStatusStructured(*game, status)
+			statusItem["currentConfigRevision"] = configRevision
+			attachConfigHealth(statusItem, gamesConfig, cfgErr)
 			content.WriteString(fmt.Sprintf("**%s** (%s): %s\n", game.ID, game.Name, statusDesc))
 			if diagnosticMessage := gameStateDiagnosticMessage(statusItem); diagnosticMessage != "" {
 				content.WriteString(fmt.Sprintf("\nDiagnosis: %s\n", diagnosticMessage))
@@ -728,12 +866,15 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				statusItems = append(statusItems, statusItem)
 			}
 
+			structuredAll := map[string]interface{}{
+				"count":                 len(statusItems),
+				"games":                 statusItems,
+				"currentConfigRevision": configRevision,
+			}
+			attachConfigHealth(structuredAll, gamesConfig, cfgErr)
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: content.String()}},
-				StructuredContent: map[string]interface{}{
-					"count": len(statusItems),
-					"games": statusItems,
-				},
+				Content:           []Content{{Type: "text", Text: content.String()}},
+				StructuredContent: structuredAll,
 			}, nil
 		}
 	}, normalizationConfig)
@@ -743,7 +884,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.start",
 		Description: "Start a configured game using game ID or launch target (e.g., Steam App ID)",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"additionalProperties": false,
+			"type":                 "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
@@ -757,10 +899,35 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 					"type":        "boolean",
 					"description": "Rotate the GABS endpoint cache before launch. Use only after confirming the cached endpoint is not an already-running game-side bridge.",
 				},
+				"profile": map[string]interface{}{
+					"type":        "string",
+					"description": "Optional named launch profile. Omitted selects the configured defaultProfile. Discover profiles with games_show.",
+				},
+				"launchInputs": map[string]interface{}{
+					"type":        "object",
+					"description": "Declared launch inputs (boolean/string/integer values). Only inputs declared in the game's configuration are accepted; discover them with games_show. Not a substitute for GABP tools.",
+				},
 			},
 			"required": []string{"gameId"},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args, "gameId", "launchInputs", "profile", "resetEndpoint", "timeout"); res != nil {
+			return res, nil
+		}
+		snap, cfgErr := s.currentSnapshot()
+		if snap == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
+		if cfgErr != nil {
+			// Starts are refused on stale config: launching from an outdated
+			// snapshot is worse than failing with the exact error (design/09).
+			return &ToolResult{
+				Content:           []Content{{Type: "text", Text: fmt.Sprintf("Configuration on disk is invalid; refusing to start from a stale snapshot. Fix the config (it reloads automatically): %v", cfgErr.Err)}},
+				IsError:           true,
+				StructuredContent: map[string]interface{}{"code": "config_invalid", "lastGoodRevision": snap.Revision, "invalidRevision": cfgErr.Revision},
+			}, nil
+		}
+		gamesConfig := snap.Config
 		gameIdOrTarget, ok := args["gameId"].(string)
 		if !ok {
 			return &ToolResult{
@@ -786,8 +953,74 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			return resetEndpointErr, nil
 		}
 
+		profileArg := ""
+		if raw, exists := args["profile"]; exists && raw != nil {
+			str, ok := raw.(string)
+			if !ok {
+				return &ToolResult{
+					Content: []Content{{Type: "text", Text: "Argument 'profile' must be a string"}},
+					IsError: true,
+				}, nil
+			}
+			profileArg = str
+		}
+		var inputsArg map[string]interface{}
+		if raw, exists := args["launchInputs"]; exists && raw != nil {
+			m, ok := raw.(map[string]interface{})
+			if !ok {
+				return &ToolResult{
+					Content: []Content{{Type: "text", Text: "Argument 'launchInputs' must be an object of declared input values"}},
+					IsError: true,
+				}, nil
+			}
+			inputsArg = m
+		}
+
+		resolved, rerr := launch.Resolve(snap, launch.Request{
+			GameID:  game.ID,
+			Profile: profileArg,
+			Inputs:  inputsArg,
+		}, launch.Options{
+			InheritedEnv:       os.Environ(),
+			CaseInsensitiveEnv: runtime.GOOS == "windows",
+		})
+		if rerr != nil {
+			structured := map[string]interface{}{"code": rerr.Code, "gameId": game.ID}
+			if len(rerr.Candidates) > 0 {
+				structured["candidates"] = rerr.Candidates
+			}
+			if rerr.Code == "profiles_not_configured" {
+				structured["configPath"] = s.configFilePathHint()
+				structured["documentation"] = "docs/CONFIGURATION.md#profiles"
+			}
+			return &ToolResult{
+				Content:           []Content{{Type: "text", Text: rerr.Message}},
+				IsError:           true,
+				StructuredContent: structured,
+			}, nil
+		}
+		if issues := launch.CheckResolvability(game, resolved); len(issues) > 0 {
+			lines := make([]string, 0, len(issues))
+			structuredIssues := make([]map[string]interface{}, 0, len(issues))
+			for _, is := range issues {
+				lines = append(lines, is.String())
+				structuredIssues = append(structuredIssues, map[string]interface{}{
+					"path": is.JSONPath, "fsPath": is.FSPath, "message": is.Message,
+				})
+			}
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: "Launch spec is unresolvable:\n" + strings.Join(lines, "\n")}},
+				IsError: true,
+				StructuredContent: map[string]interface{}{
+					"code":   "launch_spec_unresolvable",
+					"gameId": game.ID,
+					"issues": structuredIssues,
+				},
+			}, nil
+		}
+
 		validationWarnings := gameValidationWarnings(*game)
-		startResult, err := s.startGame(*game, gamesConfig, backoffMin, backoffMax, startupGABPTimeout, resetEndpoint)
+		startResult, err := s.startGame(*game, gamesConfig, backoffMin, backoffMax, startupGABPTimeout, resetEndpoint, resolved)
 		if err != nil {
 			var activeErr *gameAlreadyActiveError
 			if errors.As(err, &activeErr) {
@@ -801,6 +1034,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 					"status":      status,
 					"toolCount":   toolCount,
 					"nextActions": s.nextActionsForGameStatus(*game, status, toolCount),
+				}
+				if profileArg != "" {
+					structured["requestedProfile"] = profileArg
 				}
 				addValidationWarnings(structured, validationWarnings)
 				return &ToolResult{
@@ -850,6 +1086,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				},
 			}
 			addValidationWarnings(structured, validationWarnings)
+			addResolvedContext(structured, resolved)
 			return &ToolResult{
 				Content:           []Content{{Type: "text", Text: message}},
 				StructuredContent: structured,
@@ -868,6 +1105,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			},
 		}
 		addValidationWarnings(structured, validationWarnings)
+		addResolvedContext(structured, resolved)
 		return &ToolResult{
 			Content:           []Content{{Type: "text", Text: message}},
 			StructuredContent: structured,
@@ -879,7 +1117,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.stop",
 		Description: "Gracefully stop a running game using game ID or launch target",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"additionalProperties": false,
+			"type":                 "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
@@ -889,6 +1128,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			"required": []string{"gameId"},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args, "gameId"); res != nil {
+			return res, nil
+		}
+		gamesConfig, _, cfgErr := s.currentGamesConfig()
+		if gamesConfig == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
 		gameIdOrTarget, ok := args["gameId"].(string)
 		if !ok {
 			return &ToolResult{
@@ -931,7 +1177,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.kill",
 		Description: "Force terminate a running game using game ID or launch target",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"additionalProperties": false,
+			"type":                 "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
@@ -941,6 +1188,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			"required": []string{"gameId"},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args, "gameId"); res != nil {
+			return res, nil
+		}
+		gamesConfig, _, cfgErr := s.currentGamesConfig()
+		if gamesConfig == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
 		gameIdOrTarget, ok := args["gameId"].(string)
 		if !ok {
 			return &ToolResult{
@@ -1480,7 +1734,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.tool_names",
 		Description: "List compact game-specific tool names. Use this first for low-token discovery, then call games_tool_detail for one tool.",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"additionalProperties": false,
+			"type":                 "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
@@ -1509,6 +1764,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args, "brief", "cursor", "gameId", "limit", "prefix", "query"); res != nil {
+			return res, nil
+		}
+		gamesConfig, _, cfgErr := s.currentGamesConfig()
+		if gamesConfig == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
 		gameID, hasGameID, invalidArg := getOptionalStringArg(args, "gameId")
 		if invalidArg != nil {
 			return invalidArg, nil
@@ -1616,7 +1878,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.tool_detail",
 		Description: "Show detailed metadata for one game-specific tool, including parameters and output schema.",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"additionalProperties": false,
+			"type":                 "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
@@ -1630,6 +1893,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			"required": []string{"tool"},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args, "gameId", "tool"); res != nil {
+			return res, nil
+		}
+		gamesConfig, _, cfgErr := s.currentGamesConfig()
+		if gamesConfig == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
 		gameID, hasGameID, invalidArg := getOptionalStringArg(args, "gameId")
 		if invalidArg != nil {
 			return invalidArg, nil
@@ -1687,7 +1957,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.tools",
 		Description: "List game-specific tools in detailed form for compatibility and human-readable inspection. Prefer games_tool_names for compact discovery and games_tool_detail for one tool.",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"additionalProperties": false,
+			"type":                 "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
@@ -1712,6 +1983,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args, "cursor", "gameId", "limit", "prefix", "query"); res != nil {
+			return res, nil
+		}
+		gamesConfig, _, cfgErr := s.currentGamesConfig()
+		if gamesConfig == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
 		gameID, hasGameID, invalidArg := getOptionalStringArg(args, "gameId")
 		if invalidArg != nil {
 			return invalidArg, nil
@@ -1825,7 +2103,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.connect",
 		Description: "Connect to a running game's GABP server to discover and sync tools. Use this after the game has fully loaded.",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"additionalProperties": false,
+			"type":                 "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
@@ -1843,6 +2122,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			"required": []string{"gameId"},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args, "forceTakeover", "gameId", "timeout"); res != nil {
+			return res, nil
+		}
+		gamesConfig, _, cfgErr := s.currentGamesConfig()
+		if gamesConfig == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
 		gameIdArg, ok := args["gameId"].(string)
 		if !ok || gameIdArg == "" {
 			return &ToolResult{
@@ -2049,7 +2335,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.get_attention",
 		Description: "Inspect the current attention item for a connected game. Use this when GABS blocks further game calls due to important async game information.",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"additionalProperties": false,
+			"type":                 "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
@@ -2062,6 +2349,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args, "gameId", "timeout"); res != nil {
+			return res, nil
+		}
+		gamesConfig, _, cfgErr := s.currentGamesConfig()
+		if gamesConfig == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
 		gameID, hasGameID, invalidArg := getOptionalStringArg(args, "gameId")
 		if invalidArg != nil {
 			return invalidArg, nil
@@ -2129,7 +2423,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.ack_attention",
 		Description: "Acknowledge a current attention item for a connected game so blocked game calls can resume once the game has no remaining blocking attention.",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"additionalProperties": false,
+			"type":                 "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
@@ -2147,6 +2442,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			"required": []string{"attentionId"},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args, "attentionId", "gameId", "timeout"); res != nil {
+			return res, nil
+		}
+		gamesConfig, _, cfgErr := s.currentGamesConfig()
+		if gamesConfig == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
 		gameID, hasGameID, invalidArg := getOptionalStringArg(args, "gameId")
 		if invalidArg != nil {
 			return invalidArg, nil
@@ -2223,7 +2525,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.call_tool",
 		Description: "Call a game-specific tool on a running game via its GABP connection. Prefer games_tool_names for discovery and games_tool_detail for schema inspection before calling.",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"additionalProperties": false,
+			"type":                 "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
@@ -2245,6 +2548,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			"required": []string{"tool"},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args, "arguments", "gameId", "timeout", "tool"); res != nil {
+			return res, nil
+		}
+		gamesConfig, _, cfgErr := s.currentGamesConfig()
+		if gamesConfig == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
 		gameIdArg, hasGameID, invalidArg := getOptionalStringArg(args, "gameId")
 		if invalidArg != nil {
 			return invalidArg, nil
@@ -2458,6 +2768,127 @@ func appendValidationWarningText(message string, warnings []string) string {
 		return message
 	}
 	return fmt.Sprintf("%s Configuration warning: %s", message, strings.Join(warnings, " "))
+}
+
+// addResolvedContext reports the selected profile and applied launch-input
+// names (never values) on a start result.
+func addResolvedContext(structured map[string]interface{}, r *launch.Resolved) {
+	if r == nil {
+		return
+	}
+	if r.Profile != "" {
+		structured["activeProfile"] = r.Profile
+	}
+	if len(r.AppliedInputs) > 0 {
+		structured["appliedLaunchInputs"] = r.AppliedInputs
+	}
+	structured["configRevision"] = r.ConfigRevision
+}
+
+// configFilePathHint returns the actual config path for error guidance.
+func (s *Server) configFilePathHint() string {
+	if s.configStore != nil {
+		return s.configStore.Path()
+	}
+	if cp, err := config.NewConfigPaths(s.configDir); err == nil {
+		return cp.GetMainConfigPath()
+	}
+	return "config.json"
+}
+
+// sortedProfileNames returns the profile names in deterministic order.
+func sortedProfileNames(profiles map[string]config.ProfileConfig) []string {
+	names := make([]string, 0, len(profiles))
+	for name := range profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// profilesStructured renders profile discovery metadata: names and
+// descriptions only — arg/env templates are noise, not secret, and stay out
+// of results (design/10-mcp-surface.md).
+func profilesStructured(profiles map[string]config.ProfileConfig) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(profiles))
+	for _, name := range sortedProfileNames(profiles) {
+		item := map[string]interface{}{"name": name}
+		if d := profiles[name].Description; d != "" {
+			item["description"] = d
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+// launchInputsStructured renders the JSON-Schema-style input map with every
+// declared constraint, including the effective default maxLength, so an
+// agent can form a valid value without trial calls.
+func launchInputsStructured(inputs map[string]config.LaunchInputConfig) map[string]interface{} {
+	out := make(map[string]interface{}, len(inputs))
+	for name, in := range inputs {
+		item := map[string]interface{}{
+			"type":        in.Type,
+			"description": in.Description,
+		}
+		if len(in.Enum) > 0 {
+			item["enum"] = append([]string(nil), in.Enum...)
+		}
+		if in.Minimum != nil {
+			item["minimum"] = *in.Minimum
+		}
+		if in.Maximum != nil {
+			item["maximum"] = *in.Maximum
+		}
+		if in.Type == "string" {
+			maxLen := config.InputMaxLengthDefault
+			if in.MaxLength != nil {
+				maxLen = *in.MaxLength
+			}
+			item["maxLength"] = maxLen
+			if in.Pattern != "" {
+				// RE2 syntax, matched against the entire value.
+				item["pattern"] = in.Pattern
+				item["patternDialect"] = "re2-full-match"
+			}
+		}
+		if len(in.Profiles) > 0 {
+			item["profiles"] = append([]string(nil), in.Profiles...)
+		}
+		out[name] = item
+	}
+	return out
+}
+
+// gameConfigWarnings filters load warnings owned by one game.
+func gameConfigWarnings(cfg *config.GamesConfig, gameID string) []string {
+	prefix := "/games/" + gameID
+	var out []string
+	for _, w := range cfg.Warnings {
+		if strings.HasPrefix(w.Path, prefix+"/") || w.Path == prefix {
+			out = append(out, w.String())
+		}
+	}
+	return out
+}
+
+// attachConfigHealth adds global config warnings (those without an owning
+// game — MCP callers without a CLI must still see them) and any active
+// config error to a structured result.
+func attachConfigHealth(structured map[string]interface{}, cfg *config.GamesConfig, cfgErr *config.ConfigError) {
+	var global []string
+	for _, w := range cfg.Warnings {
+		if !strings.HasPrefix(w.Path, "/games/") {
+			global = append(global, w.String())
+		}
+	}
+	if len(global) > 0 {
+		structured["configWarnings"] = global
+	}
+	if cfgErr != nil {
+		structured["configError"] = cfgErr.Err.Error()
+		structured["invalidRevision"] = cfgErr.Revision
+	}
 }
 
 func (s *Server) gameStatusStructured(game config.GameConfig, status string) map[string]interface{} {
@@ -3592,8 +4023,8 @@ func (s *Server) cleanupStoppedGame(gameID string) {
 
 // startGame starts a game process using the serialized starter approach
 // This implements @pardeike's requirements for serialized, verified process starting
-func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration, startupGABPTimeout time.Duration, resetEndpoint bool) (*process.ProcessStartResult, error) {
-	launchSpec := launchSpecFromGame(game)
+func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration, startupGABPTimeout time.Duration, resetEndpoint bool, resolved *launch.Resolved) (*process.ProcessStartResult, error) {
+	launchSpec := launchSpecFromResolved(game, resolved)
 
 	controller := process.NewController()
 	if err := controller.Configure(launchSpec); err != nil {
@@ -3944,6 +4375,26 @@ func launchSpecFromGame(game config.GameConfig) process.LaunchSpec {
 		WorkingDir:      game.WorkingDir,
 		StopProcessName: game.StopProcessName,
 	}
+}
+
+// launchSpecFromResolved builds the process spec from the resolver output:
+// resolved args/env/cwd plus profile context, with macOS .app bundle targets
+// resolved to their inner executable for propagation-capable modes.
+func launchSpecFromResolved(game config.GameConfig, r *launch.Resolved) process.LaunchSpec {
+	spec := launchSpecFromGame(game)
+	if game.LaunchMode == "DirectPath" || game.LaunchMode == "" {
+		spec.PathOrId = launch.EffectiveDirectPathTarget(game.Target)
+	}
+	if r == nil {
+		return spec
+	}
+	spec.Args = append([]string(nil), r.Args...)
+	spec.WorkingDir = r.WorkingDir
+	spec.Profile = r.Profile
+	spec.Env = r.Env
+	spec.ContextEnvKeys = append([]string(nil), r.ContextEnvKeys...)
+	spec.AbsentEnvNames = append([]string(nil), r.AbsentEnvNames...)
+	return spec
 }
 
 // stopGame stops a game process gracefully or by force
