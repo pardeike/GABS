@@ -359,10 +359,42 @@ contract, not a scratchpad.
       their individual timeouts with s.mu released during evidence
       probes and deterministic output order — proven by a
       three-slow-hooks timing test)
-- [ ] M2.7 Restart recovery: liveness-driven, interrupted-phase
+- [x] M2.7 Restart recovery: liveness-driven, interrupted-phase
       normalization, spawning-window verdicts, executor-vs-owner —
       spec: 07, 05 Stage 3; tests: T-FENCE, T-START (claim-window),
       T-GATE
+      (RecoverInterruptedClaim in internal/process/recovery.go, invoked
+      lazily from the status evaluation path — no poller, no startup
+      sweep: recovery happens on the first observation that finds a dead
+      bounded attempt (executor provably gone or deadline expired, via
+      the shared OperationInFlight predicate that stop admission now
+      also uses — a provably dead executor unblocks a retry within the
+      window too). Stop/kill attempts normalize under the transition
+      lock fenced by launchID + the dead attempt's operationID:
+      lastActionResult{outcome: interrupted} recorded, operation
+      cleared, phase per liveness — running → active, stopped → fenced
+      removal (through the same attachment-guarded remove as stop
+      completions: a live foreign lease flips the verdict to kept-
+      active instead of clearing under a live bridge), unknown → active
+      with the unknown verdict reported; a dead attempt never renders
+      as operation_in_progress and an immediate retry is admitted.
+      The crash-during-spawn window follows design/05 Stage 3 exactly:
+      preflight + provably dead owner is the one safe removal and runs
+      no probes (proven with a running-answering pinned hook that is
+      never consulted, both in recovery and in GateStart's claim-window
+      path); spawning/spawned with a dead attempt resolve by the normal
+      liveness rule — running promotes to active, definitive stopped
+      removes, genuinely unknown preserves the claim occupied without a
+      write. Executor-vs-owner: normalization never touches the
+      attachment record (a CLI executor dying leaves the server-owned
+      bridge lease intact, tested) and the dead executor's late
+      completion stays rejected by its operationID. Recovery never
+      replays stop/kill hooks — liveness evidence only, tested via an
+      action-hook counter. A start attempt's interruption is not
+      recorded as lastActionResult (that field is the stop/kill journal
+      replacement, design/06). Recovered claims render truthfully in
+      games_status: normalized phase, interrupted lastActionResult, no
+      operation)
 - [ ] M2.8 Legacy claim migration + full normalization — spec: 07;
       tests: T-RT
 - [ ] M2.9 Expected-context digests + welcome `observed` parsing +

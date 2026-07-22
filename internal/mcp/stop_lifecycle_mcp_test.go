@@ -332,6 +332,48 @@ func TestGamesStatusPromotesUnobservedClaimOnRunningEvidence(t *testing.T) {
 	}
 }
 
+func TestStatusNormalizesInterruptedStopAttempt(t *testing.T) {
+	s := newProfiledServer(t)
+
+	ownStart, err := process.ProcessStartTime(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A stop attempt whose executor is provably gone (fingerprint can never
+	// match) while the workload is still running.
+	spec := process.LaunchSpec{GameId: "adventure", Mode: "DirectPath", PathOrId: "/opt/game"}
+	st := process.NewRuntimeState(spec, process.RuntimeStateStatusRunning)
+	st.Phase = process.PhaseStopping
+	st.SpawnState = process.SpawnStateSpawned
+	st.GamePID = os.Getpid()
+	st.PIDStartTime = ownStart
+	st.Operation = &process.RuntimeOperation{
+		OperationID: process.NewFencingID(), Action: "stop",
+		ExecutorPID: os.Getpid(), ExecutorPIDStartTime: ownStart + 24680,
+		AttemptStartedAt: time.Now().UTC().Add(-time.Minute),
+		Deadline:         time.Now().UTC().Add(time.Minute),
+	}
+	if err := process.ClaimRuntimeState("adventure", s.configDir, st); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, structured := callTool(t, s, "games.status", map[string]interface{}{"gameId": "adventure"})
+	if _, hasOp := structured["operation"]; hasOp {
+		t.Fatalf("a dead attempt must never render as in progress: %s", raw)
+	}
+	if structured["phase"] != "active" {
+		t.Fatalf("running workload must normalize the interrupted stop to active: %s", raw)
+	}
+	lar, ok := structured["lastActionResult"].(map[string]interface{})
+	if !ok || lar["outcome"] != "interrupted" || lar["action"] != "stop" {
+		t.Fatalf("the orphaned attempt must render as interrupted: %s", raw)
+	}
+	claim, _ := process.LoadRuntimeState("adventure", s.configDir)
+	if claim == nil || claim.Phase != process.PhaseActive || claim.Operation != nil {
+		t.Fatalf("normalization must persist: %+v", claim)
+	}
+}
+
 func TestControllerStatusPreservesInFlightClaim(t *testing.T) {
 	s := newProfiledServer(t)
 

@@ -119,7 +119,7 @@ func ExecuteStopAction(req StopRequest) (*StopOutcome, *StopRefusal, error) {
 		// One lifecycle operation per game at a time: an in-flight attempt
 		// refuses immediately with its timing — never queue, never block.
 		if cur := s.Operation; cur != nil {
-			if inFlight := !cur.Deadline.IsZero() && now.Before(cur.Deadline); inFlight && !executorProvablyGone(cur) {
+			if OperationInFlight(cur, now) {
 				opCopy := *cur
 				refusal = &StopRefusal{
 					Code:          RefusalOperationInFlight,
@@ -405,12 +405,16 @@ var errStopAttachmentLive = errors.New("live foreign bridge attachment")
 // when no fresh fingerprint-matched foreign attachment lease exists — the
 // last-instant re-check behind the per-round evidence reads.
 func removeRuntimeStateForStopCompletion(req StopRequest, launchID, operationID string) error {
-	lock, err := AcquireTransitionLock(req.GameID, req.ConfigDir, transitionLockGateTimeout)
+	return removeRuntimeStateGuarded(req.GameID, req.ConfigDir, req.InstanceID, launchID, operationID)
+}
+
+func removeRuntimeStateGuarded(gameID, configDir, instanceID, launchID, operationID string) error {
+	lock, err := AcquireTransitionLock(gameID, configDir, transitionLockGateTimeout)
 	if err != nil {
 		return err
 	}
 	defer lock.Release()
-	cur, err := LoadRuntimeState(req.GameID, req.ConfigDir)
+	cur, err := LoadRuntimeState(gameID, configDir)
 	if err != nil {
 		return err
 	}
@@ -423,14 +427,14 @@ func removeRuntimeStateForStopCompletion(req StopRequest, launchID, operationID 
 	if cur.Operation == nil || cur.Operation.OperationID != operationID {
 		return ErrFencingViolation
 	}
-	if a := cur.Attachment; a != nil && !attachmentOwnedBy(a, req.InstanceID) &&
+	if a := cur.Attachment; a != nil && !attachmentOwnedBy(a, instanceID) &&
 		a.OwnerPID > 0 && a.OwnerPIDStartTime != 0 &&
 		!a.LeaseDeadline.IsZero() && time.Now().Before(a.LeaseDeadline) {
 		if v, _ := VerifyPIDFingerprint(a.OwnerPID, a.OwnerPIDStartTime); v == StatusRunning {
 			return errStopAttachmentLive
 		}
 	}
-	return RemoveRuntimeState(req.GameID, req.ConfigDir)
+	return RemoveRuntimeState(gameID, configDir)
 }
 
 // RemoveRuntimeStateIfCurrent removes the claim only while it still carries

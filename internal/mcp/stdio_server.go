@@ -4011,12 +4011,45 @@ func (s *Server) resolveClaimStatusByLiveness(gameID string, claim *process.Runt
 	if claim.Source == process.SourceExternal && claim.ObservedProfile != "" && claim.ObservedProfile != process.ObservedProfileUnknown {
 		profile = claim.ObservedProfile
 	}
+	now := time.Now().UTC()
+
+	// Restart recovery is lazy and liveness-driven (design/07): a dead
+	// bounded attempt — executor provably gone or deadline expired — is
+	// normalized on this first observation. Stop/kill attempts are recorded
+	// as lastActionResult interrupted with the phase following liveness;
+	// the crash-during-spawn window promotes, removes, or stays occupied
+	// per its evidence. A dead attempt never renders as in progress, and
+	// the interrupted hook is never replayed.
+	if claim.Operation != nil && !process.OperationInFlight(claim.Operation, now) {
+		rec, rerr := process.RecoverInterruptedClaim(gameID, s.configDir, s.instanceID, claim, gabpLive, now)
+		if rerr != nil {
+			s.log.Warnw("claim recovery failed", "gameId", gameID, "error", rerr)
+			return "unknown"
+		}
+		if rec != nil {
+			if rec.Removed {
+				return "stale-runtime-cleaned"
+			}
+			if rec.Claim != nil {
+				claim = rec.Claim
+			}
+			if claim.Phase == process.PhaseActive {
+				if rec.Evidence.Verdict == process.StatusRunning {
+					return process.RuntimeStateStatusRunning
+				}
+				return "unknown"
+			}
+			// Preflight with a live-but-overdue executor, or the spawn
+			// window with genuinely unknown evidence: occupied.
+			return process.RuntimeStateStatusStarting
+		}
+	}
+
 	// An in-flight bounded operation owns its claim: status truthfully
 	// reports the persisted phase with the attempt's timing (design/06) and
 	// never cleans the claim out from under the executor — completion or
 	// interruption recovery does that.
-	opInFlight := claim.Operation != nil && !claim.Operation.Deadline.IsZero() &&
-		time.Now().UTC().Before(claim.Operation.Deadline)
+	opInFlight := process.OperationInFlight(claim.Operation, now)
 
 	ev := process.EvaluateLiveness(process.LivenessInput{
 		GABPLive:   gabpLive,
