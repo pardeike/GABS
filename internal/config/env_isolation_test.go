@@ -13,6 +13,7 @@ import (
 // This addresses the original concern about ENV variables being global rather than process-local.
 func TestENVIsolationInGameLaunching(t *testing.T) {
 	t.Log("Testing ENV variable isolation in concurrent game process launches...")
+	dir := t.TempDir() // isolate from ~/.gabs (round 12 F4)
 
 	var wg sync.WaitGroup
 	results := make([]envTestResult, 5)
@@ -25,7 +26,7 @@ func TestENVIsolationInGameLaunching(t *testing.T) {
 			defer wg.Done()
 
 			// Create bridge config for this game (each gets unique port/token)
-			port, token, _, err := WriteBridgeJSON(gID, "")
+			port, token, _, err := WriteBridgeJSON(gID, dir)
 			if err != nil {
 				results[index] = envTestResult{
 					GameID: gID,

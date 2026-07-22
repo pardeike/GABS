@@ -551,9 +551,19 @@ contract, not a scratchpad.
       operation_in_progress/blocked_unknown_state; occupied persistence
       failure is blocked_unknown_state), and the detach s.mu/
       transition-lock inversion is removed)
-- [~] M2.10 History store + classifier + input-combination buckets +
+- [!] M2.10 History store + classifier + input-combination buckets +
       edit notice + causeClass/track-record rendering — spec: 08; tests:
       T-TRACK
+      (BLOCKED on the design/05:220 wrapper/container→environment bad-case
+      row: no producer fact distinguishes a fast-exiting container wrapper
+      from a game crash at classification time — Resolved/LaunchSpec carry no
+      chain/wrapper/container signal, and CustomCommand is indistinguishable
+      from a container launch. exited_during_start therefore defaults to game
+      in production; the wrapper→environment path is classifier-ready
+      (ClassifyContext.WrapperExit) and unit-tested but UNREACHABLE until a
+      real producer fact is wired. Marked [!] per protocol §18 — an
+      unresolved deviation is [!], not [~] — round 12 F6. All other round-12
+      findings are closed; see the round-12 Deviations entry)
       (internal/process/history.go + classifier.go: a per-game 0600
       atomic history.json beside runtime.json, every read-modify-write
       under the per-game transition lock so a server delivery callback
@@ -650,6 +660,19 @@ contract, not a scratchpad.
       while the bogus markers appear nowhere (it passes because nothing reads
       them — the lock fails the moment a future change wires a diagnostic
       field into attribution). doctor DISPLAY of these fields is M3.2)
+- [x] M2.16 (added) Test-server isolation + background-task join — spec: 30
+      §race gate; tests: T-TRACK/T-DELIV race lanes
+      (round 12 F4 discovered work. NewServerForTesting defaulted configDir to
+      "" → the real ~/.gabs, so a test that skipped SetConfigDir read/wrote the
+      user's live GABS state; it now creates an isolated os.MkdirTemp dir, and
+      the config-package write tests (concurrency/env-isolation) and the
+      bridge-cleanup test were moved off ~/.gabs. Separately, Server.Shutdown()
+      cancels (shutdownCh) and JOINS every detached task — async mirroring,
+      attention setup, the attachment lease refresher, background GABP connect,
+      AND the in-flight peer-close handler (a disconnectWG guarded under s.mu so
+      no Add races Wait) — before t.TempDir teardown, closing the TempDir-clean
+      up race that was 5/10 under -race. Registered via t.Cleanup in the server
+      helpers. Full internal/mcp -race lane is now green)
 - [ ] M2.12 Remaining conformance cells (env-dropping, filtering,
       absent-env reintroduction, detached) — spec: 03; tests: T-DELIV
 - [ ] M2.13 repair --forget-runtime + no-arg games_status union of
@@ -675,6 +698,40 @@ contract, not a scratchpad.
 
 ## Deviations
 
+- 2026-07-22, M2.10, round 12 F6, design/05:220 (UNRESOLVED — blocks M2.10 at
+  [!]): the bad-case map requires a fast-exiting container/wrapper to classify
+  environment, but no producer fact distinguishes it from a game crash at
+  classification time — Resolved/LaunchSpec expose no chain-length, re-exec, or
+  container marker, and CustomCommand can equally run a game or a container.
+  exited_during_start defaults to game in production (design/08 "crash on start
+  → game"); the wrapper→environment path exists in the classifier
+  (ClassifyContext.WrapperExit) and is unit-tested but is unreachable until a
+  real producer fact is wired (a launch-chain/container flag on the resolved
+  spec). Recorded as unresolved; M2.10 stays [!] per protocol §18 until either
+  the signal is wired or the design drops the row.
+- 2026-07-22, M2.10, round 12 F9 (idempotency scope): the Stage-4 workloadStart
+  credit is now idempotent by launchID (CreditedLaunchIDs on the entry), because
+  its semantics are exactly-once-per-launch and the history write precedes the
+  runtime.json save inside one transition — a claim-save failure or crash
+  between the two files could otherwise let a later passive promotion
+  double-count. The two other locked counters the reviewer named are left
+  non-deduped by deliberate choice: bridgeConnects counts EVERY credential-bound
+  attachment (design/20 P1-7) and deliveriesVerified EVERY verified welcome, so
+  a fresh attachment/report is a legitimate new count, not a replay — and each
+  is already published under a unique connectionID fence. A retried transaction
+  would carry a new connectionID (a real new attachment), so there is no stale
+  replay to dedupe; adding launchID dedup there would UNDERCOUNT legitimate
+  reconnects. Flagged here so the asymmetry is a documented decision, not an
+  oversight.
+- 2026-07-22, M2.10, round 12 F3, design/10:37 (authorized codes): two codes
+  invented in round 11 were removed. Malformed profile/launchInputs CONTAINER
+  arguments (wrong JSON type) now return a plain protocol-level invalid-params
+  error with NO stable code — they are not lifecycle outcomes and the
+  exhaustive list has no code for them. The internal stop/kill execution error
+  (lock/persistence/system failure) maps to the authorized state code
+  blocked_unknown_state, not a new action_execution_failed. A classifier
+  exhaustiveness test now maps every code in design/10's list to exactly one
+  class (failure) or none (success/pending), rejecting future invented codes.
 - 2026-07-21, M1.6 + M1.11, protocol §rules: both items were marked [x]
   with parenthetical scope-narrowing notes instead of remaining open or
   carrying Deviations entries — caught in review. Resolution: M1.6's

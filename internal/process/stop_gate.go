@@ -414,7 +414,9 @@ func persistStopCompletion(req StopRequest, launchID, operationID, phase, status
 		if lerr == nil {
 			if cur, cerr := LoadRuntimeState(req.GameID, req.ConfigDir); cerr == nil && cur != nil && cur.LaunchID == launchID {
 				class := Classify(result.Outcome, ClassifyContext{}).Class
-				ApplyActionFailureLocked(req.GameID, req.ConfigDir, req.HistoryProfile, req.HistoryContextHash, result.Outcome, class, result.Timestamp)
+				// The pinned input-name set (names only, never values) so an
+				// input-bearing launch's failure records its inputs (F7).
+				ApplyActionFailureLocked(req.GameID, req.ConfigDir, req.HistoryProfile, req.HistoryContextHash, result.Outcome, class, cur.AppliedInputNames, result.Timestamp)
 			}
 			lock.Release()
 		}

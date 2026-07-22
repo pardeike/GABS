@@ -87,6 +87,13 @@ type HistoryEntry struct {
 	ConsecutiveFailures uint64          `json:"consecutiveFailures"`
 	LastFailure         *HistoryFailure `json:"lastFailure,omitempty"`
 	Buckets             []HistoryBucket `json:"buckets,omitempty"`
+	// CreditedLaunchIDs are the launches whose Stage-4 verified start already
+	// counted (round 12 F9): the history write happens inside the runtime-state
+	// transition callback but BEFORE runtime.json is saved, so a claim-save
+	// failure or a crash between the two files could otherwise let a later
+	// passive promotion double-count. Keyed by launchID, the credit is
+	// idempotent across both crash directions. LRU-capped.
+	CreditedLaunchIDs []string `json:"creditedLaunchIds,omitempty"`
 }
 
 func (e *HistoryEntry) hasBucket(declHash, valueDigest string) bool {
@@ -235,6 +242,19 @@ func EnsureBucketKey(gameID, configDir string) (string, error) {
 		key = h.BucketKey // mutateHistory already minted it if absent
 	})
 	return key, err
+}
+
+// BucketKeyIfExists returns the per-game bucket key WITHOUT minting it or
+// creating the history file (round 12 F8) — for the read-only failure path,
+// which must compare a proven input combination's digest without mutating
+// history. Empty when no key has been minted: the combination is genuinely
+// unproven.
+func BucketKeyIfExists(gameID, configDir string) string {
+	h, err := LoadHistory(gameID, configDir)
+	if err != nil || h == nil {
+		return ""
+	}
+	return h.BucketKey
 }
 
 // LoadHistory reads the game's track record, degrading a missing or corrupt
@@ -476,12 +496,27 @@ func ApplyBridgeConnectLocked(gameID, configDir, profile, contextHash string) {
 // passive status observation, bridge attachment, restart recovery) credits the
 // start exactly once (round 11 P1-2). The identity is the one pinned in the
 // claim at publication, never recomputed from hot config.
-func ApplyWorkloadStartLocked(gameID, configDir, profile, contextHash string, snap ContextSnapshot, bucket SuccessBucket, at time.Time) {
+func ApplyWorkloadStartLocked(gameID, configDir, profile, contextHash, launchID string, snap ContextSnapshot, bucket SuccessBucket, at time.Time) {
 	if contextHash == "" {
 		return
 	}
 	_ = applyHistoryLocked(gameID, configDir, func(h *GameHistory) {
 		e := h.entryForContext(profile, contextHash)
+		// Idempotent by launchID (round 12 F9): if this launch's start was
+		// already credited (a retried promote after a runtime-save failure, or
+		// a passive promotion after a crash between the history and runtime
+		// writes), do not double-count.
+		if launchID != "" {
+			for _, id := range e.CreditedLaunchIDs {
+				if id == launchID {
+					return
+				}
+			}
+			e.CreditedLaunchIDs = append(e.CreditedLaunchIDs, launchID)
+			if len(e.CreditedLaunchIDs) > creditedLaunchCap {
+				e.CreditedLaunchIDs = e.CreditedLaunchIDs[len(e.CreditedLaunchIDs)-creditedLaunchCap:]
+			}
+		}
 		e.WorkloadStarts++
 		e.ConsecutiveFailures = 0
 		e.LastSuccessAt = at
@@ -500,6 +535,11 @@ func ApplyWorkloadStartLocked(gameID, configDir, profile, contextHash string, sn
 	})
 }
 
+// creditedLaunchCap bounds the per-entry dedup ring — a launch is credited
+// once, and only very recent launchIDs can race a double-credit, so a small
+// LRU window is sufficient.
+const creditedLaunchCap = 16
+
 // ApplyPinnedWorkloadStartLocked records a Stage 4 verified start from the
 // identity pinned in the claim, using an already-held runtime-state transition
 // lock (round 11 P1-2). No-op for a claim without a pinned identity. The caller
@@ -510,18 +550,20 @@ func ApplyPinnedWorkloadStartLocked(gameID, configDir string, st *RuntimeState, 
 		return
 	}
 	ApplyWorkloadStartLocked(gameID, configDir, EffectiveClaimProfile(st),
-		st.HistoryContextHash, st.HistorySuccess.Snapshot, st.HistorySuccess.Bucket, at)
+		st.HistoryContextHash, st.LaunchID, st.HistorySuccess.Snapshot, st.HistorySuccess.Bucket, at)
 }
 
 // ApplyActionFailureLocked records a terminal failure of an accepted attempt
 // (a stop/kill action failure, or an unobserved start) using an already held
 // transition lock, fenced by the caller's own launch/operation identity — so
-// a stale completion can never bump a successor's history (rounds 10-11).
-func ApplyActionFailureLocked(gameID, configDir, profile, contextHash, outcome, class string, at time.Time) {
+// a stale completion can never bump a successor's history (rounds 10-11). The
+// supplied input names are recorded so an input-bearing attempt does not
+// serialize as if no inputs were supplied (round 12 F7; design/08:20).
+func ApplyActionFailureLocked(gameID, configDir, profile, contextHash, outcome, class string, inputNames []string, at time.Time) {
 	_ = applyHistoryLocked(gameID, configDir, func(h *GameHistory) {
 		e := h.entryForContext(profile, contextHash)
 		e.ConsecutiveFailures++
-		e.LastFailure = &HistoryFailure{Outcome: outcome, Class: class, At: at}
+		e.LastFailure = &HistoryFailure{Outcome: outcome, Class: class, InputNames: append([]string(nil), inputNames...), At: at}
 	})
 }
 

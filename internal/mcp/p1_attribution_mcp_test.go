@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/pardeike/gabs/internal/config"
@@ -102,6 +103,98 @@ func TestNeverProvenMissingTargetIsConfig(t *testing.T) {
 	}
 }
 
+// TestEveryLifecycleFailureCarriesAttribution is the F1 handler-level net:
+// failures that return directly (unknown/ambiguous game, and the generic
+// paths) must still carry causeClass + a track-record line via the final
+// safety-net finalizer at dispatch — none may escape (design/08:53).
+func TestEveryLifecycleFailureCarriesAttribution(t *testing.T) {
+	cases := []struct {
+		tool  string
+		code  string
+		class string
+	}{
+		{"games.start", "game_not_found", process.CauseCall},
+		{"games.connect", "game_not_found", process.CauseCall},
+		{"games.stop", "game_not_found", process.CauseCall},
+		{"games.kill", "game_not_found", process.CauseCall},
+	}
+	for _, tc := range cases {
+		t.Run(tc.tool, func(t *testing.T) {
+			s := newProfiledServer(t)
+			raw, structured := callTool(t, s, tc.tool, map[string]interface{}{"gameId": "does-not-exist"})
+			if structured["code"] != tc.code {
+				t.Fatalf("%s: expected %s, got %v (%s)", tc.tool, tc.code, structured["code"], raw)
+			}
+			if structured["causeClass"] != tc.class {
+				t.Fatalf("%s: a direct-return failure must still carry causeClass, got %#v", tc.tool, structured["causeClass"])
+			}
+			if line, ok := structured["trackRecord"].(string); !ok || !strings.Contains(line, "no successful starts") {
+				t.Fatalf("%s: must carry the neutral track-record line, got %#v", tc.tool, structured["trackRecord"])
+			}
+		})
+	}
+}
+
+// TestProvenInputComboOnMissingTargetIsNotFirstRun covers F8: the read-only
+// failure path computes the value digest when the bucket key exists, so a
+// launch_spec_unresolvable on a target that vanished — with a previously
+// PROVEN exact input combination — is not mislabeled "first run with this
+// input combination".
+func TestProvenInputComboOnMissingTargetIsNotFirstRun(t *testing.T) {
+	cfgDir := t.TempDir()
+	targetDir := t.TempDir()
+	target := filepath.Join(targetDir, "game.sh")
+	if err := os.WriteFile(target, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	game := config.GameConfig{
+		ID: "vanish", Name: "Vanish", LaunchMode: "DirectPath", Target: target,
+		LaunchInputs: map[string]config.LaunchInputConfig{
+			"scenario": {Description: "pick", Type: "string", Enum: []string{"arena", "tutorial"}, Args: []string{"-scenario=${value}"}},
+		},
+	}
+	s := NewServerForTesting(util.NewLogger("error"))
+	s.SetConfigDir(cfgDir)
+	t.Cleanup(s.Shutdown)
+	s.RegisterGameManagementTools(&config.GamesConfig{
+		Version: "1.0", Games: map[string]config.GameConfig{game.ID: game},
+	}, 0, 0)
+
+	// Prove BOTH the context and the exact scenario=arena input combination.
+	snap, _ := s.currentSnapshot()
+	base, _ := launch.ResolveBaseContext(snap, game.ID, "", launch.Options{InheritedEnv: os.Environ(), CaseInsensitiveEnv: runtime.GOOS == "windows"})
+	hash := process.ContextHash(base)
+	key, _ := process.EnsureBucketKey(game.ID, s.configDir)
+	bucket := process.SuccessBucket{
+		InputNames:   []string{"scenario"},
+		PerInputDecl: map[string]string{"scenario": process.InputDeclHash(game, []string{"scenario"})},
+		DeclHash:     process.InputDeclHash(game, []string{"scenario"}),
+		ValueDigest:  process.BucketValueDigest(key, map[string]string{"scenario": "arena"}),
+	}
+	lid := seedTrackClaim(t, game.ID, s.configDir)
+	if err := process.RecordWorkloadStart(game.ID, s.configDir, lid, "", hash, process.ContextSnapshot{}, bucket, timeNow()); err != nil {
+		t.Fatal(err)
+	}
+	_ = process.RemoveRuntimeState(game.ID, s.configDir)
+
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+
+	_, structured := callTool(t, s, "games.start", map[string]interface{}{
+		"gameId": game.ID, "launchInputs": map[string]interface{}{"scenario": "arena"},
+	})
+	if structured["code"] != "launch_spec_unresolvable" {
+		t.Fatalf("expected launch_spec_unresolvable, got %v", structured["code"])
+	}
+	if structured["causeClass"] != process.CauseEnvironment {
+		t.Fatalf("a proven context now missing is environment, got %#v", structured["causeClass"])
+	}
+	if note, ok := structured["candidateInputNote"].(string); ok && strings.Contains(note, "first run") {
+		t.Fatalf("a proven input combination must NOT read as first run: %q", note)
+	}
+}
+
 // TestCallClassFailuresCarryCallClassAndMutateNoHistory covers the pre-
 // resolution call-class errors: each must carry causeClass:call, no track
 // line, and mutate no history.
@@ -115,7 +208,6 @@ func TestCallClassFailuresCarryCallClassAndMutateNoHistory(t *testing.T) {
 		{"bad input", map[string]interface{}{"gameId": "adventure", "launchInputs": map[string]interface{}{"scenario": "not-in-enum"}}, "launch_input_invalid"},
 		{"timeout out of range", map[string]interface{}{"gameId": "adventure", "timeout": 99999}, "timeout_out_of_range"},
 		{"unknown argument", map[string]interface{}{"gameId": "adventure", "bogusArg": true}, "unknown_argument"},
-		{"malformed profile", map[string]interface{}{"gameId": "adventure", "profile": 42}, "invalid_argument"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -127,8 +219,11 @@ func TestCallClassFailuresCarryCallClassAndMutateNoHistory(t *testing.T) {
 			if structured["causeClass"] != process.CauseCall {
 				t.Fatalf("%s must be call-class, got %#v", tc.code, structured["causeClass"])
 			}
-			if _, ok := structured["trackRecord"]; ok {
-				t.Fatalf("a pre-resolution error has no context and must render no track line: %s", raw)
+			// design/08 §call-class: the response still carries track-record
+			// evidence — the neutral "no successful starts" line (round 12 F2).
+			line, ok := structured["trackRecord"].(string)
+			if !ok || !strings.Contains(line, "no successful starts") {
+				t.Fatalf("a call-class error must carry the neutral track-record line: %#v", structured["trackRecord"])
 			}
 			if h, _ := process.LoadHistory("adventure", s.configDir); len(h.Profiles) != 0 {
 				t.Fatalf("a call-class error must mutate no history: %+v", h.Profiles)

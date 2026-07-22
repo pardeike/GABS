@@ -14,8 +14,11 @@ import (
 	"github.com/pardeike/gabs/internal/util"
 )
 
-// flashExitServer configures a game whose target exits immediately, so a
-// start reliably produces exited_during_start with a resolved context.
+// flashExitServer configures a game whose workload exits BEFORE Stage 4, via a
+// deterministic fake controller (round 12 F5) — a real subprocess's timing is
+// non-deterministic under -race and would sometimes be credited a Stage-4
+// workloadStart before dying. The injected controller proves the exit, so
+// exited_during_start with no workloadStart is deterministic.
 func flashExitServer(t *testing.T) (*Server, config.GameConfig) {
 	t.Helper()
 	exe, err := os.Executable()
@@ -28,6 +31,8 @@ func flashExitServer(t *testing.T) (*Server, config.GameConfig) {
 	}
 	s := NewServerForTesting(util.NewLogger("error"))
 	s.SetConfigDir(t.TempDir())
+	t.Cleanup(s.Shutdown)
+	s.SetControllerFactoryForTesting(newExitBeforeStage4Controller)
 	s.RegisterGameManagementTools(&config.GamesConfig{
 		Version: "1.0",
 		Games:   map[string]config.GameConfig{game.ID: game},
@@ -52,6 +57,39 @@ func TestExitedDuringStartCarriesGameCauseAndActions(t *testing.T) {
 	}
 	// No next action for a non-config class may propose editing config.
 	assertNoConfigEditAction(t, raw, structured)
+}
+
+// TestVerifiedThenStage5DeathRecordsStartAndFailure is the F5 companion cell:
+// a workload verified running at Stage 4 (one workloadStart) that then dies
+// during the Stage-5 bridge wait records exactly one failure on top. Both
+// halves are deterministic via the fake controller.
+func TestVerifiedThenStage5DeathRecordsStartAndFailure(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewServerForTesting(util.NewLogger("error"))
+	s.SetConfigDir(t.TempDir())
+	t.Cleanup(s.Shutdown)
+	s.SetControllerFactoryForTesting(newVerifiedThenDeathController)
+	game := config.GameConfig{
+		ID: "flash", Name: "Flash", LaunchMode: "DirectPath", Target: exe,
+		Args: []string{"-test.run=TestSharedRuntimeStateHelperProcess"},
+	}
+	s.RegisterGameManagementTools(&config.GamesConfig{
+		Version: "1.0", Games: map[string]config.GameConfig{game.ID: game},
+	}, 0, 0)
+
+	callTool(t, s, "games.start", map[string]interface{}{"gameId": game.ID, "timeout": 1})
+
+	h, _ := process.LoadHistory(game.ID, s.configDir)
+	e := h.Profiles[""]
+	if e == nil || e.WorkloadStarts != 1 {
+		t.Fatalf("a Stage-4-verified start must credit one workloadStart: %+v", e)
+	}
+	if e.ConsecutiveFailures != 1 || e.LastFailure == nil || e.LastFailure.Outcome != "exited_during_start" {
+		t.Fatalf("a Stage-5 death must record one failure after the credit: %+v", e)
+	}
 }
 
 func TestNextActionsNeverProposeConfigEditForNonConfigClasses(t *testing.T) {

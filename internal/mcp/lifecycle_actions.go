@@ -222,13 +222,18 @@ func (s *Server) recordBridgeAttachment(gameID string, client *gabp.Client, endp
 		s.clearBridgeAttachment(gameID, launchID, connID)
 		return bridgeAttachmentRef{}, errAttachmentSuperseded
 	}
-	go s.refreshBridgeAttachmentLease(gameID, launchID, connID, stillCurrent, lease)
+	s.bgWG.Add(1)
+	go func() {
+		defer s.bgWG.Done()
+		s.refreshBridgeAttachmentLease(gameID, launchID, connID, stillCurrent, lease)
+	}()
 	return ref, nil
 }
 
 // refreshBridgeAttachmentLease renews the persisted lease while the socket
 // stays connected (design/04); it stops the moment the connection dies, the
-// identity rotates, or the fenced write is rejected.
+// identity rotates, the fenced write is rejected, or the server shuts down
+// (round 12 F4 — so it never writes runtime.json during TempDir teardown).
 func (s *Server) refreshBridgeAttachmentLease(gameID, launchID, connID string, isConnected func() bool, lease time.Duration) {
 	interval := lease / 3
 	if interval < time.Second {
@@ -236,7 +241,12 @@ func (s *Server) refreshBridgeAttachmentLease(gameID, launchID, connID string, i
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	for range ticker.C {
+	for {
+		select {
+		case <-s.shutdownCh:
+			return
+		case <-ticker.C:
+		}
 		s.mu.RLock()
 		cur, ok := s.bridgeAttachments[gameID]
 		s.mu.RUnlock()
@@ -372,12 +382,12 @@ func (s *Server) lifecycleActionResult(game config.GameConfig, action, configRev
 		},
 	})
 	if err != nil {
-		// An internal execution error (lock/persistence/system failure) is a
-		// GABS-side state situation to resolve, not a clean action outcome —
-		// it still carries attribution (round 11 P1-1) with the pinned
-		// context's track record. No history is mutated.
-		structured := map[string]interface{}{"code": "action_execution_failed", "gameId": game.ID, "action": action}
-		s.attachStructuredFailureAttribution(structured, game, "action_execution_failed",
+		// An internal execution error (lock/persistence/system failure) leaves
+		// GABS runtime state unresolved — the authorized state-class code is
+		// blocked_unknown_state (round 12 F3; not an invented code). It carries
+		// attribution with the pinned context's track record; no history write.
+		structured := map[string]interface{}{"code": "blocked_unknown_state", "gameId": game.ID, "action": action}
+		s.attachStructuredFailureAttribution(structured, game, "blocked_unknown_state",
 			historyContext{profile: stopProfile, contextHash: stopHash})
 		return &ToolResult{
 			Content:           []Content{{Type: "text", Text: fmt.Sprintf("Failed to %s '%s': %v", action, game.ID, err)}},
@@ -716,8 +726,28 @@ func (s *Server) computeHistoryContext(snap *config.Snapshot, game config.GameCo
 		hc.bucket.InputNames = inputNames
 		hc.bucket.DeclHash = process.InputDeclHash(game, inputNames)
 		hc.bucket.PerInputDecl = perInputDeclHashes(game, inputNames)
+		// Compute the value digest READ-ONLY when a bucket key already exists
+		// (round 12 F8), so a pre-accept failure (launch_spec_unresolvable) on
+		// a previously proven exact input combination is recognized as proven
+		// rather than always "first run". If no key exists, the combination is
+		// genuinely unproven and the digest stays empty — no key is minted.
+		if key := process.BucketKeyIfExists(game.ID, s.configDir); key != "" {
+			hc.bucket.ValueDigest = process.BucketValueDigest(key, appliedInputValues(inputNames, inputs))
+		}
 	}
 	return hc
+}
+
+// appliedInputValues maps supplied input names to their string values for the
+// per-game-keyed value digest (values never persist in the clear).
+func appliedInputValues(inputNames []string, inputs map[string]interface{}) map[string]string {
+	applied := map[string]string{}
+	for _, n := range inputNames {
+		if v, ok := inputs[n]; ok {
+			applied[n] = fmt.Sprintf("%v", v)
+		}
+	}
+	return applied
 }
 
 // buildHistoryContext is the ACCEPTED-START context: the pure coordinates plus
@@ -742,13 +772,7 @@ func (s *Server) buildHistoryContext(snap *config.Snapshot, game config.GameConf
 
 	if len(hc.inputNames) > 0 {
 		if key, err := process.EnsureBucketKey(game.ID, s.configDir); err == nil {
-			applied := map[string]string{}
-			for _, n := range hc.inputNames {
-				if v, ok := inputs[n]; ok {
-					applied[n] = fmt.Sprintf("%v", v)
-				}
-			}
-			hc.bucket.ValueDigest = process.BucketValueDigest(key, applied)
+			hc.bucket.ValueDigest = process.BucketValueDigest(key, appliedInputValues(hc.inputNames, inputs))
 		}
 	}
 	return hc
@@ -823,6 +847,48 @@ func writeEligibleStartFailure(code string) bool {
 	}
 }
 
+// lifecycleFailureTools are the start/connect/stop/kill tools whose every
+// stable failure result must carry attribution (round 12 F1). Both the dotted
+// and strict-safe spellings are listed since either can reach dispatch.
+var lifecycleFailureTools = map[string]bool{
+	"games.start": true, "games_start": true,
+	"games.connect": true, "games_connect": true,
+	"games.stop": true, "games_stop": true,
+	"games.kill": true, "games_kill": true,
+}
+
+// ensureFailureAttribution is the FINAL safety net over the start/connect/stop
+// pipelines (round 12 F1): any stable FAILURE result that reached dispatch
+// without causeClass gets code-only attribution — the class, the neutral
+// track-record line, and class-keyed next actions — so no terminal branch can
+// escape the "every failure carries attribution" contract (design/08:53,
+// design/20:220). Branches that already attributed (often proof-adjusted) are
+// left untouched; success/pending codes get nothing (empty class).
+func (s *Server) ensureFailureAttribution(toolName string, result *ToolResult) {
+	if result == nil || result.StructuredContent == nil || !lifecycleFailureTools[toolName] {
+		return
+	}
+	code, _ := result.StructuredContent["code"].(string)
+	if code == "" {
+		return
+	}
+	if _, has := result.StructuredContent["causeClass"]; has {
+		return
+	}
+	class := process.Classify(code, process.ClassifyContext{}).Class
+	if class == "" {
+		return // success / pending — no failure cause
+	}
+	result.StructuredContent["causeClass"] = class
+	if _, has := result.StructuredContent["trackRecord"]; !has {
+		result.StructuredContent["trackRecord"] = process.TrackRecordLine(nil)
+	}
+	if _, has := result.StructuredContent["nextActions"]; !has {
+		gameID, _ := result.StructuredContent["gameId"].(string)
+		result.StructuredContent["nextActions"] = failureNextActions(gameID, class)
+	}
+}
+
 // attachStructuredFailureAttribution is the SINGLE mandatory read-only
 // attribution path for every structured failure result (design/20: "every
 // failure result gets causeClass and one track-record line"; round 11 P1-1).
@@ -844,30 +910,31 @@ func (s *Server) attachStructuredFailureAttribution(structured map[string]interf
 
 // attachFailureAttribution renders a failure result's track-record fields
 // (design/08): causeClass, the candidate-input secondary note, class-keyed
-// next actions (a non-config class NEVER proposes a config edit), and — only
-// when a resolved context is present — a one-line track record and the
-// once-per-edit visibility notice. A pre-resolution error (empty context
-// hash) has no context to speak of, so no track line is rendered.
+// next actions (a non-config class NEVER proposes a config edit), and ALWAYS a
+// one-line track record. Per design/08 §"call-class" the response still
+// carries track-record evidence even for a pre-resolution error: with no
+// resolved context, TrackRecordLine(nil) renders the neutral "no successful
+// starts recorded for this context" form (round 12 F2). The once-per-edit
+// visibility notice only applies to a resolved context.
 func (s *Server) attachFailureAttribution(structured map[string]interface{}, game config.GameConfig, hc historyContext, class, secondaryNote string) {
 	structured["causeClass"] = class
 	if secondaryNote != "" {
 		structured["candidateInputNote"] = secondaryNote
 	}
+	var entry *process.HistoryEntry
 	if hc.contextHash != "" {
-		// A never-proven context still renders an explicit line ("no
-		// successful starts recorded") — the absence of proof is itself the
-		// evidence (design/08; round 10).
-		var entry *process.HistoryEntry
 		if h, err := process.LoadHistory(game.ID, s.configDir); err == nil {
 			if e := h.Profiles[hc.profile]; e != nil && e.ContextHash == hc.contextHash {
 				entry = e
 			}
 		}
-		structured["trackRecord"] = process.TrackRecordLine(entry)
 		if notice := s.editNoticeFor(game.ID, hc); notice != "" {
 			structured["editNotice"] = notice
 		}
 	}
+	// entry is nil for a never-proven or contextless failure — TrackRecordLine
+	// renders the neutral line either way, so every failure carries evidence.
+	structured["trackRecord"] = process.TrackRecordLine(entry)
 	structured["nextActions"] = failureNextActions(game.ID, class)
 }
 
@@ -1195,14 +1262,17 @@ func (s *Server) buildTrackRecordSummary(snap *config.Snapshot, game config.Game
 // attachStopTrackRecord renders the track-record line for a stop/kill
 // result. A verified termination clears the claim (and often the history
 // entry stays), so the line reflects whatever proof the context still holds
-// — never mutating it here (design/08).
+// — never mutating it here (design/08). It ALWAYS renders a line: the neutral
+// "no successful starts" form when the pinned context has no entry (round 12
+// F2), so every stop/kill failure carries track-record evidence.
 func (s *Server) attachStopTrackRecord(structured map[string]interface{}, gameID, profile, contextHash string) {
-	if contextHash == "" {
-		return
-	}
-	if h, err := process.LoadHistory(gameID, s.configDir); err == nil {
-		if e := h.Profiles[profile]; e != nil && e.ContextHash == contextHash {
-			structured["trackRecord"] = process.TrackRecordLine(e)
+	var entry *process.HistoryEntry
+	if contextHash != "" {
+		if h, err := process.LoadHistory(gameID, s.configDir); err == nil {
+			if e := h.Profiles[profile]; e != nil && e.ContextHash == contextHash {
+				entry = e
+			}
 		}
 	}
+	structured["trackRecord"] = process.TrackRecordLine(entry)
 }

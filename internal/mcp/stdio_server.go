@@ -48,6 +48,24 @@ type Server struct {
 	instanceID        string
 	ownerLease        time.Duration
 	stripOutputSchema bool // Strip outputSchema from tools/list responses
+
+	// Background-task lifecycle (round 12 F4): every detached task — async
+	// tool mirroring, attention setup, and the attachment lease refresher —
+	// registers with bgWG and honors shutdownCh, so Shutdown() can cancel and
+	// JOIN them before a test's TempDir teardown (or a real server exit). A
+	// lease/mirroring goroutine writing runtime.json during RemoveAll is the
+	// TempDir-cleanup race this closes.
+	bgWG         sync.WaitGroup
+	disconnectWG sync.WaitGroup // in-flight peer-close handlers (joined by Shutdown)
+	shutdownCh   chan struct{}
+	shutdownOnce sync.Once
+
+	// newController builds the process controller for a start. Injectable so a
+	// test can supply a controller with DETERMINISTIC liveness (exit before
+	// Stage 4, or verified-then-Stage-5-death) — a real subprocess's timing is
+	// non-deterministic under -race and would credit or skip the Stage-4 start
+	// by luck (round 12 F5). Defaults to process.NewController.
+	newController func() process.ControllerInterface
 }
 
 type gabpDisconnectRecord struct {
@@ -95,6 +113,47 @@ type ResourceHandler struct {
 	Handler  func() ([]Content, error)
 }
 
+// SetControllerFactoryForTesting injects a deterministic controller builder
+// (round 12 F5). Tests use it to prove exit before Stage 4 (no workloadStart)
+// or a Stage-4-verified-then-Stage-5-death without depending on subprocess
+// timing under -race.
+func (s *Server) SetControllerFactoryForTesting(f func() process.ControllerInterface) {
+	s.newController = f
+}
+
+// Shutdown cancels and JOINS every background task the server started
+// (async mirroring, attention setup, attachment lease refresh) — round 12 F4.
+// It signals shutdownCh, disconnects live GABP clients to unblock any task
+// parked in a blocking read/RPC, then waits for all registered goroutines to
+// return. Idempotent. Tests register this via t.Cleanup so no background write
+// can race TempDir teardown; a real server calls it on exit.
+func (s *Server) Shutdown() {
+	// Signal shutdown AND snapshot/detach clients under one lock so it is
+	// atomic with dispatchGABPDisconnect's guarded Add: a peer-close handler
+	// either registered with disconnectWG before this point (and is joined
+	// below) or sees shutdownCh closed and no-ops. No clearBridgeAttachment
+	// write can escape the join (round 12 F4).
+	s.mu.Lock()
+	s.shutdownOnce.Do(func() { close(s.shutdownCh) })
+	clients := make([]*gabp.Client, 0, len(s.gabpClients))
+	for id, c := range s.gabpClients {
+		if c != nil {
+			clients = append(clients, c)
+		}
+		delete(s.gabpClients, id)
+	}
+	s.bridgeAttachments = nil
+	s.mu.Unlock()
+
+	// Close clients to unblock any task parked in a blocking read/RPC, then
+	// JOIN both the background tasks and any in-flight disconnect handler.
+	for _, c := range clients {
+		_ = c.Close()
+	}
+	s.disconnectWG.Wait()
+	s.bgWG.Wait()
+}
+
 func NewServer(log util.Logger) *Server {
 	return &Server{
 		log:             log,
@@ -112,17 +171,30 @@ func NewServer(log util.Logger) *Server {
 		starter:         process.NewSerializedStarter(), // Initialize serialized starter
 		instanceID:      newServerInstanceID(),
 		ownerLease:      (&config.GamesConfig{}).GetSessionOwnerLease(),
+		shutdownCh:      make(chan struct{}),
+		newController:   func() process.ControllerInterface { return process.NewController() },
 	}
 }
 
-// NewServerForTesting creates a server with shorter timeouts for testing
+// NewServerForTesting creates a server with shorter timeouts for testing.
+// configDir defaults to a FRESH isolated temp directory, never the empty
+// string — an empty configDir resolves to the real ~/.gabs (config.NewConfigPaths),
+// so a test that forgot SetConfigDir, or any code path that runs before it,
+// would read and write the user's actual GABS state (round 12 F4). Tests that
+// call SetConfigDir override this harmless default.
 func NewServerForTesting(log util.Logger) *Server {
+	isolated, err := os.MkdirTemp("", "gabs-test-isolated-")
+	if err != nil {
+		// A test host without a writable temp dir cannot run these tests
+		// safely; failing loud beats silently falling back to ~/.gabs.
+		panic(fmt.Sprintf("NewServerForTesting: cannot create isolated config dir: %v", err))
+	}
 	return &Server{
 		log:             log,
 		tools:           make(map[string]*ToolHandler),
 		resources:       make(map[string]*ResourceHandler),
 		games:           make(map[string]process.ControllerInterface),
-		configDir:       "", // Will be set by SetConfigDir
+		configDir:       isolated,
 		writers:         make([]util.FrameWriter, 0),
 		gameTools:       make(map[string][]string),
 		gameToolAliases: make(map[string]gameToolAlias),
@@ -133,6 +205,8 @@ func NewServerForTesting(log util.Logger) *Server {
 		starter:         process.NewSerializedStarterForTesting(), // Use testing timeouts
 		instanceID:      newServerInstanceID(),
 		ownerLease:      (&config.GamesConfig{}).GetSessionOwnerLease(),
+		shutdownCh:      make(chan struct{}),
+		newController:   func() process.ControllerInterface { return process.NewController() },
 	}
 }
 
@@ -374,9 +448,10 @@ func strictArgs(args map[string]interface{}, allowed ...string) *ToolResult {
 			"unknown": unknown,
 			"allowed": sortedAllowed,
 			// A wrong request is call-class — fix the call, not the config
-			// (design/08; round 11 P1-1). No context exists to hash here, so
-			// there is no track-record line.
-			"causeClass": process.CauseCall,
+			// (design/08; round 11 P1-1). It still carries the neutral track-
+			// record line: no context exists to hash (round 12 F2).
+			"causeClass":  process.CauseCall,
+			"trackRecord": process.TrackRecordLine(nil),
 		},
 	}
 }
@@ -1099,12 +1174,12 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		if raw, exists := args["profile"]; exists && raw != nil {
 			str, ok := raw.(string)
 			if !ok {
-				structured := map[string]interface{}{"code": "invalid_argument", "path": "/profile"}
-				s.attachStructuredFailureAttribution(structured, *game, "invalid_argument", historyContext{})
+				// A wrong-typed argument is a protocol-level invalid parameter,
+				// not a lifecycle outcome — it carries no stable code (the
+				// exhaustive list has none for it; round 12 F3).
 				return &ToolResult{
-					Content:           []Content{{Type: "text", Text: "Argument 'profile' must be a string"}},
-					IsError:           true,
-					StructuredContent: structured,
+					Content: []Content{{Type: "text", Text: "Argument 'profile' must be a string"}},
+					IsError: true,
 				}, nil
 			}
 			profileArg = str
@@ -1113,12 +1188,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		if raw, exists := args["launchInputs"]; exists && raw != nil {
 			m, ok := raw.(map[string]interface{})
 			if !ok {
-				structured := map[string]interface{}{"code": "invalid_argument", "path": "/launchInputs"}
-				s.attachStructuredFailureAttribution(structured, *game, "invalid_argument", historyContext{})
 				return &ToolResult{
-					Content:           []Content{{Type: "text", Text: "Argument 'launchInputs' must be an object of declared input values"}},
-					IsError:           true,
-					StructuredContent: structured,
+					Content: []Content{{Type: "text", Text: "Argument 'launchInputs' must be an object of declared input values"}},
+					IsError: true,
 				}, nil
 			}
 			inputsArg = m
@@ -4151,6 +4223,25 @@ func (s *Server) clearGABPDisconnectLocked(gameID string) {
 	delete(s.gabpDisconnects, gameID)
 }
 
+// dispatchGABPDisconnect runs the peer-close handler under Shutdown's join
+// (round 12 F4). The shutdownCh check and disconnectWG.Add happen together
+// under s.mu, atomic with Shutdown closing shutdownCh under the same lock, so
+// no handler can start a clearBridgeAttachment write after Shutdown begins
+// waiting — the fix for the disconnect writer racing TempDir teardown.
+func (s *Server) dispatchGABPDisconnect(gameID string, client *gabp.Client, err error) {
+	s.mu.Lock()
+	select {
+	case <-s.shutdownCh:
+		s.mu.Unlock()
+		return
+	default:
+	}
+	s.disconnectWG.Add(1)
+	s.mu.Unlock()
+	defer s.disconnectWG.Done()
+	s.HandleUnexpectedGABPDisconnect(gameID, client, err)
+}
+
 // HandleUnexpectedGABPDisconnect records bridge loss and removes mirrored tools immediately.
 func (s *Server) HandleUnexpectedGABPDisconnect(gameID string, client *gabp.Client, err error) {
 	s.mu.Lock()
@@ -4717,7 +4808,16 @@ func (s *Server) continueStartupGABPConnection(
 		return
 	}
 
+	s.bgWG.Add(1)
 	go func() {
+		defer s.bgWG.Done()
+		// A shutdown before/at dispatch abandons the background connect so the
+		// goroutine joins without opening a new attachment (round 12 F4).
+		select {
+		case <-s.shutdownCh:
+			return
+		default:
+		}
 		if client, _ := s.claimBoundClient(game.ID); client != nil {
 			return
 		}
@@ -4972,7 +5072,7 @@ func (s *Server) stampSpawnState(gameID, launchID, opID string, mutate func(*pro
 func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration, startupGABPTimeout time.Duration, resetEndpoint bool, resolved *launch.Resolved, hc historyContext) (*process.ProcessStartResult, error) {
 	launchSpec := s.launchSpecWithRuntimeDir(launchSpecFromResolved(game, resolved))
 
-	controller := process.NewController()
+	controller := s.newController()
 	if err := controller.Configure(launchSpec); err != nil {
 		return nil, fmt.Errorf("failed to configure game launcher for '%s' (mode: %s, target: %s): %w",
 			game.ID, game.LaunchMode, game.Target, err)
@@ -5104,6 +5204,11 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 		}
 	}
 
+	// A diagnostic-stamp write failure surfaced from the spawn observer
+	// (F10). Guarded because the observer may run on the spawning goroutine.
+	var stampMu sync.Mutex
+	var stampWarnings []string
+
 	// Stage 3: spawnState transitions bracket OS process creation. The
 	// pre-spawn transition must succeed — spawning against an unpublished
 	// or superseded claim would orphan a real workload behind a claim that
@@ -5127,23 +5232,38 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 				st.PIDStartTime = startTime
 			})
 			// Stamp the diagnostic-only bridge.json fields at the spawn
-			// boundary (design/20: "written at spawn"), and ONLY on a
-			// successful spawn — a spec_too_large, fencing, or process-creation
-			// failure must never publish a startedAt/profile for a workload
-			// that was never created (round 11 P2-8). Diagnostics are for
-			// doctor output; the live handoff stays env-only.
+			// boundary (design/20: "written at spawn"), ONLY on a successful
+			// spawn (round 11 P2-8) and FENCED to this launch's endpoint —
+			// passing the expected port+token so a superseded launch never
+			// writes onto the successor's rotated token (round 12 F10).
 			if spawnErr == nil {
-				if err := config.StampBridgeDiagnostics(game.ID, s.configDir, config.BridgeDiagnostics{
+				err := config.StampBridgeDiagnostics(game.ID, s.configDir, port, token, config.BridgeDiagnostics{
 					Profile:        launchSpec.Profile,
 					ConfigRevision: launchSpec.ConfigRevision,
 					StartedAt:      time.Now().UTC().Format(time.RFC3339),
-				}); err != nil {
+				})
+				switch {
+				case err == nil:
+				case errors.Is(err, config.ErrBridgeEndpointRotated):
+					// Expected: a successor took the endpoint; the fence
+					// correctly skipped this launch's stamp.
+					s.log.Debugw("skipped bridge diagnostics stamp on rotated endpoint", "gameId", game.ID)
+				default:
+					// A write failure left a spawned launch without diagnostics
+					// — surface it, don't just log (round 12 F10).
+					stampMu.Lock()
+					stampWarnings = append(stampWarnings, fmt.Sprintf("bridge diagnostics could not be written for this launch: %v", err))
+					stampMu.Unlock()
 					s.log.Warnw("failed to stamp bridge diagnostics", "gameId", game.ID, "error", err)
 				}
 			}
 		})
 
 	result := s.starter.StartWithVerificationWithTimeouts(controller, nil, game.ID, port, token, startBudget, 0)
+	// Merge any diagnostic-stamp warning the spawn observer surfaced (F10).
+	stampMu.Lock()
+	startWarnings = append(startWarnings, stampWarnings...)
+	stampMu.Unlock()
 	if result != nil {
 		result.StartWarnings = startWarnings
 	}
@@ -5186,7 +5306,7 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 			// consecutiveFailures; a later passive Stage 4 promotion resets them
 			// through the pinned success update.
 			if st.HistoryContextHash != "" {
-				process.ApplyActionFailureLocked(game.ID, s.configDir, process.EffectiveClaimProfile(st), st.HistoryContextHash, "unobserved", unobservedClass, time.Now().UTC())
+				process.ApplyActionFailureLocked(game.ID, s.configDir, process.EffectiveClaimProfile(st), st.HistoryContextHash, "unobserved", unobservedClass, hc.inputNames, time.Now().UTC())
 			}
 			return nil
 		}); ferr != nil {
@@ -6216,6 +6336,9 @@ func (s *Server) handleToolsCall(msg *Message) *Message {
 	if err != nil {
 		return NewError(msg.ID, -32603, "Tool execution failed", err.Error())
 	}
+
+	// Final safety net: no stable lifecycle failure escapes attribution (F1).
+	s.ensureFailureAttribution(params.Name, result)
 
 	return NewResponse(msg.ID, result)
 }

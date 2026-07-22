@@ -108,7 +108,7 @@ func (c *ServerGABPConnector) AttemptConnection(ctx context.Context, gameID stri
 	// Create GABP client
 	client := gabp.NewClient(c.log)
 	client.SetDisconnectHandler(func(err error) {
-		c.server.HandleUnexpectedGABPDisconnect(gameID, client, err)
+		c.server.dispatchGABPDisconnect(gameID, client, err)
 	})
 
 	// Store client reference for cleanup
@@ -199,9 +199,17 @@ func (c *ServerGABPConnector) MirrorConnectedClient(ctx context.Context, gameID 
 }
 
 func (c *ServerGABPConnector) startAsyncToolMirroring(gameID string, client *gabp.Client, ref bridgeAttachmentRef) {
+	c.server.bgWG.Add(1)
 	go func() {
+		defer c.server.bgWG.Done()
 		if c.asyncMirrorDelay > 0 {
-			time.Sleep(c.asyncMirrorDelay)
+			// A shutdown during the pre-mirror delay abandons the mirroring
+			// so the goroutine joins promptly (round 12 F4).
+			select {
+			case <-time.After(c.asyncMirrorDelay):
+			case <-c.server.shutdownCh:
+				return
+			}
 		}
 		// Revalidate the exact binding before committing any mirroring: a
 		// delayed discovery for connection A must never overwrite tools
@@ -241,7 +249,11 @@ func (c *ServerGABPConnector) setupToolMirroring(ctx context.Context, gameID str
 	if attentionTimeout > attentionRefreshTimeout {
 		attentionTimeout = attentionRefreshTimeout
 	}
-	go c.server.setupGABPAttention(gameID, client, attentionTimeout)
+	c.server.bgWG.Add(1)
+	go func() {
+		defer c.server.bgWG.Done()
+		c.server.setupGABPAttention(gameID, client, attentionTimeout)
+	}()
 
 	return nil
 }

@@ -158,10 +158,14 @@ func PrepareBridgeEndpointForStart(gameID, configDir string, gamesConfig *GamesC
 
 // StampBridgeDiagnostics rewrites bridge.json with the diagnostic-only fields
 // (profile, configRevision, startedAt) at the spawn boundary (design/20),
-// preserving the endpoint (port/token) written at preparation time. It is a
-// no-op when the file is missing — a workload that was never spawned has no
-// diagnostics to stamp. Diagnostics never influence a read decision.
-func StampBridgeDiagnostics(gameID, configDir string, diag BridgeDiagnostics) error {
+// preserving the endpoint (port/token) written at preparation time. It is
+// FENCED to this launch's endpoint generation (round 12 F10): it refuses to
+// stamp unless bridge.json still carries the expected port AND token, so a
+// launch whose claim/endpoint was superseded between spawn and stamp can never
+// write its profile/revision onto the successor's rotated token. Returns
+// ErrBridgeEndpointRotated in that case; a missing file returns its read error.
+// Diagnostics never influence a read decision.
+func StampBridgeDiagnostics(gameID, configDir string, expectedPort int, expectedToken string, diag BridgeDiagnostics) error {
 	cp, err := NewConfigPaths(configDir)
 	if err != nil {
 		return fmt.Errorf("failed to create config paths: %w", err)
@@ -171,11 +175,19 @@ func StampBridgeDiagnostics(gameID, configDir string, diag BridgeDiagnostics) er
 	if err != nil {
 		return err
 	}
+	if bridge.Port != expectedPort || bridge.Token != expectedToken {
+		return ErrBridgeEndpointRotated
+	}
 	bridge.Profile = diag.Profile
 	bridge.ConfigRevision = diag.ConfigRevision
 	bridge.StartedAt = diag.StartedAt
 	return writeBridgeJSONFile(cfgPath, bridge)
 }
+
+// ErrBridgeEndpointRotated reports that bridge.json no longer carries the
+// launch's endpoint (a successor rotated the token), so its diagnostics must
+// not be stamped (round 12 F10).
+var ErrBridgeEndpointRotated = fmt.Errorf("bridge endpoint rotated; refusing to stamp stale diagnostics")
 
 // WriteBridgeJSONWithEndpoint writes a specific bridge endpoint atomically,
 // with NO diagnostic fields — the endpoint (port/token) is the only thing the

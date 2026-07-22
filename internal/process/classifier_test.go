@@ -119,6 +119,44 @@ func TestClassifyExitedWrapperVsGame(t *testing.T) {
 	}
 }
 
+// TestClassifyExhaustiveOverStableCodes asserts every stable MCP result code
+// (design/10-mcp-surface.md's exhaustive list) maps to exactly one class —
+// failure codes to a cause class, success/pending codes to none (round 12 F3;
+// design/30:294). It fails if a handler ever needs a code outside this list or
+// the classifier drifts.
+func TestClassifyExhaustiveOverStableCodes(t *testing.T) {
+	want := map[string]string{
+		// call
+		"unknown_argument": CauseCall, "game_not_found": CauseCall,
+		"ambiguous_game_reference": CauseCall, "timeout_out_of_range": CauseCall,
+		"profiles_not_configured": CauseCall, "profile_not_found": CauseCall,
+		"launch_input_not_declared": CauseCall, "launch_input_invalid": CauseCall,
+		// config
+		"config_invalid": CauseConfig, "launch_mode_incompatible": CauseConfig,
+		"spec_too_large": CauseConfig, "kill_unsupported": CauseConfig,
+		"stop_unsupported": CauseConfig,
+		// state
+		"already_running": CauseState, "blocked_unknown_state": CauseState,
+		"external_instance_detected": CauseState, "operation_in_progress": CauseState,
+		"termination_unverified": CauseState, "action_succeeded_running": CauseState,
+		// environment
+		"spawn_failed": CauseEnvironment, "stale_bridge_credential": CauseEnvironment,
+		"endpoint_unavailable": CauseEnvironment, "action_failed": CauseEnvironment,
+		"action_timed_out": CauseEnvironment,
+		// evidence/proof-adjusted (never-proven defaults asserted here)
+		"exited_during_start": CauseGame, "launch_spec_unresolvable": CauseConfig,
+		"unobserved": CauseConfig,
+		// success / pending — no failure cause
+		"started_connected": "", "started_bridge_pending": "", "terminated": "",
+		"started_attachment_deferred": "",
+	}
+	for code, class := range want {
+		if got := Classify(code, ClassifyContext{}).Class; got != class {
+			t.Errorf("Classify(%q) = %q, want %q", code, got, class)
+		}
+	}
+}
+
 func TestClassifyTerminatedHasNoFailureCause(t *testing.T) {
 	// A verified clean stop must carry NO cause class (round 11 P2-6) — it is
 	// not a failure, and it must not fall through to the environment default.

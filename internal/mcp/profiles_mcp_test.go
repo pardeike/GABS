@@ -48,6 +48,9 @@ func newProfiledServer(t *testing.T) *Server {
 	t.Helper()
 	s := NewServerForTesting(util.NewLogger("error"))
 	s.SetConfigDir(t.TempDir())
+	// Join any background attachment/lease/mirroring task before TempDir
+	// teardown so none writes runtime.json during RemoveAll (round 12 F4).
+	t.Cleanup(s.Shutdown)
 	s.RegisterGameManagementTools(profiledTestConfig(t), 0, 0)
 	return s
 }

@@ -45,7 +45,7 @@ type Classification struct {
 func Classify(code string, ctx ClassifyContext) Classification {
 	switch code {
 	// call — the request was wrong; fix the call, not the config.
-	case "unknown_argument", "invalid_argument", "game_not_found",
+	case "unknown_argument", "game_not_found",
 		"ambiguous_game_reference", "profiles_not_configured", "profile_not_found",
 		"launch_input_not_declared", "launch_input_invalid",
 		"timeout_out_of_range":
@@ -59,10 +59,12 @@ func Classify(code string, ctx ClassifyContext) Classification {
 		"stop_unsupported", "kill_unsupported":
 		return Classification{Class: CauseConfig}
 
-	// Clean success — no failure cause (round 11 P2-6). A verified stop must
-	// never acquire a causeClass; without this it would hit the environment
-	// default. Callers attach causeClass only when Class is non-empty.
-	case "terminated":
+	// Clean success / pending — no failure cause (round 11 P2-6, round 12 F3):
+	// a verified stop, a connected or pending start must never acquire a
+	// causeClass, or they would hit the environment default. Callers attach
+	// causeClass only when Class is non-empty.
+	case "terminated", "started_connected", "started_bridge_pending",
+		"started_attachment_deferred":
 		return Classification{}
 
 	// state — GABS runtime state must be resolved first. A stop that
@@ -70,7 +72,7 @@ func Classify(code string, ctx ClassifyContext) Classification {
 	// running) or was interrupted is likewise a state situation to resolve.
 	case "already_running", "blocked_unknown_state", "external_instance_detected",
 		"operation_in_progress", "termination_unverified", "action_succeeded_running",
-		"interrupted", "action_execution_failed":
+		"interrupted":
 		return Classification{Class: CauseState}
 
 	// environment — host/store/network state; config edits cannot fix it.

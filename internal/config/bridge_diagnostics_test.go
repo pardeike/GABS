@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -43,11 +44,12 @@ func TestPrepareBridgeEndpointWritesNoDiagnostics(t *testing.T) {
 
 func TestStampBridgeDiagnosticsUsesBindingKeyName(t *testing.T) {
 	dir := t.TempDir()
-	if _, _, _, _, err := PrepareBridgeEndpointForStart("g", dir, nil, false); err != nil {
+	port, token, _, _, err := PrepareBridgeEndpointForStart("g", dir, nil, false)
+	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
 	started := "2026-07-22T10:00:00Z"
-	if err := StampBridgeDiagnostics("g", dir, BridgeDiagnostics{
+	if err := StampBridgeDiagnostics("g", dir, port, token, BridgeDiagnostics{
 		Profile: "combat", ConfigRevision: "rev-1", StartedAt: started,
 	}); err != nil {
 		t.Fatalf("stamp: %v", err)
@@ -89,7 +91,7 @@ func TestReuseClearsStaleDiagnosticsUntilRestamped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first prepare: %v", err)
 	}
-	if err := StampBridgeDiagnostics("g", dir, BridgeDiagnostics{Profile: "vanilla", ConfigRevision: "rev-1", StartedAt: "2026-07-22T10:00:00Z"}); err != nil {
+	if err := StampBridgeDiagnostics("g", dir, p1, tok1, BridgeDiagnostics{Profile: "vanilla", ConfigRevision: "rev-1", StartedAt: "2026-07-22T10:00:00Z"}); err != nil {
 		t.Fatalf("first stamp: %v", err)
 	}
 
@@ -115,7 +117,7 @@ func TestReuseClearsStaleDiagnosticsUntilRestamped(t *testing.T) {
 	}
 
 	// Restamping the reused endpoint records the CURRENT launch's values.
-	if err := StampBridgeDiagnostics("g", dir, BridgeDiagnostics{Profile: "combat", ConfigRevision: "rev-2", StartedAt: "2026-07-22T11:00:00Z"}); err != nil {
+	if err := StampBridgeDiagnostics("g", dir, p2, tok2, BridgeDiagnostics{Profile: "combat", ConfigRevision: "rev-2", StartedAt: "2026-07-22T11:00:00Z"}); err != nil {
 		t.Fatalf("second stamp: %v", err)
 	}
 	b, _ = readBridgeJSONFile(path)
@@ -124,13 +126,42 @@ func TestReuseClearsStaleDiagnosticsUntilRestamped(t *testing.T) {
 	}
 }
 
+// TestStampRefusesRotatedEndpoint is the F10 generation fence: launch A spawns
+// and prepares an endpoint; launch B reuses it with a rotated token; A's late
+// stamp (with A's stale token) must be REFUSED, never writing A's profile onto
+// B's token.
+func TestStampRefusesRotatedEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	aPort, aToken, _, _, err := PrepareBridgeEndpointForStart("g", dir, nil, false)
+	if err != nil {
+		t.Fatalf("A prepare: %v", err)
+	}
+	_, bToken, _, reused, err := PrepareBridgeEndpointForStart("g", dir, nil, false)
+	if err != nil || !reused {
+		t.Fatalf("B prepare (reuse): reused=%v err=%v", reused, err)
+	}
+	if aToken == bToken {
+		t.Fatal("the per-launch token must rotate on reuse")
+	}
+	err = StampBridgeDiagnostics("g", dir, aPort, aToken, BridgeDiagnostics{Profile: "stale-A", ConfigRevision: "revA", StartedAt: "2026-07-22T10:00:00Z"})
+	if !errors.Is(err, ErrBridgeEndpointRotated) {
+		t.Fatalf("A's stamp on B's rotated endpoint must be refused, got %v", err)
+	}
+	cp, _ := NewConfigPaths(dir)
+	b, _ := readBridgeJSONFile(cp.GetBridgeConfigPath("g"))
+	if b.Profile == "stale-A" || b.Token != bToken {
+		t.Fatalf("a superseded launch must never stamp the successor's token: %+v", b)
+	}
+}
+
 // Diagnostics must never enter the endpoint-reuse decision.
 func TestBridgeDiagnosticsDoNotAffectEndpointReuse(t *testing.T) {
 	dir := t.TempDir()
-	if _, _, _, _, err := PrepareBridgeEndpointForStart("rich", dir, nil, false); err != nil {
+	rport, rtoken, _, _, err := PrepareBridgeEndpointForStart("rich", dir, nil, false)
+	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
-	if err := StampBridgeDiagnostics("rich", dir, BridgeDiagnostics{Profile: "p", ConfigRevision: "r", StartedAt: "2026-07-22T10:00:00Z"}); err != nil {
+	if err := StampBridgeDiagnostics("rich", dir, rport, rtoken, BridgeDiagnostics{Profile: "p", ConfigRevision: "r", StartedAt: "2026-07-22T10:00:00Z"}); err != nil {
 		t.Fatalf("stamp: %v", err)
 	}
 	if _, _, _, reused, err := PrepareBridgeEndpointForStart("rich", dir, nil, false); err != nil || !reused {

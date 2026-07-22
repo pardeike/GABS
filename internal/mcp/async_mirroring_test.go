@@ -209,6 +209,7 @@ func newAsyncMirroringDescriptorAliasTestServer(t *testing.T) (*Server, int, str
 	log := util.NewLogger("error")
 	server := NewServerForTesting(log)
 	server.SetConfigDir(t.TempDir())
+	t.Cleanup(server.Shutdown) // join background tasks before TempDir teardown (F4)
 	server.RegisterGameManagementTools(gamesConfig, 5*time.Millisecond, 10*time.Millisecond)
 	seedClaimEndpointForTest(t, server.configDir, "adventure", listener.Addr().(*net.TCPAddr).Port, bridgeToken)
 
@@ -244,6 +245,7 @@ func newAsyncMirroringTestServer(t *testing.T) (*Server, int, string, <-chan err
 	log := util.NewLogger("error")
 	server := NewServerForTesting(log)
 	server.SetConfigDir(t.TempDir())
+	t.Cleanup(server.Shutdown) // join background tasks before TempDir teardown (F4)
 	server.RegisterGameManagementTools(gamesConfig, 5*time.Millisecond, 10*time.Millisecond)
 	seedClaimEndpointForTest(t, server.configDir, "adventure", listener.Addr().(*net.TCPAddr).Port, bridgeToken)
 
@@ -279,6 +281,7 @@ func newAsyncMirroringDiscoveryTestServer(t *testing.T) (*Server, int, string, <
 	log := util.NewLogger("error")
 	server := NewServerForTesting(log)
 	server.SetConfigDir(t.TempDir())
+	t.Cleanup(server.Shutdown) // join background tasks before TempDir teardown (F4)
 	server.RegisterGameManagementTools(gamesConfig, 5*time.Millisecond, 10*time.Millisecond)
 	seedClaimEndpointForTest(t, server.configDir, "adventure", listener.Addr().(*net.TCPAddr).Port, bridgeToken)
 
