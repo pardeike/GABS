@@ -10,6 +10,7 @@ import (
 
 	"github.com/pardeike/gabs/internal/config"
 	"github.com/pardeike/gabs/internal/gabp"
+	"github.com/pardeike/gabs/internal/launch"
 	"github.com/pardeike/gabs/internal/process"
 )
 
@@ -336,6 +337,11 @@ func (s *Server) lifecycleActionResult(game config.GameConfig, action, configRev
 	priorClient := s.gabpClients[game.ID]
 	s.mu.RUnlock()
 
+	// The claim's track-record coordinates, captured before the stop (which
+	// may remove the claim) so a verified stop can be counted (design/20).
+	stopProfile := process.EffectiveClaimProfile(claim)
+	stopHash := process.ContextHash(game, stopProfile, claim.Lifecycle)
+
 	outcome, refusal, err := process.ExecuteStopAction(process.StopRequest{
 		GameID:     game.ID,
 		ConfigDir:  s.configDir,
@@ -363,6 +369,10 @@ func (s *Server) lifecycleActionResult(game config.GameConfig, action, configRev
 		// instances. A superseded completion (ClaimRemoved false) touches
 		// nothing — the current generation is not ours.
 		s.releaseGameArtifacts(game.ID, priorController, priorClient)
+		// A verified stop is the cleanStops++ point (design/20).
+		if err := process.RecordCleanStop(game.ID, s.configDir, stopProfile, stopHash, time.Now().UTC()); err != nil {
+			s.log.Warnw("failed to record clean stop in history", "gameId", game.ID, "error", err)
+		}
 	}
 	return s.stopOutcomeResult(game, action, outcome)
 }
@@ -619,6 +629,174 @@ func attachStatusEvidence(statusItem map[string]interface{}, ev *process.Livenes
 	}
 }
 
+// historyContext carries everything the track-record store needs for one
+// launch: the input-free context hash, the last-known-good snapshot, and
+// the supplied-input bucket coordinates (design/08).
+type historyContext struct {
+	profile     string
+	contextHash string
+	snapshot    process.ContextSnapshot
+	inputNames  []string
+	declHash    string
+	valueDigest string
+}
+
+// buildHistoryContext composes the track-record coordinates for a launch.
+// The context hash is input-free (from config, never the post-input
+// Resolved); the value digest is keyed with the per-game bucket key so
+// supplied values never persist in the clear (design/08, design/20).
+func (s *Server) buildHistoryContext(game config.GameConfig, resolved *launch.Resolved, inputs map[string]interface{}) historyContext {
+	profile := ""
+	var inputNames []string
+	var lifecycle *launch.ResolvedLifecycle
+	if resolved != nil {
+		profile = resolved.Profile
+		inputNames = append([]string(nil), resolved.AppliedInputs...)
+		lifecycle = resolved.Lifecycle
+	}
+	hc := historyContext{
+		profile:     profile,
+		contextHash: process.ContextHash(game, profile, lifecycle),
+		inputNames:  inputNames,
+		snapshot: process.ContextSnapshot{
+			Target: game.Target,
+			Mode:   game.LaunchMode,
+			Args:   configBaseArgs(game, profile),
+		},
+	}
+	if len(inputNames) > 0 {
+		hc.declHash = process.InputDeclHash(game, inputNames)
+		if key, err := process.EnsureBucketKey(game.ID, s.configDir); err == nil {
+			applied := map[string]string{}
+			for _, n := range inputNames {
+				if v, ok := inputs[n]; ok {
+					applied[n] = fmt.Sprintf("%v", v)
+				}
+			}
+			hc.valueDigest = process.BucketValueDigest(key, applied)
+		}
+	}
+	return hc
+}
+
+func configBaseArgs(game config.GameConfig, profile string) []string {
+	args := append([]string(nil), game.Args...)
+	if profile != "" {
+		if p, ok := game.Profiles[profile]; ok {
+			args = append(args, p.Args...)
+		}
+	}
+	return args
+}
+
+// recordStartFailure writes a terminal start failure to the track record
+// (accepted attempt, resolved context) and returns the classification for
+// rendering. Only accepted-attempt terminal codes reach here.
+func (s *Server) recordStartFailure(game config.GameConfig, hc historyContext, code string) process.Classification {
+	proven := s.contextProven(game.ID, hc)
+	cls := process.Classify(code, process.ClassifyContext{
+		Proven:                proven,
+		InputCombinationFresh: !s.inputComboProven(game.ID, hc),
+		SuppliedInputs:        hc.inputNames,
+	})
+	if err := process.RecordFailure(game.ID, s.configDir, hc.profile, hc.contextHash, code, cls.Class, hc.inputNames, time.Now().UTC()); err != nil {
+		s.log.Warnw("failed to record start failure in history", "gameId", game.ID, "error", err)
+	}
+	return cls
+}
+
+// recordVerifiedStart writes the Stage 4 verified success (design/20).
+func (s *Server) recordVerifiedStart(game config.GameConfig, hc historyContext) {
+	if err := process.RecordWorkloadStart(game.ID, s.configDir, hc.profile, hc.contextHash, hc.snapshot, hc.inputNames, hc.declHash, hc.valueDigest, time.Now().UTC()); err != nil {
+		s.log.Warnw("failed to record verified start in history", "gameId", game.ID, "error", err)
+	}
+}
+
+// attachFailureAttribution renders a failure result's track-record fields
+// (design/08): causeClass, a one-line track record, the candidate-input
+// secondary note, the once-per-edit visibility notice, and class-keyed
+// next actions — a non-config class NEVER proposes a config edit.
+func (s *Server) attachFailureAttribution(structured map[string]interface{}, game config.GameConfig, hc historyContext, class, secondaryNote string) {
+	structured["causeClass"] = class
+	if secondaryNote != "" {
+		structured["candidateInputNote"] = secondaryNote
+	}
+	if h, err := process.LoadHistory(game.ID, s.configDir); err == nil {
+		if e := h.Profiles[hc.profile]; e != nil && e.ContextHash == hc.contextHash {
+			if line := process.TrackRecordLine(e); line != "" {
+				structured["trackRecord"] = line
+			}
+		}
+	}
+	if notice := s.editNoticeFor(game.ID, hc); notice != "" {
+		structured["editNotice"] = notice
+	}
+	structured["nextActions"] = failureNextActions(game.ID, class)
+}
+
+// failureNextActions returns class-keyed next actions (design/08). Only the
+// config class may suggest editing configuration; every other class routes
+// to status/retry/report so an agent never "fixes" settings that were never
+// broken.
+func failureNextActions(gameID, class string) []map[string]interface{} {
+	gameArg := map[string]interface{}{"gameId": gameID}
+	switch class {
+	case process.CauseConfig:
+		return []map[string]interface{}{
+			mcpNextAction("games_show", gameArg, "Review and correct the launch configuration; the result names the offending field."),
+		}
+	case process.CauseCall:
+		return []map[string]interface{}{
+			mcpNextAction("games_show", gameArg, "Check the accepted profiles and declared inputs, then reissue the call correctly."),
+		}
+	case process.CauseGame:
+		return []map[string]interface{}{
+			mcpNextAction("games_status", gameArg, "Inspect the workload; the output tail shows why it exited. This is game-side, not launch config."),
+			mcpNextAction("games_start", gameArg, "Retry once the game-side cause (save, mod, login) is addressed."),
+		}
+	case process.CauseEnvironment:
+		return []map[string]interface{}{
+			mcpNextAction("games_status", gameArg, "Check host/store/network state (Steam running, daemon up, network reachable) — this is an environment problem, not a launch-settings one."),
+			mcpNextAction("games_start", gameArg, "Retry after the environment recovers."),
+		}
+	default: // state
+		return []map[string]interface{}{
+			mcpNextAction("games_status", gameArg, "Resolve the runtime state first (already running, in-flight operation, or unverified termination)."),
+		}
+	}
+}
+
+// editNoticeFor returns the one-line edit-visibility notice for this game's
+// current context, or "" — firing once per edit (design/08).
+func (s *Server) editNoticeFor(gameID string, hc historyContext) string {
+	notice, err := process.EditNotice(gameID, s.configDir, hc.profile, hc.contextHash)
+	if err != nil {
+		return ""
+	}
+	return notice
+}
+
+func (s *Server) contextProven(gameID string, hc historyContext) bool {
+	h, err := process.LoadHistory(gameID, s.configDir)
+	if err != nil {
+		return false
+	}
+	e := h.Profiles[hc.profile]
+	return e != nil && e.ContextHash == hc.contextHash && e.WorkloadStarts > 0
+}
+
+func (s *Server) inputComboProven(gameID string, hc historyContext) bool {
+	h, err := process.LoadHistory(gameID, s.configDir)
+	if err != nil {
+		return false
+	}
+	e := h.Profiles[hc.profile]
+	if e == nil || e.ContextHash != hc.contextHash {
+		return false
+	}
+	return e.HasBucket(hc.declHash, hc.valueDigest)
+}
+
 // computeSpawnDigests pins the expected launch context from the fully
 // materialized spawn state (design/03): the argv payload is the resolved
 // argument list (argv[0] excluded by construction), the cwd is the
@@ -719,15 +897,44 @@ func (s *Server) recordContextDelivery(gameID string, ref bridgeAttachmentRef, o
 	if obs != nil {
 		pobs = &process.ObservedContext{Argv: obs.Argv, Cwd: obs.Cwd, EnvValues: obs.EnvValues, EnvAbsent: obs.EnvAbsent}
 	}
+	var verifiedProfile, verifiedHash string
 	if _, err := process.FencedTransition(gameID, s.configDir, ref.launchID, "", func(st *process.RuntimeState) error {
 		if st.Attachment == nil || st.Attachment.ConnectionID != ref.connectionID {
 			return process.ErrFencingViolation
 		}
-		st.ContextDelivery = process.EvaluateContextDelivery(st.ContextDigests, pobs)
+		delivery := process.EvaluateContextDelivery(st.ContextDigests, pobs)
+		st.ContextDelivery = delivery
+		if delivery.Overall == process.DeliveryVerified {
+			verifiedProfile = process.EffectiveClaimProfile(st)
+			verifiedHash = s.contextHashForClaim(gameID, st)
+		}
 		return nil
 	}); err != nil && !errors.Is(err, process.ErrFencingViolation) && !errors.Is(err, process.ErrNoRuntimeClaim) {
 		s.log.Warnw("failed to persist context delivery verdict", "gameId", gameID, "error", err)
 	}
+	// deliveriesVerified++ only on a fully verified delivery (design/20),
+	// recorded outside the fenced transition (its own lock RMW).
+	if verifiedHash != "" {
+		if err := process.RecordDeliveryVerified(gameID, s.configDir, verifiedProfile, verifiedHash, time.Now().UTC()); err != nil {
+			s.log.Warnw("failed to record verified delivery in history", "gameId", gameID, "error", err)
+		}
+	}
+}
+
+// contextHashForClaim recomputes the input-free context hash for a claim
+// from current config plus the claim's pinned lifecycle — matching what
+// the start path recorded (design/08). Returns "" when the game is gone
+// from config.
+func (s *Server) contextHashForClaim(gameID string, claim *process.RuntimeState) string {
+	cfg, _, _ := s.currentGamesConfig()
+	if cfg == nil {
+		return ""
+	}
+	game, ok := cfg.GetGame(gameID)
+	if !ok {
+		return ""
+	}
+	return process.ContextHash(*game, process.EffectiveClaimProfile(claim), claim.Lifecycle)
 }
 
 // supersededStartRefusal re-evaluates the CURRENT claim after a start lost

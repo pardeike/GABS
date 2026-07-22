@@ -54,6 +54,11 @@ func (cp *ConfigPaths) GetRuntimeStatePath(gameID string) string {
 	return filepath.Join(cp.GetGameDir(gameID), "runtime.json")
 }
 
+// GetHistoryPath returns the path to a game's track-record history file.
+func (cp *ConfigPaths) GetHistoryPath(gameID string) string {
+	return filepath.Join(cp.GetGameDir(gameID), "history.json")
+}
+
 // EnsureGameDir creates the game-specific directory if it doesn't exist.
 // The directory holds per-launch credentials (runtime.json, bridge.json),
 // so it is private (0700) and pre-existing looser modes are tightened —

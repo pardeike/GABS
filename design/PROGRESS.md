@@ -551,9 +551,55 @@ contract, not a scratchpad.
       operation_in_progress/blocked_unknown_state; occupied persistence
       failure is blocked_unknown_state), and the detach s.mu/
       transition-lock inversion is removed)
-- [ ] M2.10 History store + classifier + input-combination buckets +
+- [x] M2.10 History store + classifier + input-combination buckets +
       edit notice + causeClass/track-record rendering — spec: 08; tests:
       T-TRACK
+      (internal/process/history.go + classifier.go: a per-game 0600
+      atomic history.json beside runtime.json, every read-modify-write
+      under the per-game transition lock so a server delivery callback
+      and a CLI stop lose no increments (proven by a 40×2 concurrent
+      -race test). The context hash is INPUT-FREE by construction —
+      composed from config directly (target, mode, base argv = game +
+      profile args with no input groups, the config-declared env layer,
+      cwd, resolved lifecycle), never from the post-input Resolved
+      (inputs bind both args AND env via LaunchInputConfig, so hashing
+      Resolved would split arena/tutorial into two contexts instead of
+      one context + two buckets). Granularity is the reset mechanism:
+      editing profile B leaves A's hash intact, adding profile C resets
+      nothing, editing a shared game-level arg changes every profile's
+      hash — all tested. Two-level reset: a context change resets the
+      whole entry; an input-DECLARATION edit (ResetInputBuckets) drops
+      only that declaration's buckets while base counters and the
+      bare-set proof survive. Successes bucket by sorted input names +
+      declaration hash + a per-game-keyed value digest (values never
+      persist in the clear), LRU-capped at 16 per input set. Four split
+      counters increment at exactly their points — Stage 4 verified →
+      workloadStarts++ + consecutiveFailures reset + lastGood refresh,
+      Stage 5 connected → bridgeConnects++, fully-verified welcome →
+      deliveriesVerified++, verified stop → cleanStops++; a terminal
+      failure of an accepted attempt with a resolved context →
+      lastFailure + consecutiveFailures++. call-class and config_invalid
+      NEVER mutate history (a caller typo distorts no proof — tested).
+      The classifier is a pure function built from design/05's bad-case
+      Class column + design/08's five definitions: static codes map by
+      the code alone, and only launch_spec_unresolvable and unobserved
+      are proof-adjusted (never-proven → config, proven → environment);
+      an unproven input combination adjusts CONFIDENCE (a secondary
+      candidate-input note), never the class. Rendering: every failure
+      result carries causeClass + a one-line track record (the split
+      "workload proven, bridge never connected → game-side" hint
+      included), class-keyed nextActions where no non-config class
+      proposes a config edit (template-level assertion), and the
+      once-per-edit visibility notice (noticeShownForHash) that fires
+      only for proven + last-failure-non-config + hash-changed, not for
+      additive edits. Privacy is structural: the lastGood entrySnapshot
+      may hold env values but lives only in the 0600 file — rendering
+      consumes counters + the computed line, never the raw record, so
+      it cannot leak (tested). Corrupt/missing history degrades to "no
+      track record" without failing any lifecycle op. The
+      doctor --show-last-good surface and the history-reset-on-config-
+      edit trigger from a live reload are M3.2's doctor work; the store,
+      classifier, and start/stop/delivery wiring land here)
 - [ ] M2.11 bridge.json diagnostic fields; env-only live contract
       preserved — spec: 03; tests: T-DELIV
 - [ ] M2.12 Remaining conformance cells (env-dropping, filtering,
@@ -625,6 +671,18 @@ contract, not a scratchpad.
   failure, a verification summary, the interrupted reason). The
   specified fields are unchanged; review round 7 judged the addition
   reasonable without a contract amendment.
+- 2026-07-22, M2.10, design/08 §failure attribution (adjudicated —
+  codes design/08 does not tabulate): the classifier assigns cause
+  classes to the stop/kill codes the bad-case map omits.
+  stop_unsupported / kill_unsupported → `config` (a configuration gap:
+  no stop/kill mechanism is configured — the fix is adding a hook or
+  stopProcessName, which is the one legitimate config-edit case).
+  action_failed / action_timed_out → `environment` (the host/process
+  did not cooperate with a configured action; not a config defect and
+  not GABS state). termination_unverified and operation_in_progress →
+  `state` (per design/08's state definition). Recorded here because
+  design/08's five definitions cover these by category but the specific
+  code→class mapping is a judgment made in this milestone.
 - 2026-07-22, M2.9, design/07 §"full field contract" (adjudicated
   clarification): the RuntimeContextDigests schema gained two fields
   beyond design/07's enumerated list — `absentEnvNames` (the

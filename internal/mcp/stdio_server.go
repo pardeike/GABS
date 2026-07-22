@@ -1146,7 +1146,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}
 
 		validationWarnings := gameValidationWarnings(*game)
-		startResult, err := s.startGame(*game, gamesConfig, backoffMin, backoffMax, startupGABPTimeout, resetEndpoint, resolved)
+		hctx := s.buildHistoryContext(*game, resolved, inputsArg)
+		startResult, err := s.startGame(*game, gamesConfig, backoffMin, backoffMax, startupGABPTimeout, resetEndpoint, resolved, hctx)
 		if err != nil {
 			var refusalErr *startRefusalError
 			if errors.As(err, &refusalErr) {
@@ -1177,9 +1178,6 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 					"code":     "exited_during_start",
 					"gameId":   game.ID,
 					"exitCode": exitedErr.exitCode,
-					"nextActions": []map[string]interface{}{
-						mcpNextAction("games_show", map[string]interface{}{"gameId": game.ID}, "Review the launch configuration that produced this exit."),
-					},
 				}
 				if exitedErr.tail != "" {
 					structured["outputTail"] = exitedErr.tail
@@ -1190,6 +1188,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				if len(exitedErr.warnings) > 0 {
 					structured["startWarnings"] = exitedErr.warnings
 				}
+				s.attachFailureAttribution(structured, *game, hctx, exitedErr.causeClass, exitedErr.secondaryNote)
 				addValidationWarnings(structured, validationWarnings)
 				addResolvedContext(structured, resolved)
 				return &ToolResult{
@@ -4368,6 +4367,10 @@ func (s *Server) startRefusalResult(game config.GameConfig, e *startRefusalError
 		"code":   ref.Code,
 		"gameId": game.ID,
 	}
+	// Every failure result carries a causeClass (design/08). Refusals are
+	// pre-accept (no history WRITE), but they still classify — the gating
+	// refusals are all state class.
+	structured["causeClass"] = process.Classify(ref.Code, process.ClassifyContext{}).Class
 	if ref.ActiveProfile != "" || ref.Code == process.RefusalAlreadyRunning {
 		structured["activeProfile"] = ref.ActiveProfile
 	}
@@ -4447,10 +4450,12 @@ func (e *unobservedStartError) Error() string {
 
 // exitedDuringStartError carries the Stage 4 exit evidence.
 type exitedDuringStartError struct {
-	exitCode     int
-	tail         string
-	hookEvidence string
-	warnings     []string
+	exitCode      int
+	tail          string
+	hookEvidence  string
+	warnings      []string
+	causeClass    string
+	secondaryNote string
 }
 
 func (e *exitedDuringStartError) Error() string {
@@ -4890,7 +4895,7 @@ func (s *Server) stampSpawnState(gameID, launchID, opID string, mutate func(*pro
 	}
 }
 
-func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration, startupGABPTimeout time.Duration, resetEndpoint bool, resolved *launch.Resolved) (*process.ProcessStartResult, error) {
+func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration, startupGABPTimeout time.Duration, resetEndpoint bool, resolved *launch.Resolved, hc historyContext) (*process.ProcessStartResult, error) {
 	launchSpec := s.launchSpecWithRuntimeDir(launchSpecFromResolved(game, resolved))
 
 	controller := process.NewController()
@@ -5069,10 +5074,17 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 		return result, &unobservedStartError{warnings: startWarnings}
 	}
 	exitedFailure := func(ev *process.LivenessEvidence) (*process.ProcessStartResult, error) {
+		// A terminal failure of an accepted attempt with a resolved context:
+		// record it and classify (design/08). exited_during_start is
+		// outcome-implied game class; an unproven input combination adds a
+		// secondary note without changing the class.
+		cls := s.recordStartFailure(game, hc, "exited_during_start")
 		e := &exitedDuringStartError{
-			exitCode: controller.ExitCode(),
-			tail:     controller.LaunchLogTail(16 * 1024),
-			warnings: startWarnings,
+			exitCode:      controller.ExitCode(),
+			tail:          controller.LaunchLogTail(16 * 1024),
+			warnings:      startWarnings,
+			causeClass:    cls.Class,
+			secondaryNote: cls.SecondaryNote,
 		}
 		if ev != nil && ev.Source == process.LivenessSourceStatusHook {
 			e.hookEvidence = ev.Detail
@@ -5159,6 +5171,12 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	}
 	cleanupRuntimeState = false
 
+	// Stage 4 verified (design/20): workloadStarts++, consecutiveFailures
+	// reset, lastGood refreshed, the supplied-input bucket recorded. An
+	// edit-visibility notice is armed here if the reload changed a proven
+	// context whose last failure was non-config.
+	s.recordVerifiedStart(game, hc)
+
 	s.mu.Lock()
 	s.games[game.ID] = controller
 	s.mu.Unlock()
@@ -5192,6 +5210,12 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	result.GABPConnectWait = connectResult.Wait
 	result.GameStillRunning = connectResult.GameStillRunning
 	result.ProcessExitedDuringGABP = connectResult.ProcessExitedDuringGABP
+	if connectResult.Connected {
+		// Stage 5 connected (design/20): bridgeConnects++.
+		if err := process.RecordBridgeConnect(game.ID, s.configDir, hc.profile, hc.contextHash, time.Now().UTC()); err != nil {
+			s.log.Warnw("failed to record bridge connect in history", "gameId", game.ID, "error", err)
+		}
+	}
 
 	if !result.GameStillRunning {
 		// Stage 5: the workload looks dead while waiting for the bridge —
