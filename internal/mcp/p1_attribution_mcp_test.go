@@ -103,6 +103,43 @@ func TestNeverProvenMissingTargetIsConfig(t *testing.T) {
 	}
 }
 
+// TestFinalizerAttributesEveryStableFailureCode drives EVERY stable failure
+// code (design/10's list) through the dispatch finalizer and asserts each gets
+// causeClass + the neutral track-record line, while success/pending codes get
+// nothing (round 12 F1). This is the exhaustive handler-level net: any escaper
+// (endpoint-in-use, stale-bridge-credential, the generic fallback) that reaches
+// dispatch with one of these codes is covered.
+func TestFinalizerAttributesEveryStableFailureCode(t *testing.T) {
+	s := newProfiledServer(t)
+	failureCodes := []string{
+		"unknown_argument", "config_invalid", "game_not_found", "ambiguous_game_reference",
+		"timeout_out_of_range", "launch_spec_unresolvable", "profiles_not_configured",
+		"profile_not_found", "launch_input_not_declared", "launch_input_invalid",
+		"launch_mode_incompatible", "already_running", "blocked_unknown_state",
+		"external_instance_detected", "spawn_failed", "exited_during_start", "unobserved",
+		"operation_in_progress", "kill_unsupported", "stop_unsupported",
+		"termination_unverified", "stale_bridge_credential", "endpoint_unavailable",
+		"spec_too_large", "action_failed", "action_timed_out", "action_succeeded_running",
+	}
+	for _, code := range failureCodes {
+		result := &ToolResult{StructuredContent: map[string]interface{}{"code": code, "gameId": "g"}}
+		s.ensureFailureAttribution("games.start", result)
+		if _, ok := result.StructuredContent["causeClass"]; !ok {
+			t.Errorf("%s: the finalizer must attach causeClass", code)
+		}
+		if line, ok := result.StructuredContent["trackRecord"].(string); !ok || !strings.Contains(line, "no successful starts") {
+			t.Errorf("%s: the finalizer must attach the neutral track-record line", code)
+		}
+	}
+	for _, code := range []string{"started_connected", "started_bridge_pending", "terminated", "started_attachment_deferred"} {
+		result := &ToolResult{StructuredContent: map[string]interface{}{"code": code, "gameId": "g"}}
+		s.ensureFailureAttribution("games.start", result)
+		if _, ok := result.StructuredContent["causeClass"]; ok {
+			t.Errorf("%s: a success/pending code must never acquire causeClass", code)
+		}
+	}
+}
+
 // TestEveryLifecycleFailureCarriesAttribution is the F1 handler-level net:
 // failures that return directly (unknown/ambiguous game, and the generic
 // paths) must still carry causeClass + a track-record line via the final

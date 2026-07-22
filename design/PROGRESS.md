@@ -714,15 +714,18 @@ contract, not a scratchpad.
   its semantics are exactly-once-per-launch and the history write precedes the
   runtime.json save inside one transition — a claim-save failure or crash
   between the two files could otherwise let a later passive promotion
-  double-count. The two other locked counters the reviewer named are left
-  non-deduped by deliberate choice: bridgeConnects counts EVERY credential-bound
-  attachment (design/20 P1-7) and deliveriesVerified EVERY verified welcome, so
-  a fresh attachment/report is a legitimate new count, not a replay — and each
-  is already published under a unique connectionID fence. A retried transaction
-  would carry a new connectionID (a real new attachment), so there is no stale
-  replay to dedupe; adding launchID dedup there would UNDERCOUNT legitimate
-  reconnects. Flagged here so the asymmetry is a documented decision, not an
-  oversight.
+  double-count. The test proves the dedup MECHANISM (two applies with the same
+  launchID → one count) rather than literally injecting a post-history/pre-save
+  fault; the fault reduces to "the same launch's credit runs twice," which is
+  exactly what the mechanism test exercises. The two other locked counters the
+  reviewer named are left per-attempt by DELIBERATE choice, not because a replay
+  is impossible: bridgeConnects counts EVERY credential-bound attachment
+  (design/20 P1-7) and deliveriesVerified EVERY verified welcome. A retry after a
+  history-then-save fault would mint a NEW connectionID and count again — a real
+  double-count for one logical connection — but under "count every attempt"
+  semantics that is an acceptable overcount, not a corrupted proof signal, and
+  launchID dedup there would instead UNDERCOUNT legitimate reconnects of one
+  launch. Documented so the asymmetry is a decision, not an oversight.
 - 2026-07-22, M2.10, round 12 F3, design/10:37 (authorized codes): two codes
   invented in round 11 were removed. Malformed profile/launchInputs CONTAINER
   arguments (wrong JSON type) now return a plain protocol-level invalid-params

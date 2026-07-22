@@ -1385,9 +1385,16 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				}, nil
 			}
 
+			// An unexpected internal error that matched no classified branch
+			// leaves GABS state unresolved — the authorized state code is
+			// blocked_unknown_state, and it carries attribution like every
+			// other stable start failure (round 12 F1/F3).
+			structured := map[string]interface{}{"code": "blocked_unknown_state", "gameId": game.ID}
+			s.attachStructuredFailureAttribution(structured, *game, "blocked_unknown_state", hctx)
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to start %s: %v", game.ID, err)}},
-				IsError: true,
+				Content:           []Content{{Type: "text", Text: fmt.Sprintf("Failed to start %s: %v", game.ID, err)}},
+				IsError:           true,
+				StructuredContent: structured,
 			}, nil
 		}
 
