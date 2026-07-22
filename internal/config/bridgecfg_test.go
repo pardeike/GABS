@@ -495,7 +495,7 @@ func TestPrepareBridgeEndpointForStartRejectsOccupiedEndpointCache(t *testing.T)
 		t.Fatalf("failed to write existing bridge endpoint: %v", err)
 	}
 
-	_, _, path, _, err := PrepareBridgeEndpointForStart(gameID, tempDir, nil, false)
+	_, _, path, _, err := PrepareBridgeEndpointForStart(gameID, tempDir, nil, false, BridgeDiagnostics{})
 	if err == nil {
 		t.Fatal("expected occupied endpoint cache to be rejected")
 	}
@@ -522,7 +522,7 @@ func TestPrepareBridgeEndpointForStartCanResetOccupiedEndpointCache(t *testing.T
 		t.Fatalf("failed to write existing bridge endpoint: %v", err)
 	}
 
-	port, token, _, reused, err := PrepareBridgeEndpointForStart(gameID, tempDir, nil, true)
+	port, token, _, reused, err := PrepareBridgeEndpointForStart(gameID, tempDir, nil, true, BridgeDiagnostics{})
 	if err != nil {
 		t.Fatalf("expected reset endpoint to succeed: %v", err)
 	}

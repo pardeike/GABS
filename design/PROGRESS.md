@@ -551,7 +551,7 @@ contract, not a scratchpad.
       operation_in_progress/blocked_unknown_state; occupied persistence
       failure is blocked_unknown_state), and the detach s.mu/
       transition-lock inversion is removed)
-- [~] M2.10 History store + classifier + input-combination buckets +
+- [x] M2.10 History store + classifier + input-combination buckets +
       edit notice + causeClass/track-record rendering — spec: 08; tests:
       T-TRACK
       (internal/process/history.go + classifier.go: a per-game 0600
@@ -611,8 +611,27 @@ contract, not a scratchpad.
       proof + counters in games_show (an edited context reads never-proven).
       Only the doctor --show-last-good surface and the CLI track-record
       DISPLAY remain M3.2's doctor work)
-- [ ] M2.11 bridge.json diagnostic fields; env-only live contract
+- [x] M2.11 bridge.json diagnostic fields; env-only live contract
       preserved — spec: 03; tests: T-DELIV
+      (config.BridgeJSON gained three diagnostic-ONLY fields — profile,
+      configRevision, startTime (RFC3339) — stamped at start by
+      PrepareBridgeEndpointForStart via a BridgeDiagnostics value threaded
+      from the single production caller (startGame passes launchSpec.Profile
+      / launchSpec.ConfigRevision / now). Both write paths stamp: a fresh
+      allocation and the reuse branch, which RESTAMPS the current launch's
+      diagnostics with the rotated per-launch token so a reused endpoint
+      never leaves the previous launch's profile/revision behind. The fields
+      are omitempty and the non-start writers (Ensure/WriteBridgeJSON, all
+      test-only) pass a zero BridgeDiagnostics, so no production path writes
+      blank diagnostics. The live contract stays env-only: the diagnostics
+      never enter the endpoint-reuse decision (validBridgeEndpoint checks
+      port/token/gameId alone — tested) and never reach a live path — the
+      env-only regression lock seeds a claim with one profile/revision, hand-
+      writes a bridge.json with BOGUS diagnostic fields, and asserts
+      games_status reports the CLAIM's activeProfile/activeConfigRevision
+      while the bogus markers appear nowhere (it passes because nothing reads
+      them — the lock fails the moment a future change wires a diagnostic
+      field into attribution). doctor DISPLAY of these fields is M3.2)
 - [ ] M2.12 Remaining conformance cells (env-dropping, filtering,
       absent-env reintroduction, detached) — spec: 03; tests: T-DELIV
 - [ ] M2.13 repair --forget-runtime + no-arg games_status union of

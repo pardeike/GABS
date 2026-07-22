@@ -5012,7 +5012,15 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	// portRanges is startup-only (design/09): endpoint allocation uses the
 	// configuration pinned at process start, never the hot-reload snapshot.
 	// Failure is structured and the claim is released (deferred cleanup).
-	port, token, bridgePath, reusedBridge, err := config.PrepareBridgeEndpointForStart(game.ID, s.configDir, s.gamesConfig, resetEndpoint)
+	// The diagnostic-only fields (profile, config revision, start time) are
+	// stamped into bridge.json for doctor output; the live handoff stays
+	// env-only (design/03), so these never re-enter a liveness/attach path.
+	startDiag := config.BridgeDiagnostics{
+		Profile:        launchSpec.Profile,
+		ConfigRevision: launchSpec.ConfigRevision,
+		StartTime:      time.Now().UTC().Format(time.RFC3339),
+	}
+	port, token, bridgePath, reusedBridge, err := config.PrepareBridgeEndpointForStart(game.ID, s.configDir, s.gamesConfig, resetEndpoint, startDiag)
 	if err != nil {
 		pendingFailCode = "endpoint_unavailable"
 		return nil, &endpointUnavailableError{gameID: game.ID, err: err}
