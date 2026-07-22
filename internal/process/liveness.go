@@ -23,8 +23,10 @@ var runStatusHookFunc = RunStatusHook
 // diagnoseHookContradiction runs the status hook even though higher-tier
 // evidence already proves running, so a hook that disagrees is reported
 // instead of hidden (design/04: contradictions are reported, not resolved).
+// This is part of the one liveness rule — it applies automatically whenever
+// bridge-tier evidence wins and a status hook exists, in every caller.
 func diagnoseHookContradiction(ev *LivenessEvidence, in LivenessInput) {
-	if !in.DiagnoseHook || in.StatusHook == nil {
+	if in.StatusHook == nil {
 		return
 	}
 	verdict, hr := runStatusHookFunc(in.StatusHook, in.GameID, in.Profile)
@@ -51,9 +53,6 @@ type LivenessInput struct {
 	Profile          string
 	StopProcessName  string
 	Now              time.Time
-	// DiagnoseHook also runs the status hook when higher evidence already
-	// proves running, so contradictions are reported instead of hidden.
-	DiagnoseHook bool
 }
 
 // LivenessEvidence is the verdict plus what was observed — unknown carries

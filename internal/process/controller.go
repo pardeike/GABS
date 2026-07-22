@@ -23,7 +23,21 @@ var (
 	steamLaunchCommandFactory = defaultSteamLaunchCommandFactory
 	epicLaunchCommandFactory  = defaultEpicLaunchCommandFactory
 	findProcessesByNameFunc   = findProcessesByName
+	// steamResolveAppFunc is injectable so tests can pin a resolved app
+	// without a real Steam library (review round 9).
+	steamResolveAppFunc = steam.ResolveApp
 )
+
+// SteamApp re-exports the resolved Steam app for test injection.
+type SteamApp = steam.App
+
+// SetSteamResolveAppForTesting swaps the Steam resolver; the returned
+// function restores it.
+func SetSteamResolveAppForTesting(fn func(appID string) (SteamApp, error)) func() {
+	prev := steamResolveAppFunc
+	steamResolveAppFunc = fn
+	return func() { steamResolveAppFunc = prev }
+}
 
 type LaunchSpec struct {
 	GameId          string
@@ -70,6 +84,11 @@ type Controller struct {
 	bridgeInfo *BridgeInfo
 	waitOnce   sync.Once // guards c.cmd.Wait() to prevent multiple calls
 	waitDone   chan struct{}
+
+	// resolvedSteamApp is the SteamManaged app pinned by
+	// MaterializeSpawnSpec so digesting, sizing, and spawning consume one
+	// immutable specification (review round 9).
+	resolvedSteamApp *steam.App
 
 	// Stage 3 spawnState observers (design/05); nil for legacy callers.
 	// beforeSpawn returning an error ABORTS the spawn: OS process creation
@@ -138,12 +157,23 @@ func (c *Controller) Start() error {
 	case "SteamAppId":
 		cmdName, cmdArgs = steamLaunchCommandFactory(c.spec.PathOrId)
 	case "SteamManaged":
-		app, err := steam.ResolveApp(c.spec.PathOrId)
-		if err != nil {
-			return &ProcessError{
-				Type:    ProcessErrorTypeConfiguration,
-				Context: fmt.Sprintf("failed to resolve Steam app %s", c.spec.PathOrId),
-				Err:     err,
+		// The spec was materialized before digesting and sizing (review
+		// round 9): resolution, digesting, sizing, and spawning must not
+		// independently derive different commands. Fall back to resolving
+		// here only for legacy callers that never materialized.
+		app := c.resolvedSteamApp
+		if app == nil {
+			resolved, err := steamResolveAppFunc(c.spec.PathOrId)
+			if err != nil {
+				return &ProcessError{
+					Type:    ProcessErrorTypeConfiguration,
+					Context: fmt.Sprintf("failed to resolve Steam app %s", c.spec.PathOrId),
+					Err:     err,
+				}
+			}
+			app = &resolved
+			if c.spec.WorkingDir == "" {
+				c.spec.WorkingDir = app.WorkingDir
 			}
 		}
 		if err := steam.EnsureClientRunning(); err != nil {
@@ -153,7 +183,7 @@ func (c *Controller) Start() error {
 				Err:     err,
 			}
 		}
-		if err := steam.EnsureAppIDFile(app); err != nil {
+		if err := steam.EnsureAppIDFile(*app); err != nil {
 			return &ProcessError{
 				Type:    ProcessErrorTypeConfiguration,
 				Context: fmt.Sprintf("failed to prepare Steam app id file for %s", c.spec.GameId),
@@ -162,9 +192,6 @@ func (c *Controller) Start() error {
 		}
 		cmdName = app.Executable
 		cmdArgs = c.spec.Args
-		if c.spec.WorkingDir == "" {
-			c.spec.WorkingDir = app.WorkingDir
-		}
 	case "EpicAppId":
 		cmdName, cmdArgs = epicLaunchCommandFactory(c.spec.PathOrId)
 	case "CustomCommand":
@@ -604,6 +631,33 @@ func (c *Controller) Kill() error {
 		}
 	}
 	return nil
+}
+
+// MaterializeSpawnSpec resolves the mode-specific executable and effective
+// working directory BEFORE spawn, so digesting, platform sizing, and the
+// spawn itself all consume one immutable specification (review round 9).
+// For SteamManaged this resolves the Steam app once and pins its
+// executable and default working directory; Start reuses exactly these
+// values. Other modes return the already-final values.
+func (c *Controller) MaterializeSpawnSpec() (exe string, workingDir string, err error) {
+	switch c.spec.Mode {
+	case "SteamManaged":
+		app, rerr := steamResolveAppFunc(c.spec.PathOrId)
+		if rerr != nil {
+			return "", "", &ProcessError{
+				Type:    ProcessErrorTypeConfiguration,
+				Context: fmt.Sprintf("failed to resolve Steam app %s", c.spec.PathOrId),
+				Err:     rerr,
+			}
+		}
+		c.resolvedSteamApp = &app
+		if c.spec.WorkingDir == "" {
+			c.spec.WorkingDir = app.WorkingDir
+		}
+		return app.Executable, c.spec.WorkingDir, nil
+	default:
+		return c.spec.PathOrId, c.spec.WorkingDir, nil
+	}
 }
 
 // TerminateDirectChild kills and reaps the direct child this controller

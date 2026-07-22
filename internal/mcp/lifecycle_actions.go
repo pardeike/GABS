@@ -17,12 +17,15 @@ import (
 // logged, never a hang.
 const lifecycleLockTimeout = 5 * time.Second
 
-// bridgeAttachmentRef is the in-process identity of the current bridge
-// attachment for a game: which claim (launchID) and which connection
-// lifetime (connectionID) this server last persisted. Detach callbacks
-// carry it so an old disconnect can never clear a newer connection
-// (design/06).
+// bridgeAttachmentRef is the atomic in-process binding published ONLY
+// after handshake authentication and successful attachment publication:
+// the exact client plus the launch and connection identities it persisted
+// (review round 9). Detach callbacks carry it so an old disconnect can
+// never clear a newer connection (design/06); every consumer lookup
+// requires the exact client, a matching claim launchID, the matching
+// persisted Attachment.ConnectionID, and a live authenticated socket.
 type bridgeAttachmentRef struct {
+	client       *gabp.Client
 	launchID     string
 	connectionID string
 }
@@ -46,10 +49,9 @@ var errAttachmentSuperseded = errors.New("attachment publication superseded")
 // service launch B (design/03, design/04).
 func (s *Server) claimBoundClient(gameID string) (*gabp.Client, *process.RuntimeState) {
 	s.mu.RLock()
-	client, ok := s.gabpClients[gameID]
 	ref, hasRef := s.bridgeAttachments[gameID]
 	s.mu.RUnlock()
-	if !ok || client == nil || !client.IsConnected() || !hasRef {
+	if !hasRef || ref.client == nil || !ref.client.IsConnected() {
 		return nil, nil
 	}
 	claim, err := process.LoadRuntimeState(gameID, s.configDir)
@@ -59,22 +61,48 @@ func (s *Server) claimBoundClient(gameID string) (*gabp.Client, *process.Runtime
 	if ref.launchID != claim.LaunchID {
 		return nil, nil
 	}
-	return client, claim
+	if claim.Attachment == nil || claim.Attachment.ConnectionID != ref.connectionID {
+		return nil, nil
+	}
+	return ref.client, claim
 }
 
-// bridgeLiveForLaunch returns a closure reporting — at call time, under
-// whatever lock the caller holds on the claim file — whether this server
-// holds a live client credential-bound to the given launch. Final-removal
-// guards evaluate it so a bridge attaching between the last evidence poll
-// and the under-lock removal is seen.
-func (s *Server) bridgeLiveForLaunch(gameID, launchID string) func() bool {
-	return func() bool {
+// bridgeBound reports — at call time — whether this server holds a live
+// authenticated client bound to the given launch (and, when connectionID
+// is non-empty, that exact connection).
+func (s *Server) bridgeBound(gameID string) func(launchID, connectionID string) bool {
+	return func(launchID, connectionID string) bool {
 		s.mu.RLock()
-		client, ok := s.gabpClients[gameID]
-		ref, hasRef := s.bridgeAttachments[gameID]
+		ref, ok := s.bridgeAttachments[gameID]
 		s.mu.RUnlock()
-		return ok && client != nil && client.IsConnected() && hasRef && ref.launchID == launchID
+		if !ok || ref.client == nil || !ref.client.IsConnected() {
+			return false
+		}
+		if ref.launchID != launchID {
+			return false
+		}
+		if connectionID != "" && ref.connectionID != connectionID {
+			return false
+		}
+		return true
 	}
+}
+
+// selfConnectionFor adapts the binding check to the removal guards'
+// connection-scoped self-liveness signature.
+func (s *Server) selfConnectionFor(gameID, launchID string) func(connectionID string) bool {
+	bound := s.bridgeBound(gameID)
+	return func(connectionID string) bool { return bound(launchID, connectionID) }
+}
+
+// boundGABPForClaim is the GABP-evidence predicate for one loaded claim:
+// the binding must match the claim's launch AND its persisted attachment
+// connection (review round 9).
+func (s *Server) boundGABPForClaim(gameID string, claim *process.RuntimeState) bool {
+	if claim == nil || claim.Attachment == nil {
+		return false
+	}
+	return s.bridgeBound(gameID)(claim.LaunchID, claim.Attachment.ConnectionID)
 }
 
 // errStaleAttachmentCredential: the connection's credential is not the
@@ -96,7 +124,7 @@ var errStaleAttachmentCredential = errors.New("stale bridge credential")
 // Returns nil on publication, errAttachmentSkipped when no record applies,
 // and errStaleAttachmentCredential when the credential does not match the
 // current claim — the caller must not keep such a connection.
-func (s *Server) recordBridgeAttachment(gameID string, endpointPort int, endpointToken string, stillCurrent func() bool) error {
+func (s *Server) recordBridgeAttachment(gameID string, client *gabp.Client, endpointPort int, endpointToken string, stillCurrent func() bool) (bridgeAttachmentRef, error) {
 	now := time.Now().UTC()
 	connID := process.NewFencingID()
 	ownerPID := os.Getpid()
@@ -105,7 +133,7 @@ func (s *Server) recordBridgeAttachment(gameID string, endpointPort int, endpoin
 		// Without a verifiable owner fingerprint the record would be
 		// malformed evidence (design/04) — no binding, no survival.
 		s.log.Warnw("cannot fingerprint this process; bridge attachment not persisted", "gameId", gameID, "error", err)
-		return errAttachmentSuperseded
+		return bridgeAttachmentRef{}, errAttachmentSuperseded
 	}
 	lease := s.runtimeOwnerLeaseDuration()
 
@@ -147,7 +175,7 @@ func (s *Server) recordBridgeAttachment(gameID string, endpointPort int, endpoin
 	})
 	if terr != nil {
 		if errors.Is(terr, errAttachmentSkipped) || errors.Is(terr, errStaleAttachmentCredential) {
-			return terr
+			return bridgeAttachmentRef{}, terr
 		}
 		// The claim disappeared during the handshake, could not be read, or
 		// the write failed: the connection has no binding and must not
@@ -155,14 +183,15 @@ func (s *Server) recordBridgeAttachment(gameID string, endpointPort int, endpoin
 		if !errors.Is(terr, process.ErrNoRuntimeClaim) {
 			s.log.Warnw("failed to persist bridge attachment", "gameId", gameID, "error", terr)
 		}
-		return errAttachmentSuperseded
+		return bridgeAttachmentRef{}, errAttachmentSuperseded
 	}
 
+	ref := bridgeAttachmentRef{client: client, launchID: launchID, connectionID: connID}
 	s.mu.Lock()
 	if s.bridgeAttachments == nil {
 		s.bridgeAttachments = make(map[string]bridgeAttachmentRef)
 	}
-	s.bridgeAttachments[gameID] = bridgeAttachmentRef{launchID: launchID, connectionID: connID}
+	s.bridgeAttachments[gameID] = ref
 	s.mu.Unlock()
 
 	// A disconnect that fired before the record existed had nothing to
@@ -177,10 +206,10 @@ func (s *Server) recordBridgeAttachment(gameID string, endpointPort int, endpoin
 		}
 		s.mu.Unlock()
 		s.clearBridgeAttachment(gameID, launchID, connID)
-		return errAttachmentSuperseded
+		return bridgeAttachmentRef{}, errAttachmentSuperseded
 	}
 	go s.refreshBridgeAttachmentLease(gameID, launchID, connID, stillCurrent, lease)
-	return nil
+	return ref, nil
 }
 
 // refreshBridgeAttachmentLease renews the persisted lease while the socket
@@ -604,7 +633,24 @@ func computeSpawnDigests(spec process.LaunchSpec, controller process.ControllerI
 		}
 	}
 
-	forward := map[string]string{}
+	// Channel membership is decided HERE, from the resolved spec — the
+	// config-declared context keys are the contextEnv channel; every other
+	// forwarded name (GABS_*/GABP_*, SteamAppId/SteamGameId, SystemRoot)
+	// is the managed layer (review round 9: prefix guessing is not a
+	// persistable contract).
+	contextKeys := map[string]bool{}
+	for _, k := range spec.ContextEnvKeys {
+		contextKeys[k] = true
+	}
+	managedEnv := map[string]string{}
+	contextEnv := map[string]string{}
+	classify := func(n, v string) {
+		if contextKeys[n] {
+			contextEnv[n] = v
+		} else {
+			managedEnv[n] = v
+		}
+	}
 	if names := strings.TrimSpace(finalEnv["GABS_FORWARD_ENV"]); names != "" {
 		for _, n := range strings.Split(names, ",") {
 			n = strings.TrimSpace(n)
@@ -612,13 +658,13 @@ func computeSpawnDigests(spec process.LaunchSpec, controller process.ControllerI
 				continue
 			}
 			if v, ok := finalEnv[n]; ok {
-				forward[n] = v
+				classify(n, v)
 			}
 		}
 	} else {
 		for k, v := range finalEnv {
 			if strings.HasPrefix(k, "GABS_") || strings.HasPrefix(k, "GABP_") {
-				forward[k] = v
+				classify(k, v)
 			}
 		}
 	}
@@ -647,7 +693,7 @@ func computeSpawnDigests(spec process.LaunchSpec, controller process.ControllerI
 		unverifiable = true
 	}
 
-	digests, err := process.ComputeContextDigests(spec.Args, cwd, unverifiable, forward, absent)
+	digests, err := process.ComputeContextDigests(spec.Args, cwd, unverifiable, managedEnv, contextEnv, absent)
 	if err != nil {
 		return nil
 	}
@@ -660,16 +706,18 @@ func computeSpawnDigests(spec process.LaunchSpec, controller process.ControllerI
 // launchID + connectionID) — a report from an old connection can never
 // stamp a verdict onto a newer launch. A nil observation is itself an
 // observation: an old bridge yields overall unknown, persisted.
-func (s *Server) recordContextDelivery(gameID string, obs *gabp.ObservedContext) {
-	s.mu.RLock()
-	ref, ok := s.bridgeAttachments[gameID]
-	s.mu.RUnlock()
-	if !ok {
-		return // no published attachment: nothing to attribute the report to
+// recordContextDelivery persists the delivery verdict under EXACTLY the
+// connection that produced the report: the caller passes the publication
+// result, never a reacquired "current" reference — a report from
+// connection A must not be persisted under a connection B that published
+// meanwhile (review round 9).
+func (s *Server) recordContextDelivery(gameID string, ref bridgeAttachmentRef, obs *gabp.ObservedContext) {
+	if ref.launchID == "" || ref.connectionID == "" {
+		return
 	}
 	var pobs *process.ObservedContext
 	if obs != nil {
-		pobs = &process.ObservedContext{Argv: obs.Argv, Cwd: obs.Cwd, Env: obs.Env, Absent: obs.Absent}
+		pobs = &process.ObservedContext{Argv: obs.Argv, Cwd: obs.Cwd, EnvValues: obs.EnvValues, EnvAbsent: obs.EnvAbsent}
 	}
 	if _, err := process.FencedTransition(gameID, s.configDir, ref.launchID, "", func(st *process.RuntimeState) error {
 		if st.Attachment == nil || st.Attachment.ConnectionID != ref.connectionID {
@@ -680,4 +728,74 @@ func (s *Server) recordContextDelivery(gameID string, obs *gabp.ObservedContext)
 	}); err != nil && !errors.Is(err, process.ErrFencingViolation) && !errors.Is(err, process.ErrNoRuntimeClaim) {
 		s.log.Warnw("failed to persist context delivery verdict", "gameId", gameID, "error", err)
 	}
+}
+
+// supersededStartRefusal re-evaluates the CURRENT claim after a start lost
+// its fence and returns the applicable existing stable outcome (design/10;
+// review round 9): a successor in flight is operation_in_progress, an
+// active successor is already_running, anything else is
+// blocked_unknown_state — never an unclassified error.
+func (s *Server) supersededStartRefusal(gameID string) error {
+	cur, err := process.LoadRuntimeState(gameID, s.configDir)
+	if err != nil || cur == nil {
+		return &startRefusalError{refusal: &process.StartRefusal{
+			Code:    process.RefusalOperationInFlight,
+			Message: fmt.Sprintf("the launch of '%s' was superseded during startup and the successor has since finished; re-check games_status", gameID),
+		}}
+	}
+	if process.OperationInFlight(cur.Operation, time.Now().UTC()) {
+		op := *cur.Operation
+		return &startRefusalError{refusal: &process.StartRefusal{
+			Code:          process.RefusalOperationInFlight,
+			Message:       fmt.Sprintf("the launch of '%s' was superseded during startup; a successor %s operation is in progress (deadline %s)", gameID, op.Action, op.Deadline.Format(time.RFC3339)),
+			Phase:         cur.Phase,
+			ActiveProfile: process.EffectiveClaimProfile(cur),
+			Operation:     &op,
+		}}
+	}
+	if cur.Phase == process.PhaseActive {
+		return &startRefusalError{refusal: &process.StartRefusal{
+			Code:          process.RefusalAlreadyRunning,
+			Message:       fmt.Sprintf("the launch of '%s' was superseded during startup; a successor launch is active", gameID),
+			Phase:         cur.Phase,
+			ActiveProfile: process.EffectiveClaimProfile(cur),
+		}}
+	}
+	return &startRefusalError{refusal: &process.StartRefusal{
+		Code:    process.RefusalBlockedUnknown,
+		Message: fmt.Sprintf("the launch of '%s' was superseded during startup; a successor claim exists in phase %s — re-check games_status", gameID, cur.Phase),
+		Phase:   cur.Phase,
+	}}
+}
+
+// occupiedClaimRefusal is the stable outcome for a Stage 4 persistence
+// failure: the claim remains occupied (the operation stays in place) and
+// uncertainty blocks — blocked_unknown_state, per the exhaustive
+// terminal-branch rule (design/10).
+func occupiedClaimRefusal(gameID, what string, err error) error {
+	return &startRefusalError{refusal: &process.StartRefusal{
+		Code:    process.RefusalBlockedUnknown,
+		Message: fmt.Sprintf("%s for '%s': %v — the claim remains occupied; re-check games_status and retry", what, gameID, err),
+	}}
+}
+
+// attachStartContextDelivery reloads the exact claim and attaches its
+// persisted delivery verdict to a start result (design/10: games_start
+// carries contextDelivery when applicable). Only a synchronous successful
+// connection has produced a verdict by this point; otherwise there is
+// nothing to attach yet and status renders it later.
+func (s *Server) attachStartContextDelivery(structured map[string]interface{}, gameID string) {
+	claim, err := process.LoadRuntimeState(gameID, s.configDir)
+	if err != nil || claim == nil || claim.ContextDelivery == nil {
+		return
+	}
+	cd := claim.ContextDelivery
+	entry := map[string]interface{}{"overall": cd.Overall}
+	if len(cd.Channels) > 0 {
+		entry["channels"] = cd.Channels
+	}
+	if len(cd.Reasons) > 0 {
+		entry["reasons"] = cd.Reasons
+	}
+	structured["contextDelivery"] = entry
 }

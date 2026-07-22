@@ -36,10 +36,12 @@ type StartGate struct {
 	ConfigDir        string
 	InstanceID       string
 	RequestedProfile string
-	GABPLive         bool
-	// BridgeLive re-checks the caller's own credential-bound connection at
-	// removal time (under the lock); nil is treated conservatively.
-	BridgeLive      func() bool
+	// BridgeBound reports whether the caller holds a live authenticated
+	// client bound to the given launch (and, when connectionID is
+	// non-empty, to that exact connection). It is evaluated per claim at
+	// evidence time and re-evaluated under the lock at removal time — a
+	// precomputed boolean cannot survive claim replacement or slow probes.
+	BridgeBound     func(launchID, connectionID string) bool
 	Spec            LaunchSpec
 	Budget          time.Duration // process-start budget; pins ProcessStartDeadline
 	Probes          map[string]*launch.ResolvedLifecycle
@@ -156,7 +158,7 @@ func GateStart(g StartGate) (*StartGateResult, error) {
 	probeWarnings, refusal, err := runPreStartProbes(g, &state, now)
 	warnings = append(warnings, probeWarnings...)
 	if err != nil {
-		_ = removeRuntimeStateGuarded(g.GameID, g.ConfigDir, g.InstanceID, state.LaunchID, state.Operation.OperationID, g.BridgeLive)
+		_ = removeRuntimeStateGuarded(g.GameID, g.ConfigDir, g.InstanceID, state.LaunchID, state.Operation.OperationID, gateSelfLive(g, state.LaunchID))
 		return nil, err
 	}
 	if refusal != nil {
@@ -230,14 +232,19 @@ func gateExistingClaim(g StartGate, claim *RuntimeState, now time.Time) (*StartR
 		name = g.StopProcessName
 	}
 
+	// Bridge evidence is claim-bound and evaluated HERE, per claim — a
+	// boolean sampled before the claim load could attribute an old
+	// launch's socket to a successor (review round 9).
+	gabpLive := g.BridgeBound != nil && g.BridgeBound(claim.LaunchID, "")
 	ev := EvaluateLiveness(LivenessInput{
-		GABPLive:        g.GABPLive,
-		Claim:           claim,
-		StatusHook:      claimStatusHook(claim),
-		GameID:          g.GameID,
-		Profile:         profile,
-		StopProcessName: name,
-		Now:             now,
+		GABPLive:         gabpLive,
+		CallerInstanceID: g.InstanceID,
+		Claim:            claim,
+		StatusHook:       claimStatusHook(claim),
+		GameID:           g.GameID,
+		Profile:          profile,
+		StopProcessName:  name,
+		Now:              now,
 	})
 	switch ev.Verdict {
 	case StatusRunning:
@@ -291,6 +298,17 @@ func claimStatusHook(claim *RuntimeState) *launch.ResolvedHook {
 	return claim.Lifecycle.Status
 }
 
+// gateSelfLive adapts the gate's BridgeBound callback to the removal
+// guards' connection-scoped self-liveness check.
+func gateSelfLive(g StartGate, launchID string) func(string) bool {
+	if g.BridgeBound == nil {
+		return nil
+	}
+	return func(connectionID string) bool {
+		return g.BridgeBound(launchID, connectionID)
+	}
+}
+
 // removeEvaluatedClaim clears a stale claim only while it is EXACTLY the
 // claim that was evaluated: same launch identity, an operation unchanged
 // since the evaluation (the same dead attempt, or none then and none now),
@@ -319,7 +337,9 @@ func removeEvaluatedClaim(g StartGate, evaluated *RuntimeState) error {
 	default:
 		return ErrFencingViolation
 	}
-	if attachmentBlocksRemoval(cur.Attachment, g.InstanceID, g.BridgeLive) {
+	if attachmentBlocksRemoval(cur.Attachment, g.InstanceID, func(connectionID string) bool {
+		return g.BridgeBound != nil && g.BridgeBound(evaluated.LaunchID, connectionID)
+	}) {
 		return ErrFencingViolation
 	}
 	return RemoveRuntimeState(g.GameID, g.ConfigDir)
@@ -389,7 +409,7 @@ func runPreStartProbes(g StartGate, state *RuntimeState, now time.Time) ([]strin
 	}
 	if len(running) > 1 {
 		// GABS never guesses among candidates: report all, persist nothing.
-		if err := removeRuntimeStateGuarded(g.GameID, g.ConfigDir, g.InstanceID, state.LaunchID, state.Operation.OperationID, g.BridgeLive); err != nil && !errors.Is(err, ErrFencingViolation) {
+		if err := removeRuntimeStateGuarded(g.GameID, g.ConfigDir, g.InstanceID, state.LaunchID, state.Operation.OperationID, gateSelfLive(g, state.LaunchID)); err != nil && !errors.Is(err, ErrFencingViolation) {
 			return warnings, nil, err
 		}
 		return warnings, &StartRefusal{
@@ -425,7 +445,7 @@ func runPreStartProbes(g StartGate, state *RuntimeState, now time.Time) ([]strin
 				SnapshotPersisted: true,
 			}, nil
 		case len(pids) > 1:
-			if err := removeRuntimeStateGuarded(g.GameID, g.ConfigDir, g.InstanceID, state.LaunchID, state.Operation.OperationID, g.BridgeLive); err != nil && !errors.Is(err, ErrFencingViolation) {
+			if err := removeRuntimeStateGuarded(g.GameID, g.ConfigDir, g.InstanceID, state.LaunchID, state.Operation.OperationID, gateSelfLive(g, state.LaunchID)); err != nil && !errors.Is(err, ErrFencingViolation) {
 				return warnings, nil, err
 			}
 			candidates := make([]string, 0, len(pids))
@@ -480,6 +500,13 @@ func persistExternalSnapshot(g StartGate, state *RuntimeState, observedProfile s
 		s.AppliedInputsState = AppliedInputsStateUnavailable
 		s.Lifecycle = lc
 		s.StopProcessName = g.StopProcessName
+		// External snapshots persist the explicit unknown verdict: GABS
+		// never delivered context to this workload, and status must render
+		// that distinction rather than silently omitting it (design/07).
+		s.ContextDelivery = &RuntimeContextDelivery{
+			Overall: DeliveryUnknown,
+			Reasons: map[string]string{"overall": "externally started instance: GABS delivered no launch context"},
+		}
 		s.UpdatedAt = now
 		return nil
 	})

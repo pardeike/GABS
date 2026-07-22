@@ -144,7 +144,7 @@ func (c *ServerGABPConnector) AttemptConnection(ctx context.Context, gameID stri
 	// binding must not survive (review round 8). The record binds to the
 	// claim whose endpoint credential authenticated, and only while this
 	// client is still the game's current live connection.
-	rerr := c.server.recordBridgeAttachment(gameID, port, token, func() bool {
+	ref, rerr := c.server.recordBridgeAttachment(gameID, client, port, token, func() bool {
 		c.server.mu.RLock()
 		current := c.server.gabpClients[gameID]
 		c.server.mu.RUnlock()
@@ -164,18 +164,27 @@ func (c *ServerGABPConnector) AttemptConnection(ctx context.Context, gameID stri
 	}
 
 	// The welcome-time delivery report is evaluated against the
-	// spawn-pinned digests and persisted under the published connection
-	// identity (design/03; delivery callbacks fence on launchID +
-	// connectionID per design/06). A missing report persists as unknown.
-	c.server.recordContextDelivery(gameID, client.ObservedContext())
+	// spawn-pinned digests and persisted under EXACTLY the connection
+	// that produced it (the publication result above) — never a
+	// reacquired reference (review round 9). Taking the report also
+	// discards the raw values from the client.
+	c.server.recordContextDelivery(gameID, ref, client.TakeObservedContext())
 
 	if !c.mirrorSynchronously {
-		c.startAsyncToolMirroring(gameID, client)
+		c.startAsyncToolMirroring(gameID, client, ref)
 		return nil
 	}
 
 	if err := c.setupToolMirroring(ctx, gameID, client); err != nil {
+		// A terminal setup failure closes and removes the exact client —
+		// it must not linger connected without mirrored state (round 9).
 		c.server.HandleUnexpectedGABPDisconnect(gameID, client, err)
+		c.server.mu.Lock()
+		if current, exists := c.server.gabpClients[gameID]; exists && current == client {
+			delete(c.server.gabpClients, gameID)
+		}
+		c.server.mu.Unlock()
+		_ = client.Close()
 		return err
 	}
 
@@ -189,12 +198,15 @@ func (c *ServerGABPConnector) MirrorConnectedClient(ctx context.Context, gameID 
 	return c.setupToolMirroring(ctx, gameID, client)
 }
 
-func (c *ServerGABPConnector) startAsyncToolMirroring(gameID string, client *gabp.Client) {
+func (c *ServerGABPConnector) startAsyncToolMirroring(gameID string, client *gabp.Client, ref bridgeAttachmentRef) {
 	go func() {
 		if c.asyncMirrorDelay > 0 {
 			time.Sleep(c.asyncMirrorDelay)
 		}
-		if !client.IsConnected() {
+		// Revalidate the exact binding before committing any mirroring: a
+		// delayed discovery for connection A must never overwrite tools
+		// mirrored from a newer connection B (review round 9).
+		if !c.server.bridgeBound(gameID)(ref.launchID, ref.connectionID) {
 			return
 		}
 

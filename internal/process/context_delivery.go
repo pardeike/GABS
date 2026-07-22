@@ -2,6 +2,7 @@ package process
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
@@ -34,39 +35,46 @@ const (
 // confirms absent. A key that was meant to be absent but appears in Env was
 // reintroduced by a boundary and fails the channel like a wrong value.
 type ObservedContext struct {
-	Argv   []string
-	Cwd    string
-	Env    map[string]string
-	Absent []string
+	Argv      []string
+	Cwd       string
+	EnvValues map[string]string
+	EnvAbsent []string
 }
 
 // ComputeContextDigests pins the expected launch context at spawn as
 // non-reversible salted digests (design/03, design/07): the argv payload
-// excluding argv[0], the canonical cwd, and each forwarded env value.
+// excluding argv[0], the canonical cwd, and each forwarded env value —
+// with channel membership persisted explicitly (managed versus context)
+// because the managed layer includes non-prefixed names (SteamAppId,
+// SystemRoot) and prefix guessing is not a persistable contract.
 // Absent-env NAMES (never values) ride along for the isolation check.
 // cwdUnverifiable marks the one contract-level incomparable case (legacy
-// relative game-level workingDir).
-func ComputeContextDigests(argvPayload []string, cwd string, cwdUnverifiable bool, forwardEnv map[string]string, absentNames []string) (*RuntimeContextDigests, error) {
+// relative game-level workingDir); a spawn-side canonicalization FAILURE
+// is different — the channel becomes unknown (no digest, no unverifiable
+// marker), per the binding rule.
+func ComputeContextDigests(argvPayload []string, cwd string, cwdUnverifiable bool, managedEnv, contextEnv map[string]string, absentNames []string) (*RuntimeContextDigests, error) {
 	d := &RuntimeContextDigests{
 		Salt:            NewFencingID(),
 		CwdUnverifiable: cwdUnverifiable,
 	}
 	d.ArgvSHA256 = digestArgv(d.Salt, argvPayload)
 	if !cwdUnverifiable {
-		canonical, err := CanonicalizeCwd(cwd)
-		if err != nil {
-			// A spawn-side canonicalization failure makes the channel
-			// unverifiable rather than pinning a digest that could only
-			// produce false mismatches.
-			d.CwdUnverifiable = true
-		} else {
+		if canonical, err := CanonicalizeCwd(cwd); err == nil {
 			d.CwdSHA256 = digestValue(d.Salt, canonical)
 		}
+		// else: no digest and no unverifiable marker — evaluation reports
+		// the channel unknown ("spawn-side canonicalization failed").
 	}
-	if len(forwardEnv) > 0 {
-		d.EnvSHA256 = make(map[string]string, len(forwardEnv))
-		for k, v := range forwardEnv {
-			d.EnvSHA256[k] = digestValue(d.Salt, v)
+	if len(managedEnv) > 0 {
+		d.ManagedEnvSHA256 = make(map[string]string, len(managedEnv))
+		for k, v := range managedEnv {
+			d.ManagedEnvSHA256[k] = digestValue(d.Salt, v)
+		}
+	}
+	if len(contextEnv) > 0 {
+		d.ContextEnvSHA256 = make(map[string]string, len(contextEnv))
+		for k, v := range contextEnv {
+			d.ContextEnvSHA256[k] = digestValue(d.Salt, v)
 		}
 	}
 	if len(absentNames) > 0 {
@@ -103,20 +111,20 @@ func digestValue(salt, value string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// digestArgv uses the pinned length-prefixed encoding (design/20): each
+// element is preceded by its byte length, so element boundaries are
+// unambiguous regardless of content. This digest is persisted runtime
+// state — the algorithm must stay stable across restarts and binaries.
 func digestArgv(salt string, payload []string) string {
 	h := sha256.New()
 	h.Write([]byte(salt))
+	var lenBuf [8]byte
 	for _, a := range payload {
-		h.Write([]byte{0})
+		binary.BigEndian.PutUint64(lenBuf[:], uint64(len(a)))
+		h.Write(lenBuf[:])
 		h.Write([]byte(a))
 	}
 	return hex.EncodeToString(h.Sum(nil))
-}
-
-// managedEnvName classifies a forwarded key into the managed-env channel
-// (the GABS/GABP variables) versus the config-context channel.
-func managedEnvName(name string) bool {
-	return strings.HasPrefix(name, "GABS_") || strings.HasPrefix(name, "GABP_")
 }
 
 // channelState accumulates per-member comparisons into one channel verdict:
@@ -166,16 +174,12 @@ func EvaluateContextDelivery(d *RuntimeContextDigests, obs *ObservedContext) *Ru
 	}
 
 	expectArgv := d.ArgvSHA256 != ""
-	expectCwd := d.CwdSHA256 != "" || d.CwdUnverifiable
-	expectManaged := false
-	expectContext := len(d.AbsentEnvNames) > 0
-	for k := range d.EnvSHA256 {
-		if managedEnvName(k) {
-			expectManaged = true
-		} else {
-			expectContext = true
-		}
-	}
+	// Every process has a working directory: the channel is always
+	// expected; its digest state distinguishes comparable, legacy-relative
+	// unverifiable, and spawn-side canonicalization failure (unknown).
+	expectCwd := true
+	expectManaged := len(d.ManagedEnvSHA256) > 0
+	expectContext := len(d.ContextEnvSHA256) > 0 || len(d.AbsentEnvNames) > 0
 
 	if obs == nil {
 		// No observed field at all: an old bridge yields unknown for every
@@ -215,67 +219,81 @@ func EvaluateContextDelivery(d *RuntimeContextDigests, obs *ObservedContext) *Ru
 		}
 	}
 
-	if expectCwd {
-		switch {
-		case d.CwdUnverifiable:
-			delivery.Channels[DeliveryChannelCwd] = DeliveryUnverifiable
-			delivery.Reasons[DeliveryChannelCwd] = "the working directory cannot be compared by contract (legacy relative workingDir)"
-		case obs.Cwd == "":
+	switch {
+	case d.CwdUnverifiable:
+		delivery.Channels[DeliveryChannelCwd] = DeliveryUnverifiable
+		delivery.Reasons[DeliveryChannelCwd] = "the working directory cannot be compared by contract (legacy relative workingDir)"
+	case d.CwdSHA256 == "":
+		delivery.Channels[DeliveryChannelCwd] = DeliveryUnknown
+		delivery.Reasons[DeliveryChannelCwd] = "the spawn-side working directory could not be canonicalized"
+	case obs.Cwd == "":
+		delivery.Channels[DeliveryChannelCwd] = DeliveryUnknown
+		delivery.Reasons[DeliveryChannelCwd] = "working directory not reported"
+	default:
+		canonical, err := CanonicalizeCwd(obs.Cwd)
+		if err != nil {
+			// Canonicalization failure is unknown, never a false mismatch
+			// (design/03).
 			delivery.Channels[DeliveryChannelCwd] = DeliveryUnknown
-			delivery.Reasons[DeliveryChannelCwd] = "working directory not reported"
-		default:
-			canonical, err := CanonicalizeCwd(obs.Cwd)
-			if err != nil {
-				// Canonicalization failure is unknown, never a false
-				// mismatch (design/03).
-				delivery.Channels[DeliveryChannelCwd] = DeliveryUnknown
-				delivery.Reasons[DeliveryChannelCwd] = fmt.Sprintf("the reported working directory could not be canonicalized: %v", err)
-			} else if digestValue(d.Salt, canonical) == d.CwdSHA256 {
-				delivery.Channels[DeliveryChannelCwd] = DeliveryVerified
-			} else {
-				delivery.Channels[DeliveryChannelCwd] = DeliveryMismatched
-				delivery.Reasons[DeliveryChannelCwd] = "the observed working directory differs from the resolved one"
-			}
+			delivery.Reasons[DeliveryChannelCwd] = fmt.Sprintf("the reported working directory could not be canonicalized: %v", err)
+		} else if digestValue(d.Salt, canonical) == d.CwdSHA256 {
+			delivery.Channels[DeliveryChannelCwd] = DeliveryVerified
+		} else {
+			delivery.Channels[DeliveryChannelCwd] = DeliveryMismatched
+			delivery.Reasons[DeliveryChannelCwd] = "the observed working directory differs from the resolved one"
 		}
 	}
 
-	envReported := obs.Env != nil || obs.Absent != nil
+	envReported := obs.EnvValues != nil || obs.EnvAbsent != nil
 	managed := &channelState{}
 	context := &channelState{}
-	keys := make([]string, 0, len(d.EnvSHA256))
-	for k := range d.EnvSHA256 {
-		keys = append(keys, k)
+	compareExpected := func(ch *channelState, digests map[string]string) {
+		keys := make([]string, 0, len(digests))
+		for k := range digests {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if !envReported {
+				ch.unknown = append(ch.unknown, fmt.Sprintf("%s unreported (the welcome omits the env lists)", k))
+				continue
+			}
+			v, present := obs.EnvValues[k]
+			absent := containsString(obs.EnvAbsent, k)
+			switch {
+			case present && absent:
+				// Contradictory report: never a pass.
+				ch.mismatch = append(ch.mismatch, fmt.Sprintf("%s reported both present and absent (contradictory report)", k))
+			case present:
+				if digestValue(d.Salt, v) == digests[k] {
+					ch.verified++
+				} else {
+					ch.mismatch = append(ch.mismatch, fmt.Sprintf("%s differs from the resolved value", k))
+				}
+			case absent:
+				// Positively checked and absent while expected present: a
+				// mismatch, not unknown (the binding three-state encoding).
+				ch.mismatch = append(ch.mismatch, fmt.Sprintf("%s was expected present but is positively absent in the workload", k))
+			default:
+				ch.unknown = append(ch.unknown, fmt.Sprintf("%s unreported", k))
+			}
+		}
 	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		ch := context
-		if managedEnvName(k) {
-			ch = managed
-		}
-		if !envReported {
-			ch.unknown = append(ch.unknown, fmt.Sprintf("%s unreported (the welcome omits the env lists)", k))
-			continue
-		}
-		v, ok := obs.Env[k]
-		if !ok {
-			ch.unknown = append(ch.unknown, fmt.Sprintf("%s unreported", k))
-			continue
-		}
-		if digestValue(d.Salt, v) == d.EnvSHA256[k] {
-			ch.verified++
-		} else {
-			ch.mismatch = append(ch.mismatch, fmt.Sprintf("%s differs from the resolved value", k))
-		}
-	}
+	compareExpected(managed, d.ManagedEnvSHA256)
+	compareExpected(context, d.ContextEnvSHA256)
 	for _, n := range d.AbsentEnvNames {
+		_, present := obs.EnvValues[n]
+		absent := containsString(obs.EnvAbsent, n)
 		switch {
 		case !envReported:
 			context.unknown = append(context.unknown, fmt.Sprintf("absence of %s unreported (the welcome omits the env lists)", n))
-		case obs.Env[n] != "" || func() bool { _, present := obs.Env[n]; return present }():
+		case present && absent:
+			context.mismatch = append(context.mismatch, fmt.Sprintf("%s reported both present and absent (contradictory report)", n))
+		case present:
 			// Meant to be absent, arrived with a value: a boundary
 			// reintroduced it — fails exactly like a wrong value.
 			context.mismatch = append(context.mismatch, fmt.Sprintf("%s was meant to be absent but is present in the workload", n))
-		case containsString(obs.Absent, n):
+		case absent:
 			context.verified++
 		default:
 			context.unknown = append(context.unknown, fmt.Sprintf("absence of %s unreported", n))

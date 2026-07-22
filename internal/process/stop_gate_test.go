@@ -466,6 +466,7 @@ func TestSelfOwnedAttachmentDefersToLiveConnectionState(t *testing.T) {
 	// record must not outvote the live in-process connection state.
 	req := stopReq("g1", dir)
 	req.GABPLive = func() bool { return false }
+	req.SelfConnection = func(string) bool { return false }
 	outcome, _, err := ExecuteStopAction(req)
 	if err != nil || outcome == nil || outcome.Code != OutcomeTerminated {
 		t.Fatalf("a self-owned lease with a dead connection must not block clearing: %+v %v", outcome, err)
@@ -547,6 +548,7 @@ func TestVerificationSeesSelfAttachmentAppearingMidAction(t *testing.T) {
 		req := stopReq("g1", dir)
 		selfLive := c.selfLive
 		req.GABPLive = func() bool { return selfLive }
+		req.SelfConnection = func(string) bool { return selfLive }
 		outcome, refusal, err := ExecuteStopAction(req)
 		if err != nil || refusal != nil {
 			t.Fatalf("%s: unexpected refusal: %+v %v", c.name, refusal, err)
@@ -615,7 +617,7 @@ func TestRecoveryLosingFenceToSuccessorIsSuperseded(t *testing.T) {
 	publishClaim(t, dir, st)
 
 	claim := st
-	rec, err := RecoverInterruptedClaim("g1", dir, "inst-recover", &claim, false, func() bool { return false }, time.Now().UTC())
+	rec, err := RecoverInterruptedClaim("g1", dir, "inst-recover", &claim, false, func(string) bool { return false }, time.Now().UTC())
 	if err != nil || rec == nil {
 		t.Fatalf("recovery must complete: %+v %v", rec, err)
 	}

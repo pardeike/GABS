@@ -17,8 +17,8 @@ func testDigestsWithCwd(t *testing.T, cwd string) *RuntimeContextDigests {
 			"GABP_SERVER_PORT": "43210",
 			"GABP_TOKEN":       "secret-token",
 			"GABS_GAME_ID":     "adventure",
-			"CONTENT_SET":      "combat-pack",
 		},
+		map[string]string{"CONTENT_SET": "combat-pack"},
 		[]string{"DEBUG_OVERLAY"},
 	)
 	if err != nil {
@@ -35,13 +35,13 @@ func testDelivery(t *testing.T) (*RuntimeContextDigests, *ObservedContext) {
 	return testDigestsWithCwd(t, cwd), &ObservedContext{
 		Argv: []string{"/opt/game/bin/game", "-profile", "combat", "-scenario", "arena"},
 		Cwd:  cwd,
-		Env: map[string]string{
+		EnvValues: map[string]string{
 			"GABP_SERVER_PORT": "43210",
 			"GABP_TOKEN":       "secret-token",
 			"GABS_GAME_ID":     "adventure",
 			"CONTENT_SET":      "combat-pack",
 		},
-		Absent: []string{"DEBUG_OVERLAY"},
+		EnvAbsent: []string{"DEBUG_OVERLAY"},
 	}
 }
 
@@ -52,11 +52,16 @@ func TestContextDigestsAreSaltedAndValueFree(t *testing.T) {
 	if d1.Salt == d2.Salt {
 		t.Fatal("each launch mints its own salt")
 	}
-	if d1.ArgvSHA256 == d2.ArgvSHA256 || d1.EnvSHA256["GABP_TOKEN"] == d2.EnvSHA256["GABP_TOKEN"] {
+	if d1.ArgvSHA256 == d2.ArgvSHA256 || d1.ManagedEnvSHA256["GABP_TOKEN"] == d2.ManagedEnvSHA256["GABP_TOKEN"] {
 		t.Fatal("digests must be salted: identical values must not produce identical digests across launches")
 	}
-	for k, v := range d1.EnvSHA256 {
-		if strings.Contains(v, "secret-token") || strings.Contains(v, "combat-pack") {
+	for k, v := range d1.ManagedEnvSHA256 {
+		if strings.Contains(v, "secret-token") {
+			t.Fatalf("raw values must never appear in digests: %s=%s", k, v)
+		}
+	}
+	for k, v := range d1.ContextEnvSHA256 {
+		if strings.Contains(v, "combat-pack") {
 			t.Fatalf("raw values must never appear in digests: %s=%s", k, v)
 		}
 	}
@@ -102,7 +107,7 @@ func TestDeliveryNoObservedIsUnknownNeverPartial(t *testing.T) {
 
 func TestDeliveryDroppedContextKeyIsPartial(t *testing.T) {
 	d, obs := testDelivery(t)
-	delete(obs.Env, "CONTENT_SET") // wrapper forwarded managed vars only
+	delete(obs.EnvValues, "CONTENT_SET") // wrapper forwarded managed vars only
 	del := EvaluateContextDelivery(d, obs)
 	if del.Overall != DeliveryOverallPartial {
 		t.Fatalf("managed intact but context key missing is partial, never verified: %+v", del)
@@ -117,7 +122,7 @@ func TestDeliveryDroppedContextKeyIsPartial(t *testing.T) {
 
 func TestDeliveryWrongValueIsMismatched(t *testing.T) {
 	d, obs := testDelivery(t)
-	obs.Env["CONTENT_SET"] = "vanilla-pack"
+	obs.EnvValues["CONTENT_SET"] = "vanilla-pack"
 	del := EvaluateContextDelivery(d, obs)
 	if del.Overall != DeliveryOverallPartial || del.Channels[DeliveryChannelContextEnv] != DeliveryMismatched {
 		t.Fatalf("a differing value is an explicit mismatch: %+v", del)
@@ -129,8 +134,8 @@ func TestDeliveryWrongValueIsMismatched(t *testing.T) {
 
 func TestDeliveryReintroducedAbsentNameFailsChannel(t *testing.T) {
 	d, obs := testDelivery(t)
-	obs.Absent = nil
-	obs.Env["DEBUG_OVERLAY"] = "1" // a boundary reintroduced the unset name
+	obs.EnvAbsent = nil
+	obs.EnvValues["DEBUG_OVERLAY"] = "1" // a boundary reintroduced the unset name
 	del := EvaluateContextDelivery(d, obs)
 	if del.Channels[DeliveryChannelContextEnv] != DeliveryMismatched {
 		t.Fatalf("a reintroduced absent name fails exactly like a wrong value: %+v", del)
@@ -142,7 +147,7 @@ func TestDeliveryReintroducedAbsentNameFailsChannel(t *testing.T) {
 
 func TestDeliveryUnreportedAbsenceIsUnknown(t *testing.T) {
 	d, obs := testDelivery(t)
-	obs.Absent = nil // present keys reported, absence unreported
+	obs.EnvAbsent = nil // present keys reported, absence unreported
 	del := EvaluateContextDelivery(d, obs)
 	if del.Channels[DeliveryChannelContextEnv] != DeliveryUnknown {
 		t.Fatalf("unreported absence leaves the channel unknown: %+v", del)
@@ -154,8 +159,8 @@ func TestDeliveryUnreportedAbsenceIsUnknown(t *testing.T) {
 
 func TestDeliveryOmittedEnvListsAreUnknown(t *testing.T) {
 	d, obs := testDelivery(t)
-	obs.Env = nil
-	obs.Absent = nil
+	obs.EnvValues = nil
+	obs.EnvAbsent = nil
 	del := EvaluateContextDelivery(d, obs)
 	if del.Channels[DeliveryChannelManagedEnv] != DeliveryUnknown || del.Channels[DeliveryChannelContextEnv] != DeliveryUnknown {
 		t.Fatalf("a welcome omitting both env lists leaves the env channels unknown: %+v", del)
@@ -168,15 +173,15 @@ func TestDeliveryOmittedEnvListsAreUnknown(t *testing.T) {
 func TestDeliveryUnverifiableCwdCapsAtPartial(t *testing.T) {
 	d, err := ComputeContextDigests(
 		[]string{"-x"}, "", true, // legacy relative workingDir: cannot be compared by contract
-		map[string]string{"GABS_GAME_ID": "g"}, nil,
+		map[string]string{"GABS_GAME_ID": "g"}, nil, nil,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	obs := &ObservedContext{
-		Argv: []string{"bin", "-x"},
-		Cwd:  "/anywhere",
-		Env:  map[string]string{"GABS_GAME_ID": "g"},
+		Argv:      []string{"bin", "-x"},
+		Cwd:       "/anywhere",
+		EnvValues: map[string]string{"GABS_GAME_ID": "g"},
 	}
 	del := EvaluateContextDelivery(d, obs)
 	if del.Channels[DeliveryChannelCwd] != DeliveryUnverifiable {
@@ -201,14 +206,14 @@ func TestDeliveryCwdCanonicalization(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d, err := ComputeContextDigests([]string{"-x"}, link, false, map[string]string{"GABS_GAME_ID": "g"}, nil)
+	d, err := ComputeContextDigests([]string{"-x"}, link, false, map[string]string{"GABS_GAME_ID": "g"}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	obs := &ObservedContext{
-		Argv: []string{"bin", "-x"},
-		Cwd:  real, // the workload reports the resolved path
-		Env:  map[string]string{"GABS_GAME_ID": "g"},
+		Argv:      []string{"bin", "-x"},
+		Cwd:       real, // the workload reports the resolved path
+		EnvValues: map[string]string{"GABS_GAME_ID": "g"},
 	}
 	del := EvaluateContextDelivery(d, obs)
 	if del.Channels[DeliveryChannelCwd] != DeliveryVerified {
@@ -224,7 +229,7 @@ func TestDeliveryCwdCanonicalization(t *testing.T) {
 }
 
 func TestDeliveryOnlyUnknownAndUnverifiableIsUnknown(t *testing.T) {
-	d, err := ComputeContextDigests([]string{"-x"}, "", true, map[string]string{"GABS_GAME_ID": "g"}, nil)
+	d, err := ComputeContextDigests([]string{"-x"}, "", true, map[string]string{"GABS_GAME_ID": "g"}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,5 +238,61 @@ func TestDeliveryOnlyUnknownAndUnverifiableIsUnknown(t *testing.T) {
 	del := EvaluateContextDelivery(d, obs)
 	if del.Overall != DeliveryUnknown {
 		t.Fatalf("no comparable evidence and no mismatch is unknown: %+v", del)
+	}
+}
+
+func TestDeliveryExpectedPresentPositivelyAbsentIsMismatch(t *testing.T) {
+	d, obs := testDelivery(t)
+	delete(obs.EnvValues, "CONTENT_SET")
+	obs.EnvAbsent = append(obs.EnvAbsent, "CONTENT_SET") // positively checked and absent
+	del := EvaluateContextDelivery(d, obs)
+	if del.Channels[DeliveryChannelContextEnv] != DeliveryMismatched {
+		t.Fatalf("expected-present positively absent is a mismatch, not unknown: %+v", del)
+	}
+	if !strings.Contains(del.Reasons[DeliveryChannelContextEnv], "CONTENT_SET") {
+		t.Fatalf("the failing key must be named: %+v", del.Reasons)
+	}
+}
+
+func TestDeliveryContradictoryReportNeverVerifies(t *testing.T) {
+	d, obs := testDelivery(t)
+	obs.EnvAbsent = append(obs.EnvAbsent, "CONTENT_SET") // also present in envValues
+	del := EvaluateContextDelivery(d, obs)
+	if del.Channels[DeliveryChannelContextEnv] != DeliveryMismatched {
+		t.Fatalf("a key in both lists is contradictory and must not verify: %+v", del)
+	}
+
+	// The contradiction applies to absent-checked names too.
+	d2, obs2 := testDelivery(t)
+	obs2.EnvValues["DEBUG_OVERLAY"] = "1" // while also listed absent
+	del2 := EvaluateContextDelivery(d2, obs2)
+	if del2.Channels[DeliveryChannelContextEnv] != DeliveryMismatched {
+		t.Fatalf("both-lists contradiction on an absent name must mismatch: %+v", del2)
+	}
+}
+
+func TestDeliverySpawnCanonicalizationFailureIsUnknown(t *testing.T) {
+	// The spawn-side cwd could not be canonicalized (nonexistent path):
+	// distinct from the legacy-relative unverifiable case — the channel is
+	// unknown per the binding rule (design/20).
+	d, err := ComputeContextDigests([]string{"-x"}, "/definitely/not/a/real/path/anywhere", false,
+		map[string]string{"GABS_GAME_ID": "g"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.CwdUnverifiable || d.CwdSHA256 != "" {
+		t.Fatalf("a canonicalization failure pins neither a digest nor the unverifiable marker: %+v", d)
+	}
+	obs := &ObservedContext{
+		Argv:      []string{"bin", "-x"},
+		Cwd:       "/anywhere",
+		EnvValues: map[string]string{"GABS_GAME_ID": "g"},
+	}
+	del := EvaluateContextDelivery(d, obs)
+	if del.Channels[DeliveryChannelCwd] != DeliveryUnknown {
+		t.Fatalf("spawn-side canonicalization failure is unknown, never unverifiable or mismatch: %+v", del)
+	}
+	if del.Overall != DeliveryOverallPartial {
+		t.Fatalf("comparable evidence mixed with unknown is partial: %+v", del)
 	}
 }

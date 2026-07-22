@@ -385,3 +385,41 @@ func TestCallToolFailsFastWhenConnectionDrops(t *testing.T) {
 		t.Fatalf("server goroutine failed: %v", err)
 	}
 }
+
+func TestParseObservedContextBindingWireShape(t *testing.T) {
+	// The binding wire shape (design/20): envValues/envAbsent, decoded
+	// from literal welcome JSON exactly as a conforming bridge sends it.
+	raw := `{"agentId":"g","schemaVersion":"1.0","observed":{"argv":["bin","-x"],"cwd":"/data","envValues":{"CONTENT_SET":"combat"},"envAbsent":["DEBUG_OVERLAY"]}}`
+	var result map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		t.Fatal(err)
+	}
+	obs := parseObservedContext(result)
+	if obs == nil {
+		t.Fatal("a conforming observed object must decode")
+	}
+	if len(obs.Argv) != 2 || obs.Cwd != "/data" {
+		t.Fatalf("argv/cwd wrong: %+v", obs)
+	}
+	if obs.EnvValues["CONTENT_SET"] != "combat" {
+		t.Fatalf("envValues must decode from the binding name: %+v", obs)
+	}
+	if len(obs.EnvAbsent) != 1 || obs.EnvAbsent[0] != "DEBUG_OVERLAY" {
+		t.Fatalf("envAbsent must decode from the binding name: %+v", obs)
+	}
+
+	// Non-binding field names decode to nothing: their channels stay
+	// unreported (unknown), never silently accepted.
+	rawWrong := `{"agentId":"g","observed":{"env":{"A":"1"},"absent":["B"]}}`
+	var resultWrong map[string]interface{}
+	if err := json.Unmarshal([]byte(rawWrong), &resultWrong); err != nil {
+		t.Fatal(err)
+	}
+	obsWrong := parseObservedContext(resultWrong)
+	if obsWrong == nil {
+		t.Fatal("the object itself still decodes")
+	}
+	if obsWrong.EnvValues != nil || obsWrong.EnvAbsent != nil {
+		t.Fatalf("non-binding names must not populate the report: %+v", obsWrong)
+	}
+}

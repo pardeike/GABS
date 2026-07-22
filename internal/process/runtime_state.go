@@ -120,10 +120,17 @@ type RuntimeBuiltinFallback struct {
 // per-launch salt plus salted hashes of the argv payload (excluding
 // argv[0]), the canonical cwd, and each forwarded env value.
 type RuntimeContextDigests struct {
-	Salt       string            `json:"salt"`
-	ArgvSHA256 string            `json:"argvSha256,omitempty"`
-	CwdSHA256  string            `json:"cwdSha256,omitempty"`
-	EnvSHA256  map[string]string `json:"envSha256,omitempty"`
+	Salt       string `json:"salt"`
+	ArgvSHA256 string `json:"argvSha256,omitempty"`
+	// CwdSHA256 empty with CwdUnverifiable false means the spawn-side
+	// canonicalization failed: the channel is unknown, never a guessed
+	// digest and never the legacy-relative unverifiable case.
+	CwdSHA256 string `json:"cwdSha256,omitempty"`
+	// Channel membership is persisted explicitly (managed versus config-
+	// context) — the managed layer includes non-prefixed names (SteamAppId,
+	// SystemRoot) and prefix inference is not a persistable contract.
+	ManagedEnvSHA256 map[string]string `json:"managedEnvSha256,omitempty"`
+	ContextEnvSHA256 map[string]string `json:"contextEnvSha256,omitempty"`
 	// AbsentEnvNames pins the GABS_ABSENT_ENV names (never values) for the
 	// isolation check; CwdUnverifiable marks the contract-level
 	// incomparable case (legacy relative workingDir) so verification

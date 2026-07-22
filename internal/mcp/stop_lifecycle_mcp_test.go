@@ -13,10 +13,18 @@ import (
 	"time"
 
 	"github.com/pardeike/gabs/internal/config"
+	"github.com/pardeike/gabs/internal/gabp"
 	"github.com/pardeike/gabs/internal/launch"
 	"github.com/pardeike/gabs/internal/process"
 	"github.com/pardeike/gabs/internal/util"
 )
+
+// attachForTest drives recordBridgeAttachment with a dummy client for
+// persistence-focused tests; the caller's stillCurrent closure controls
+// currency, so the client's own connection state is irrelevant here.
+func attachForTest(s *Server, gameID string, port int, token string, stillCurrent func() bool) (bridgeAttachmentRef, error) {
+	return s.recordBridgeAttachment(gameID, gabp.NewClient(s.log), port, token, stillCurrent)
+}
 
 func TestGamesStopTerminatesManagedGame(t *testing.T) {
 	t.Setenv("GABSTEST_HELPER_PROCESS", "1")
@@ -170,7 +178,7 @@ func TestBridgeAttachmentRecordPromotesAndFences(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s.recordBridgeAttachment("adventure", 43210, "launch-token", func() bool { return true })
+	_, _ = attachForTest(s, "adventure", 43210, "launch-token", func() bool { return true })
 
 	claim, err := process.LoadRuntimeState("adventure", s.configDir)
 	if err != nil || claim == nil || claim.Attachment == nil {
@@ -188,7 +196,7 @@ func TestBridgeAttachmentRecordPromotesAndFences(t *testing.T) {
 	}
 
 	// A second attachment (reconnect) rotates the connection identity.
-	s.recordBridgeAttachment("adventure", 43210, "launch-token", func() bool { return true })
+	_, _ = attachForTest(s, "adventure", 43210, "launch-token", func() bool { return true })
 	claim, _ = process.LoadRuntimeState("adventure", s.configDir)
 	if claim.Attachment.ConnectionID == first.ConnectionID {
 		t.Fatal("each attachment lifetime gets its own connectionID")
@@ -224,7 +232,7 @@ func TestBridgeAttachmentBindsToAuthenticatingCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s.recordBridgeAttachment("adventure", 43210, "launch-a-token", func() bool { return true })
+	_, _ = attachForTest(s, "adventure", 43210, "launch-a-token", func() bool { return true })
 
 	claim, err := process.LoadRuntimeState("adventure", s.configDir)
 	if err != nil || claim == nil {
@@ -251,7 +259,7 @@ func TestBridgeAttachmentDisconnectBeforePublicationIsUndone(t *testing.T) {
 
 	// The connection died before the record was published: the disconnect
 	// callback had nothing to clear, so publication must undo itself.
-	s.recordBridgeAttachment("adventure", 43210, "launch-token", func() bool { return false })
+	_, _ = attachForTest(s, "adventure", 43210, "launch-token", func() bool { return false })
 
 	claim, err := process.LoadRuntimeState("adventure", s.configDir)
 	if err != nil || claim == nil {
@@ -285,7 +293,7 @@ func TestBridgeAttachmentDoesNotPromoteMidStartClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s.recordBridgeAttachment("adventure", 43210, "launch-token", func() bool { return true })
+	_, _ = attachForTest(s, "adventure", 43210, "launch-token", func() bool { return true })
 
 	claim, err := process.LoadRuntimeState("adventure", s.configDir)
 	if err != nil || claim == nil {
@@ -587,7 +595,7 @@ func TestBridgeAttachmentStaleCredentialIsRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := s.recordBridgeAttachment("adventure", 40001, "previous-launch-token", func() bool { return true })
+	_, err := attachForTest(s, "adventure", 40001, "previous-launch-token", func() bool { return true })
 	if !errors.Is(err, errStaleAttachmentCredential) {
 		t.Fatalf("a mismatched credential must be typed stale, got %v", err)
 	}

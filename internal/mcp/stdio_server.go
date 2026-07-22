@@ -1318,6 +1318,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		addStartAdoption(structured, &message, startResult)
 		addValidationWarnings(structured, validationWarnings)
 		addResolvedContext(structured, resolved)
+		s.attachStartContextDelivery(structured, game.ID)
 		return &ToolResult{
 			Content:           []Content{{Type: "text", Text: message}},
 			StructuredContent: structured,
@@ -2597,16 +2598,17 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				}
 				return failMigration("endpoint_unavailable", fmt.Sprintf("The validated legacy endpoint for '%s' could not be persisted: %v. The connection was closed; retry games_connect is not possible for this launch — the migration window is one-shot.", game.ID, merr))
 			}
-			if perr := s.recordBridgeAttachment(game.ID, port, token, func() bool {
+			migratedRef, perr := s.recordBridgeAttachment(game.ID, migratedClient, port, token, func() bool {
 				s.mu.RLock()
 				cur := s.gabpClients[game.ID]
 				s.mu.RUnlock()
 				return cur == migratedClient && migratedClient != nil && migratedClient.IsConnected()
-			}); perr != nil {
+			})
+			if perr != nil {
 				return failMigration("operation_in_progress", fmt.Sprintf("The migrated bridge attachment for '%s' could not be published (%v); the connection was closed — re-check games_status.", game.ID, perr))
 			}
 			if migratedClient != nil {
-				s.recordContextDelivery(game.ID, migratedClient.ObservedContext())
+				s.recordContextDelivery(game.ID, migratedRef, migratedClient.TakeObservedContext())
 			}
 			if migratedClient != nil {
 				if merr := connector.MirrorConnectedClient(connectCtx, game.ID, migratedClient); merr != nil {
@@ -4134,8 +4136,41 @@ func (s *Server) resolveClaimStatusByLiveness(gameID string, claim *process.Runt
 // resolveClaimStatusObserved is resolveClaimStatusByLiveness plus the
 // observation itself: verdict, source, detail, hook facts, and warnings —
 // unknown says what was observed, and contradictions carry their warning
-// (design/04; review round 8).
+// (design/04; review round 8). When a fenced write loses to a successor
+// mid-evaluation, it reloads the CURRENT claim and re-runs the full
+// claim-first evaluation (never maps phase to status) — phase is not
+// liveness evidence and an active successor can itself be stopped or
+// unknown (review round 9).
 func (s *Server) resolveClaimStatusObserved(gameID string, claim *process.RuntimeState, gabpLive bool) (string, *process.LivenessEvidence) {
+	for attempt := 0; attempt < 4; attempt++ {
+		status, ev, superseded := s.evaluateClaimStatusOnce(gameID, claim, gabpLive)
+		if !superseded {
+			return status, ev
+		}
+		cur, lerr := process.LoadRuntimeState(gameID, s.configDir)
+		if lerr != nil {
+			return "unknown", nil
+		}
+		if cur == nil {
+			return "stale-runtime-cleaned", ev
+		}
+		if cur.SchemaVersion < process.RuntimeSchemaVersion {
+			// A legacy successor: the caller's legacy path owns it.
+			return "", nil
+		}
+		// Re-derive the bridge binding for the freshly loaded claim.
+		claim = cur
+		gabpLive = s.boundGABPForClaim(gameID, cur)
+	}
+	// Convergence guard: repeated supersession means the claim is churning;
+	// report unknown rather than loop.
+	return "unknown", nil
+}
+
+// evaluateClaimStatusOnce runs one claim-first evaluation. superseded=true
+// means a fenced write lost to a successor and the caller must reload and
+// re-evaluate rather than trust this pass.
+func (s *Server) evaluateClaimStatusOnce(gameID string, claim *process.RuntimeState, gabpLive bool) (string, *process.LivenessEvidence, bool) {
 	var hook *launch.ResolvedHook
 	if claim.Lifecycle != nil {
 		hook = claim.Lifecycle.Status
@@ -4154,44 +4189,32 @@ func (s *Server) resolveClaimStatusObserved(gameID string, claim *process.Runtim
 	// per its evidence. A dead attempt never renders as in progress, and
 	// the interrupted hook is never replayed.
 	if claim.Operation != nil && !process.OperationInFlight(claim.Operation, now) {
-		rec, rerr := process.RecoverInterruptedClaim(gameID, s.configDir, s.instanceID, claim, gabpLive, s.bridgeLiveForLaunch(gameID, claim.LaunchID), now)
+		rec, rerr := process.RecoverInterruptedClaim(gameID, s.configDir, s.instanceID, claim, gabpLive, s.selfConnectionFor(gameID, claim.LaunchID), now)
 		if rerr != nil {
 			s.log.Warnw("claim recovery failed", "gameId", gameID, "error", rerr)
-			return "unknown", nil
+			return "unknown", nil, false
 		}
 		if rec != nil {
-			if rec.Removed {
-				return "stale-runtime-cleaned", &rec.Evidence
-			}
 			if rec.Superseded {
 				// The evaluated generation lost its fence mid-recovery:
-				// never present it as post-recovery state — report from
-				// the CURRENT claim instead (review round 8).
-				cur, lerr := process.LoadRuntimeState(gameID, s.configDir)
-				if lerr != nil || cur == nil {
-					return "stale-runtime-cleaned", nil
-				}
-				switch cur.Phase {
-				case process.PhaseStopping, process.PhaseKilling:
-					return cur.Phase, nil
-				case process.PhaseActive:
-					return process.RuntimeStateStatusRunning, nil
-				default:
-					return process.RuntimeStateStatusStarting, nil
-				}
+				// reload and re-evaluate the CURRENT claim (round 9).
+				return "", nil, true
+			}
+			if rec.Removed {
+				return "stale-runtime-cleaned", &rec.Evidence, false
 			}
 			if rec.Claim != nil {
 				claim = rec.Claim
 			}
 			if claim.Phase == process.PhaseActive {
 				if rec.Evidence.Verdict == process.StatusRunning {
-					return process.RuntimeStateStatusRunning, &rec.Evidence
+					return process.RuntimeStateStatusRunning, &rec.Evidence, false
 				}
-				return "unknown", &rec.Evidence
+				return "unknown", &rec.Evidence, false
 			}
 			// Preflight with a live-but-overdue executor, or the spawn
 			// window with genuinely unknown evidence: occupied.
-			return process.RuntimeStateStatusStarting, &rec.Evidence
+			return process.RuntimeStateStatusStarting, &rec.Evidence, false
 		}
 	}
 
@@ -4208,9 +4231,6 @@ func (s *Server) resolveClaimStatusObserved(gameID string, claim *process.Runtim
 		StatusHook:       hook,
 		GameID:           gameID,
 		Profile:          profile,
-		// Contradictions are diagnosed whenever bridge-tier evidence can
-		// win the evaluation (design/04, T-LIFE).
-		DiagnoseHook: gabpLive,
 	})
 	switch ev.Verdict {
 	case process.StatusRunning:
@@ -4228,33 +4248,33 @@ func (s *Server) resolveClaimStatusObserved(gameID string, claim *process.Runtim
 					st.Status = process.RuntimeStateStatusRunning
 					return nil
 				}); err == nil {
-					return process.RuntimeStateStatusRunning, &ev
+					return process.RuntimeStateStatusRunning, &ev, false
 				}
 			}
-			return process.RuntimeStateStatusStarting, &ev
+			return process.RuntimeStateStatusStarting, &ev, false
 		case process.PhaseStopping, process.PhaseKilling:
 			if opInFlight {
-				return claim.Phase, &ev
+				return claim.Phase, &ev, false
 			}
 		}
-		return process.RuntimeStateStatusRunning, &ev
+		return process.RuntimeStateStatusRunning, &ev, false
 	case process.StatusUnknown:
 		switch claim.Phase {
 		case process.PhaseStarting:
-			return process.RuntimeStateStatusStarting, &ev
+			return process.RuntimeStateStatusStarting, &ev, false
 		case process.PhaseStopping, process.PhaseKilling:
 			if opInFlight {
-				return claim.Phase, &ev
+				return claim.Phase, &ev, false
 			}
 		}
-		return "unknown", &ev
+		return "unknown", &ev, false
 	default: // stopped
 		if opInFlight {
 			switch claim.Phase {
 			case process.PhaseStopping, process.PhaseKilling:
-				return claim.Phase, &ev
+				return claim.Phase, &ev, false
 			}
-			return process.RuntimeStateStatusStarting, &ev
+			return process.RuntimeStateStatusStarting, &ev, false
 		}
 		// Completed-unobserved asymmetry (design/05 Stage 4): absence-based
 		// stopped never clears the claim — only positive evidence does.
@@ -4262,32 +4282,24 @@ func (s *Server) resolveClaimStatusObserved(gameID string, claim *process.Runtim
 			positive := ev.Source == process.LivenessSourceStatusHook ||
 				(ev.Source == process.LivenessSourcePID && claim.PIDRole == process.PIDRoleWorkload)
 			if !positive {
-				return process.RuntimeStateStatusStarting, &ev
+				return process.RuntimeStateStatusStarting, &ev, false
 			}
 		}
 		// Fenced removal (design/06): the stopped verdict may have taken a
 		// seconds-long hook to compute — remove only while the evaluated
 		// launch identity still holds and no operation was admitted
 		// meanwhile; a stale verdict must never delete a successor claim.
-		if err := process.RemoveRuntimeStateIfCurrent(gameID, s.configDir, s.instanceID, claim.LaunchID, s.bridgeLiveForLaunch(gameID, claim.LaunchID)); err != nil {
+		if err := process.RemoveRuntimeStateIfCurrent(gameID, s.configDir, s.instanceID, claim.LaunchID, s.selfConnectionFor(gameID, claim.LaunchID)); err != nil {
 			if errors.Is(err, process.ErrFencingViolation) {
-				if cur, lerr := process.LoadRuntimeState(gameID, s.configDir); lerr == nil && cur != nil {
-					switch cur.Phase {
-					case process.PhaseStopping, process.PhaseKilling:
-						return cur.Phase, &ev
-					case process.PhaseActive:
-						return process.RuntimeStateStatusRunning, &ev
-					default:
-						return process.RuntimeStateStatusStarting, &ev
-					}
-				}
-				return "stale-runtime-cleaned", &ev
+				// A successor exists: reload and re-evaluate it fully —
+				// phase is not liveness evidence (round 9).
+				return "", &ev, true
 			}
 			s.log.Warnw("failed to remove stopped runtime claim", "gameId", gameID, "error", err)
-			return "", &ev
+			return "", &ev, false
 		}
 		s.log.Debugw("removed stopped runtime claim", "gameId", gameID, "evidence", ev.Detail)
-		return "stale-runtime-cleaned", &ev
+		return "stale-runtime-cleaned", &ev, false
 	}
 }
 
@@ -4808,22 +4820,29 @@ func (s *Server) checkGameStatusObserved(gameID string) (string, *process.Livene
 }
 
 // cleanupStoppedGameLocked centralizes cleanup when s.mu is already held.
-func (s *Server) cleanupStoppedGameLocked(gameID string) {
+// It returns the popped attachment reference for the caller to clear after
+// releasing s.mu (review round 9: no transition-lock acquisition under
+// s.mu).
+func (s *Server) cleanupStoppedGameLocked(gameID string) (bridgeAttachmentRef, bool) {
 	// Remove from games map - no need for complex cleanup in stateless approach
 	delete(s.games, gameID)
 
 	// Note: The mutex is already held when this is called from checkGameStatus
 	// So we call internal cleanup methods that don't acquire locks
-	s.cleanupGABPConnectionInternal(gameID)
+	ref, hadRef := s.cleanupGABPConnectionInternal(gameID)
 	s.cleanupGameResourcesInternal(gameID)
 	s.cleanupRuntimeStateInternal(gameID)
 	s.log.Debugw("cleaned up dead game process and resources", "gameId", gameID)
+	return ref, hadRef
 }
 
 func (s *Server) cleanupStoppedGame(gameID string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.cleanupStoppedGameLocked(gameID)
+	ref, hadRef := s.cleanupStoppedGameLocked(gameID)
+	s.mu.Unlock()
+	if hadRef {
+		s.clearBridgeAttachment(gameID, ref.launchID, ref.connectionID)
+	}
 }
 
 // startGame starts a game process using the serialized starter approach
@@ -4889,7 +4908,7 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 		ConfigDir:        s.configDir,
 		InstanceID:       s.instanceID,
 		RequestedProfile: launchSpec.Profile,
-		GABPLive:         s.hasLiveGABPClient(game.ID),
+		BridgeBound:      s.bridgeBound(game.ID),
 		Spec:             launchSpec,
 		Budget:           startBudget,
 		Probes:           launch.ResolveProfileLifecycles(&game),
@@ -4915,7 +4934,7 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 		// this start created — a cleanup that lost a race (its transition
 		// fenced out, its claim superseded) must never delete a successor
 		// claim by bare game ID (design/06).
-		if err := process.ReleaseStartClaim(game.ID, s.configDir, s.instanceID, launchID, opID, s.bridgeLiveForLaunch(game.ID, launchID)); err != nil &&
+		if err := process.ReleaseStartClaim(game.ID, s.configDir, s.instanceID, launchID, opID, s.selfConnectionFor(game.ID, launchID)); err != nil &&
 			!errors.Is(err, process.ErrFencingViolation) && !errors.Is(err, process.ErrNoRuntimeClaim) {
 			s.log.Warnw("failed to release start claim", "gameId", game.ID, "error", err)
 		}
@@ -5039,13 +5058,13 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 			return nil
 		}); ferr != nil {
 			// A stable Stage 4 outcome is emitted only after its transition
-			// lands (design/05; review round 8): a fencing loss means a
-			// successor owns the claim now, and a persistence failure leaves
-			// the operation in place — the claim stays occupied either way.
+			// lands (design/05; review rounds 8-9): a fencing loss reports
+			// supersession (re-evaluated to a stable code), a persistence
+			// failure keeps the claim occupied with blocked_unknown_state.
 			if errors.Is(ferr, process.ErrFencingViolation) || errors.Is(ferr, process.ErrNoRuntimeClaim) {
-				return result, fmt.Errorf("launch of '%s' was superseded during startup", game.ID)
+				return result, s.supersededStartRefusal(game.ID)
 			}
-			return result, fmt.Errorf("failed to persist the unobserved outcome for '%s': %w — the claim remains occupied; re-check games_status", game.ID, ferr)
+			return result, occupiedClaimRefusal(game.ID, "the unobserved outcome could not be persisted", ferr)
 		}
 		return result, &unobservedStartError{warnings: startWarnings}
 	}
@@ -5082,7 +5101,7 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 			}
 		} else if errors.Is(result.Error, process.ErrFencingViolation) {
 			cleanupRuntimeState = false
-			return result, fmt.Errorf("launch of '%s' was superseded before spawn", game.ID)
+			return result, s.supersededStartRefusal(game.ID)
 		} else {
 			return result, fmt.Errorf("failed to start game '%s' (mode: %s, target: %s): %w",
 				game.ID, game.LaunchMode, game.Target, result.Error)
@@ -5128,12 +5147,13 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	if err != nil {
 		cleanupRuntimeState = false
 		if errors.Is(err, process.ErrFencingViolation) || errors.Is(err, process.ErrNoRuntimeClaim) {
-			return result, fmt.Errorf("launch of '%s' was superseded during startup", game.ID)
+			return result, s.supersededStartRefusal(game.ID)
 		}
 		// A started_* outcome is emitted only after the promote transition
-		// lands (review round 8): the claim stays occupied (operation in
-		// place) and the caller gets a structured failure, not success.
-		return result, fmt.Errorf("failed to persist the running state for '%s': %w — the claim remains occupied; re-check games_status", game.ID, err)
+		// lands: the claim stays occupied (operation in place) and the
+		// caller gets a stable blocked_unknown_state, not an unclassified
+		// error (review round 9).
+		return result, occupiedClaimRefusal(game.ID, "the running state could not be persisted", err)
 	} else if promoted != nil {
 		runtimeState = *promoted
 	}
@@ -5188,7 +5208,7 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 			// completion makes its own fully fenced decision (design/06):
 			// same launch, still no operation, no removal-blocking
 			// attachment — never the generic operation-fenced defer.
-			if rerr := process.RemoveRuntimeStateIfCurrent(game.ID, s.configDir, s.instanceID, launchID, s.bridgeLiveForLaunch(game.ID, launchID)); rerr != nil {
+			if rerr := process.RemoveRuntimeStateIfCurrent(game.ID, s.configDir, s.instanceID, launchID, s.selfConnectionFor(game.ID, launchID)); rerr != nil {
 				if !errors.Is(rerr, process.ErrFencingViolation) {
 					s.log.Warnw("failed to release exited launch claim", "gameId", game.ID, "error", rerr)
 				}
@@ -5340,14 +5360,26 @@ func (s *Server) syncGABPToolsWithTimeout(client *gabp.Client, gameID string, ti
 					return blocked, nil
 				}
 
+				// Resolve the CURRENT claim-bound client at invocation
+				// time: handlers must never retain the discovery-time
+				// client — a reconnect replaces the connection while the
+				// mirrored tools remain installed (review round 9).
+				liveClient, _ := s.claimBoundClient(gameID)
+				if liveClient == nil {
+					return &ToolResult{
+						Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' is not connected via GABP. Use games_status to verify whether it is still running, then use games_connect or games_start as appropriate.", gameID)}},
+						IsError: true,
+					}, nil
+				}
+
 				if !shouldBypassAttentionGateForTool(mcpTool, exposedName, toolName) {
-					if blocked := s.enforceAttentionGate(gameID, exposedName, client); blocked != nil {
+					if blocked := s.enforceAttentionGate(gameID, exposedName, liveClient); blocked != nil {
 						return blocked, nil
 					}
 				}
 
 				// Call GABP with original tool name (without game prefix)
-				result, isError, err := client.CallToolWithTimeout(toolName, args, proxyTimeout)
+				result, isError, err := liveClient.CallToolWithTimeout(toolName, args, proxyTimeout)
 				if err != nil {
 					return &ToolResult{
 						Content: []Content{{Type: "text", Text: err.Error()}},
@@ -5710,8 +5742,6 @@ func (s *Server) CleanupGameResources(gameId string) {
 // CleanupGABPConnection closes the GABP connection for a game
 func (s *Server) CleanupGABPConnection(gameId string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	// Clean up GABP client connection
 	if client, exists := s.gabpClients[gameId]; exists {
 		if err := client.Close(); err != nil {
@@ -5720,14 +5750,20 @@ func (s *Server) CleanupGABPConnection(gameId string) {
 		delete(s.gabpClients, gameId)
 		s.log.Debugw("cleaned up GABP client connection", "gameId", gameId)
 	}
-	// Close() never fires the disconnect handler, so the explicit cleanup
-	// path clears the persisted attachment record itself.
-	if ref, ok := s.takeBridgeAttachmentRefLocked(gameId); ok {
-		s.clearBridgeAttachment(gameId, ref.launchID, ref.connectionID)
-	}
+	// Pop the attachment reference under s.mu, but clear the PERSISTED
+	// record only after releasing it — clearBridgeAttachment takes the
+	// per-game transition lock, and holding s.mu across it inverts the
+	// lock order that status/removal paths use (transition lock, then
+	// s.mu via bridgeBound), an ABBA cycle (review round 9).
+	ref, hadRef := s.takeBridgeAttachmentRefLocked(gameId)
 	s.clearGameAttentionStateLocked(gameId)
 	delete(s.gabpDisconnects, gameId)
 	s.deleteGameToolAliasesLocked(gameId)
+	s.mu.Unlock()
+
+	if hadRef {
+		s.clearBridgeAttachment(gameId, ref.launchID, ref.connectionID)
+	}
 }
 
 // CleanupBridgeConfig removes the bridge configuration file for a game
@@ -5787,8 +5823,12 @@ func (s *Server) cleanupGameResourcesInternal(gameId string) {
 	}
 }
 
-// cleanupGABPConnectionInternal cleans up GABP connection without acquiring mutex
-func (s *Server) cleanupGABPConnectionInternal(gameId string) {
+// cleanupGABPConnectionInternal cleans up GABP connection without acquiring
+// mutex. It returns the popped attachment reference (if any) so the caller
+// clears the PERSISTED record AFTER releasing s.mu — clearBridgeAttachment
+// takes the transition lock, and clearing it under s.mu would invert the
+// lock order (review round 9).
+func (s *Server) cleanupGABPConnectionInternal(gameId string) (bridgeAttachmentRef, bool) {
 	// Clean up GABP client connection
 	if client, exists := s.gabpClients[gameId]; exists {
 		if err := client.Close(); err != nil {
@@ -5797,13 +5837,10 @@ func (s *Server) cleanupGABPConnectionInternal(gameId string) {
 		delete(s.gabpClients, gameId)
 		s.log.Debugw("cleaned up GABP client connection", "gameId", gameId)
 	}
-	// Close() never fires the disconnect handler, so the explicit cleanup
-	// path clears the persisted attachment record itself.
-	if ref, ok := s.takeBridgeAttachmentRefLocked(gameId); ok {
-		s.clearBridgeAttachment(gameId, ref.launchID, ref.connectionID)
-	}
+	ref, ok := s.takeBridgeAttachmentRefLocked(gameId)
 	s.clearGameAttentionStateLocked(gameId)
 	delete(s.gabpDisconnects, gameId)
+	return ref, ok
 }
 
 // cleanupBridgeConfigInternal removes bridge config without acquiring mutex

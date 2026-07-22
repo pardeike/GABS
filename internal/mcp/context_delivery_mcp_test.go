@@ -29,11 +29,11 @@ func TestStartPinsContextDigestsWithoutRawValues(t *testing.T) {
 	if d == nil || d.Salt == "" || d.ArgvSHA256 == "" {
 		t.Fatalf("expected-context digests must be pinned at spawn: %+v", d)
 	}
-	if _, ok := d.EnvSHA256["GABP_TOKEN"]; !ok {
-		t.Fatalf("the forwarded managed values must be digested: %+v", d.EnvSHA256)
+	if _, ok := d.ManagedEnvSHA256["GABP_TOKEN"]; !ok {
+		t.Fatalf("the forwarded managed values must be digested: %+v", d.ManagedEnvSHA256)
 	}
-	if _, ok := d.EnvSHA256["GABP_SERVER_PORT"]; !ok {
-		t.Fatalf("the forwarded managed values must be digested: %+v", d.EnvSHA256)
+	if _, ok := d.ManagedEnvSHA256["GABP_SERVER_PORT"]; !ok {
+		t.Fatalf("the forwarded managed values must be digested: %+v", d.ManagedEnvSHA256)
 	}
 
 	// Privacy: the raw per-launch token must never appear in the claim
@@ -41,7 +41,7 @@ func TestStartPinsContextDigestsWithoutRawValues(t *testing.T) {
 	if claim.Endpoint == nil || claim.Endpoint.Token == "" {
 		t.Fatalf("claim endpoint missing: %+v", claim)
 	}
-	for k, v := range d.EnvSHA256 {
+	for k, v := range d.ManagedEnvSHA256 {
 		if strings.Contains(v, claim.Endpoint.Token) {
 			t.Fatalf("digest for %s leaks the raw token", k)
 		}
@@ -51,9 +51,9 @@ func TestStartPinsContextDigestsWithoutRawValues(t *testing.T) {
 // seedClaimWithDigests publishes an active claim carrying an endpoint plus
 // digests over known values, so a fake bridge can report matching or
 // mismatching observations.
-func seedClaimWithDigests(t *testing.T, s *Server, gameID string, port int, token, cwd string, env map[string]string) *process.RuntimeContextDigests {
+func seedClaimWithDigests(t *testing.T, s *Server, gameID string, port int, token, cwd string, managed, context map[string]string) *process.RuntimeContextDigests {
 	t.Helper()
-	digests, err := process.ComputeContextDigests([]string{"-profile", "combat"}, cwd, false, env, nil)
+	digests, err := process.ComputeContextDigests([]string{"-profile", "combat"}, cwd, false, managed, context, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,8 @@ func seedClaimWithDigests(t *testing.T, s *Server, gameID string, port int, toke
 
 func TestConnectPersistsDeliveryVerdicts(t *testing.T) {
 	cwd := t.TempDir()
-	env := map[string]string{"GABS_GAME_ID": "adventure", "CONTENT_SET": "combat-pack"}
+	managed := map[string]string{"GABS_GAME_ID": "adventure"}
+	context := map[string]string{"CONTENT_SET": "combat-pack"}
 
 	cases := []struct {
 		name        string
@@ -85,18 +86,18 @@ func TestConnectPersistsDeliveryVerdicts(t *testing.T) {
 		{
 			name: "verified",
 			observed: map[string]interface{}{
-				"argv": []string{"/opt/game/bin", "-profile", "combat"},
-				"cwd":  cwd,
-				"env":  map[string]string{"GABS_GAME_ID": "adventure", "CONTENT_SET": "combat-pack"},
+				"argv":      []string{"/opt/game/bin", "-profile", "combat"},
+				"cwd":       cwd,
+				"envValues": map[string]string{"GABS_GAME_ID": "adventure", "CONTENT_SET": "combat-pack"},
 			},
 			wantOverall: process.DeliveryVerified,
 		},
 		{
 			name: "partial",
 			observed: map[string]interface{}{
-				"argv": []string{"/opt/game/bin", "-profile", "combat"},
-				"cwd":  cwd,
-				"env":  map[string]string{"GABS_GAME_ID": "adventure", "CONTENT_SET": "wrong-pack"},
+				"argv":      []string{"/opt/game/bin", "-profile", "combat"},
+				"cwd":       cwd,
+				"envValues": map[string]string{"GABS_GAME_ID": "adventure", "CONTENT_SET": "wrong-pack"},
 			},
 			wantOverall: process.DeliveryOverallPartial,
 		},
@@ -114,7 +115,7 @@ func TestConnectPersistsDeliveryVerdicts(t *testing.T) {
 			port := 0
 			fmt.Sscanf(parts[len(parts)-1], "%d", &port)
 
-			seedClaimWithDigests(t, s, "adventure", port, "launch-token", cwd, env)
+			seedClaimWithDigests(t, s, "adventure", port, "launch-token", cwd, managed, context)
 
 			raw, _ := callTool(t, s, "games.connect", map[string]interface{}{"gameId": "adventure", "timeout": 5})
 			if strings.Contains(raw, `"isError":true`) {
@@ -143,18 +144,19 @@ func TestConnectPersistsDeliveryVerdicts(t *testing.T) {
 
 func TestDeliveryVerdictSurvivesConfigEditAndRestart(t *testing.T) {
 	cwd := t.TempDir()
-	env := map[string]string{"GABS_GAME_ID": "adventure", "CONTENT_SET": "combat-pack"}
+	managed := map[string]string{"GABS_GAME_ID": "adventure"}
+	context := map[string]string{"CONTENT_SET": "combat-pack"}
 
 	s := newProfiledServer(t)
 	addr, _ := fakeGABPServerWithObserved(t, "adventure", map[string]interface{}{
-		"argv": []string{"/opt/game/bin", "-profile", "combat"},
-		"cwd":  cwd,
-		"env":  map[string]string{"GABS_GAME_ID": "adventure", "CONTENT_SET": "combat-pack"},
+		"argv":      []string{"/opt/game/bin", "-profile", "combat"},
+		"cwd":       cwd,
+		"envValues": map[string]string{"GABS_GAME_ID": "adventure", "CONTENT_SET": "combat-pack"},
 	})
 	parts := strings.Split(addr, ":")
 	port := 0
 	fmt.Sscanf(parts[len(parts)-1], "%d", &port)
-	seedClaimWithDigests(t, s, "adventure", port, "launch-token", cwd, env)
+	seedClaimWithDigests(t, s, "adventure", port, "launch-token", cwd, managed, context)
 
 	raw, _ := callTool(t, s, "games.connect", map[string]interface{}{"gameId": "adventure", "timeout": 5})
 	if strings.Contains(raw, `"isError":true`) {
@@ -195,10 +197,13 @@ func TestSpawnDigestsCoverForwardEnvNames(t *testing.T) {
 	// The digest key set is exactly what the wrapper contract forwards:
 	// every name must be a managed or config-declared variable, and the
 	// cwd must have been canonicalizable (the resolved workingDir).
-	for k := range claim.ContextDigests.EnvSHA256 {
+	for k := range claim.ContextDigests.ManagedEnvSHA256 {
 		if !strings.HasPrefix(k, "GABS_") && !strings.HasPrefix(k, "GABP_") {
 			t.Fatalf("unexpected non-managed digest key for an unprofiled context: %s", k)
 		}
+	}
+	if len(claim.ContextDigests.ContextEnvSHA256) != 0 {
+		t.Fatalf("an unprofiled launch declares no context keys: %+v", claim.ContextDigests.ContextEnvSHA256)
 	}
 	if claim.ContextDigests.CwdUnverifiable {
 		t.Fatalf("a resolved absolute workingDir must be comparable: %+v", claim.ContextDigests)

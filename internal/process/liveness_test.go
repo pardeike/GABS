@@ -49,7 +49,11 @@ func ownFingerprint(t *testing.T) (int, int64) {
 	return pid, start
 }
 
-func TestLivenessGABPWinsWithoutRunningHook(t *testing.T) {
+func TestLivenessGABPWinsAndDiagnosesAutomatically(t *testing.T) {
+	// Contradiction diagnosis is part of the one liveness rule (review
+	// round 9): whenever bridge-tier evidence wins and a status hook
+	// exists, the hook runs once and a disagreement is reported — in
+	// EVERY caller, not as a status-only option.
 	calls := 0
 	swapLivenessProbes(t, hookReturning(StatusStopped, &calls), nil, nil)
 	ev := EvaluateLiveness(LivenessInput{
@@ -59,17 +63,19 @@ func TestLivenessGABPWinsWithoutRunningHook(t *testing.T) {
 	if ev.Verdict != StatusRunning || ev.Source != LivenessSourceGABP {
 		t.Fatalf("live GABP must win: %+v", ev)
 	}
-	if calls != 0 {
-		t.Fatalf("hook must not run on the cheap path")
+	if calls != 1 {
+		t.Fatalf("the hook must be diagnosed exactly once, ran %d times", calls)
+	}
+	if len(ev.Warnings) == 0 {
+		t.Fatalf("the contradiction must be warned about: %+v", ev)
 	}
 }
 
 func TestLivenessGABPHookContradictionWarning(t *testing.T) {
 	swapLivenessProbes(t, hookReturning(StatusStopped, nil), nil, nil)
 	ev := EvaluateLiveness(LivenessInput{
-		GABPLive:     true,
-		StatusHook:   &launch.ResolvedHook{Command: "x"},
-		DiagnoseHook: true,
+		GABPLive:   true,
+		StatusHook: &launch.ResolvedHook{Command: "x"},
 	})
 	if ev.Verdict != StatusRunning {
 		t.Fatalf("GABP wins the contradiction: %+v", ev)
@@ -304,7 +310,7 @@ func TestLivenessAttachmentContradictionWarning(t *testing.T) {
 	}}
 	ev := EvaluateLiveness(LivenessInput{
 		Claim: claim, CallerInstanceID: "cli-caller",
-		StatusHook: &launch.ResolvedHook{Command: "x"}, DiagnoseHook: true,
+		StatusHook: &launch.ResolvedHook{Command: "x"},
 	})
 	if ev.Verdict != StatusRunning || ev.Source != LivenessSourceAttachment {
 		t.Fatalf("fresh lease wins the contradiction: %+v", ev)

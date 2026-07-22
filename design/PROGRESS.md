@@ -494,35 +494,63 @@ contract, not a scratchpad.
       (ComputeContextDigests/EvaluateContextDelivery in
       internal/process/context_delivery.go: per-launch random salt,
       salted SHA-256 of the argv payload (argv[0] excluded — element
-      zero legitimately differs across hops), the platform-canonical
-      cwd (absolute, symlink-resolved, case/separator-folded on
-      Windows; canonicalization failure on either side is unknown,
-      never a false mismatch), and each forwarded env value; the
-      GABS_ABSENT_ENV names (never values) ride along for the
-      isolation check, and cwdUnverifiable marks the one contract-
-      level incomparable case (legacy relative workingDir) — both
-      additive digest fields, same honesty rule as detail. Pinned at
-      spawn in the same fenced transition as the endpoint, with the
-      forward set taken from the final environment's own
-      GABS_FORWARD_ENV (managed-prefix fallback for legacy specs) —
-      verification compares against what was actually spawned, never
-      current config, proven by a restart+fresh-server test. The gabp
-      client parses the optional backward-compatible welcome `observed`
-      field ({argv, cwd, env, absent}) — raw values are hashed locally,
-      compared, and discarded. The four channels (argv, cwd,
-      managedEnv, contextEnv) aggregate by the pinned matrix, every
-      row tested: no observed → all-unknown overall unknown (an old
-      bridge never reads as partial); dropped context key → channel
-      unknown, overall partial with the managed channel still
-      verified; wrong value and reintroduced absent name → mismatched
-      (isolation violation named per key); unreported absence and
-      omitted env lists → unknown; unverifiable cwd caps overall at
-      partial; only-unknown/unverifiable → unknown. The verdict
-      persists via a delivery callback fenced by launchID + the
-      published connectionID (design/06) in both the ordinary
-      connector path and the migration flow, and games_status renders
-      the persisted verdict without re-deriving. deliveriesVerified
-      counting is M2.10's history store)
+      zero legitimately differs across hops) using the pinned
+      length-prefixed encoding (design/20), the platform-canonical cwd
+      (absolute, symlink-resolved, case/separator-folded on Windows),
+      and each forwarded env value. Channel membership is persisted
+      explicitly (managedEnvSha256 vs contextEnvSha256) rather than
+      inferred from GABS_/GABP_ prefixes — the managed layer includes
+      non-prefixed names (SteamAppId/SteamGameId, SystemRoot/WINDIR),
+      so an unprofiled SteamManaged or Windows launch never acquires a
+      spurious context channel. The cwd digest state is tri-valued:
+      a pinned digest (comparable), CwdUnverifiable (the legacy
+      relative workingDir), or neither — the empty-digest case, which
+      is a spawn-side canonicalization FAILURE and reports the channel
+      unknown; a reported cwd that cannot be canonicalized is likewise
+      unknown, never a false mismatch. The gabp client parses the
+      binding welcome wire shape observed:{argv, cwd, envValues,
+      envAbsent} (design/20) — a name in envValues was observed with
+      that value, a name in envAbsent was checked and is absent, a name
+      in neither is unreported; a name in both is contradictory and
+      never verifies; an expected-present name that arrives in
+      envAbsent is a positive mismatch. Raw observed values are hashed
+      locally, compared, and DISCARDED via a consume-once
+      TakeObservedContext (cleared on every close/failure path too).
+      Digests pin at spawn in the same fenced transition as the
+      endpoint, AFTER MaterializeSpawnSpec resolves the effective
+      executable and working directory (SteamManaged resolves its app
+      once; digesting, CheckProcessSize's argv[0], and Controller.Start
+      all consume that one immutable spec). Verification compares
+      against the spawn-time digests, never current config, proven by
+      a restart+fresh-server test. The four channels aggregate by the
+      pinned matrix, every row tested. The verdict persists via a
+      delivery callback attributed to EXACTLY the connection that
+      produced the report (the publication result is carried, never
+      reacquired — an A-report/B-replace interleaving test proves A's
+      late report cannot overwrite B's verdict), fenced by launchID +
+      that connectionID (design/06), in both the connector and
+      migration paths. games_start (started_connected) and
+      games_status render the persisted verdict; external snapshots
+      persist contextDelivery: unknown. deliveriesVerified counting is
+      M2.10's history store. Review round 9 (16 findings, all accepted;
+      the two proposed interpretations were rejected as instructed):
+      the wire shape is envValues/envAbsent (not the private env/absent
+      it originally shipped), the argv digest is length-prefixed, the
+      SteamManaged default cwd is materialized before hashing,
+      connections are bound only after handshake authentication AND
+      attachment publication through one atomic client+launch+
+      connection binding used by every consumer, delivery reports are
+      connection-attributed, mirroring and mirrored-call handlers
+      revalidate/resolve the current bound client, GateStart takes a
+      dynamic launch-bound BridgeBound callback, the removal guards are
+      connection-scoped, contradiction diagnosis is automatic in every
+      liveness caller, recovery passes CallerInstanceID and reports
+      fence loss as re-evaluation (never phase→status mapping), the
+      new transition-failure branches carry stable MCP codes
+      (supersededStartRefusal re-evaluates to already_running/
+      operation_in_progress/blocked_unknown_state; occupied persistence
+      failure is blocked_unknown_state), and the detach s.mu/
+      transition-lock inversion is removed)
 - [ ] M2.10 History store + classifier + input-combination buckets +
       edit notice + causeClass/track-record rendering — spec: 08; tests:
       T-TRACK
@@ -597,6 +625,18 @@ contract, not a scratchpad.
   failure, a verification summary, the interrupted reason). The
   specified fields are unchanged; review round 7 judged the addition
   reasonable without a contract amendment.
+- 2026-07-22, M2.9, design/07 §"full field contract" (adjudicated
+  clarification): the RuntimeContextDigests schema gained two fields
+  beyond design/07's enumerated list — `absentEnvNames` (the
+  GABS_ABSENT_ENV names, never values, needed to verify isolation after
+  a restart) and the cwd tri-state (`cwdUnverifiable` plus the
+  empty-digest = canonicalization-failure convention). Review round 9
+  judged both substantively necessary; recorded here per protocol as an
+  adjudicated design clarification, not a parenthetical. Channel
+  membership is also persisted as separate managedEnvSha256/
+  contextEnvSha256 maps rather than one envSha256 map, because prefix
+  inference cannot classify the non-prefixed managed names — a schema
+  refinement within the same additive clarification.
 - 2026-07-22, M2.8, design/07 §legacy claims: "first lifecycle touch"
   is implemented as the first lifecycle touch THAT PROCEEDS — a
   games_connect refused by the runtime-ownership gate neither

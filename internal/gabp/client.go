@@ -26,6 +26,7 @@ type Client struct {
 	reader         *util.LSPFrameReader
 	token          string
 	agentId        string
+	authenticated  bool
 	observed       *ObservedContext
 	capabilities   Capabilities
 	pendingReqs    map[string]chan *util.GABPMessage
@@ -195,25 +196,29 @@ func (c *Client) handshakeWithTimeout(timeout time.Duration) error {
 		return fmt.Errorf("failed to parse welcome: %w", err)
 	}
 
+	c.mu.Lock()
 	c.agentId = welcome.AgentID
 	c.capabilities = welcome.Capabilities
 	c.observed = parseObservedContext(result)
+	c.authenticated = true
+	c.mu.Unlock()
 
 	c.log.Infow("GABP handshake complete", "agentId", c.agentId, "methods", len(c.capabilities.Methods), "deliveryReport", c.observed != nil)
 	return nil
 }
 
 // ObservedContext is the optional, backward-compatible welcome-time
-// delivery report (design/03): the raw values the bridge observed inside
-// the game process. Env carries the values of the keys named in
-// GABS_FORWARD_ENV; Absent lists the GABS_ABSENT_ENV names the bridge
-// confirms absent. GABS hashes locally, compares, and discards — the raw
-// values never persist.
+// delivery report in the binding wire shape (design/20):
+// observed: {argv, cwd, envValues: {name: value}, envAbsent: [name]}.
+// A name in envValues was observed with that value; a name in envAbsent
+// was checked and is absent; a name in neither list was not reported.
+// GABS hashes locally, compares, and discards — the raw values never
+// persist.
 type ObservedContext struct {
-	Argv   []string          `json:"argv,omitempty"`
-	Cwd    string            `json:"cwd,omitempty"`
-	Env    map[string]string `json:"env,omitempty"`
-	Absent []string          `json:"absent,omitempty"`
+	Argv      []string          `json:"argv,omitempty"`
+	Cwd       string            `json:"cwd,omitempty"`
+	EnvValues map[string]string `json:"envValues,omitempty"`
+	EnvAbsent []string          `json:"envAbsent,omitempty"`
 }
 
 // parseObservedContext extracts the optional `observed` field from the raw
@@ -235,12 +240,17 @@ func parseObservedContext(result interface{}) *ObservedContext {
 	return &obs
 }
 
-// ObservedContext returns the welcome-time delivery report, or nil when the
-// bridge reported none.
-func (c *Client) ObservedContext() *ObservedContext {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.observed
+// TakeObservedContext atomically removes and returns the welcome-time
+// delivery report (nil when the bridge reported none, or when it was
+// already consumed). The design promise is hash-compare-DISCARD: the raw
+// observed values — which can include sensitive configured env values —
+// must not stay reachable for the connection lifetime.
+func (c *Client) TakeObservedContext() *ObservedContext {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	obs := c.observed
+	c.observed = nil
+	return obs
 }
 
 func timeoutFromContextOrDefault(ctx context.Context, fallback time.Duration) time.Duration {
@@ -265,7 +275,9 @@ func (c *Client) messageHandler() {
 	var loopErr error
 	defer c.markDisconnected(loopErr, true)
 
-	for c.IsConnected() {
+	// The read loop runs on the TRANSPORT flag: it must serve the
+	// handshake itself, before the client counts as authenticated.
+	for c.transportUp() {
 		data, err := c.reader.ReadMessage()
 		if err != nil {
 			if !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.EOF) {
@@ -562,8 +574,17 @@ func (c *Client) GetCapabilities() Capabilities {
 	return c.capabilities
 }
 
-// IsConnected reports whether the underlying GABP transport is still active.
+// IsConnected reports a usable connection: the transport is up AND the
+// session handshake authenticated. A dialed-but-unauthenticated client is
+// never "connected" to consumers (review round 9) — internal request
+// plumbing uses the transport flag directly.
 func (c *Client) IsConnected() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.connected && c.authenticated
+}
+
+func (c *Client) transportUp() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.connected
@@ -632,6 +653,8 @@ func (c *Client) markDisconnected(err error, notify bool) error {
 	c.disconnectOnce.Do(func() {
 		c.mu.Lock()
 		c.connected = false
+		c.authenticated = false
+		c.observed = nil // raw observed values never outlive the connection
 		c.disconnectErr = disconnectErr
 		callback = c.onDisconnect
 		conn := c.conn

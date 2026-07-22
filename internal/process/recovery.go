@@ -58,7 +58,7 @@ type ClaimRecovery struct {
 // Attachment records are never touched: the executor is distinct from the
 // attachment owner (a CLI attempt dying must not disturb the server that
 // owns the live bridge).
-func RecoverInterruptedClaim(gameID, configDir, instanceID string, claim *RuntimeState, gabpLive bool, selfLive func() bool, now time.Time) (*ClaimRecovery, error) {
+func RecoverInterruptedClaim(gameID, configDir, instanceID string, claim *RuntimeState, gabpLive bool, selfLive func(connectionID string) bool, now time.Time) (*ClaimRecovery, error) {
 	if claim == nil || claim.SchemaVersion < RuntimeSchemaVersion {
 		return nil, nil
 	}
@@ -87,12 +87,13 @@ func RecoverInterruptedClaim(gameID, configDir, instanceID string, claim *Runtim
 	}
 
 	ev := EvaluateLiveness(LivenessInput{
-		GABPLive:   gabpLive,
-		Claim:      claim,
-		StatusHook: claimStatusHook(claim),
-		GameID:     gameID,
-		Profile:    EffectiveClaimProfile(claim),
-		Now:        now,
+		GABPLive:         gabpLive,
+		CallerInstanceID: instanceID,
+		Claim:            claim,
+		StatusHook:       claimStatusHook(claim),
+		GameID:           gameID,
+		Profile:          EffectiveClaimProfile(claim),
+		Now:              now,
 	})
 	rec := &ClaimRecovery{Claim: claim, Evidence: ev}
 

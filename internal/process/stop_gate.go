@@ -65,6 +65,10 @@ type StopRequest struct {
 	// GABPLive reports whether this process holds a live bridge connection
 	// for the game right now; nil when the caller cannot know (CLI).
 	GABPLive func() bool
+	// SelfConnection reports whether this process's current bound
+	// connection for the claim is the one with the given connectionID and
+	// its socket is live — the removal guards' self-owned re-check.
+	SelfConnection func(connectionID string) bool
 	// ReapLauncher terminates and reaps a still-live launcher child this
 	// process started — called before a stopped verdict clears the claim
 	// (design/04); nil when the caller tracks no child.
@@ -405,10 +409,10 @@ var errStopAttachmentLive = errors.New("live foreign bridge attachment")
 // when no fresh fingerprint-matched foreign attachment lease exists — the
 // last-instant re-check behind the per-round evidence reads.
 func removeRuntimeStateForStopCompletion(req StopRequest, launchID, operationID string) error {
-	return removeRuntimeStateGuarded(req.GameID, req.ConfigDir, req.InstanceID, launchID, operationID, req.GABPLive)
+	return removeRuntimeStateGuarded(req.GameID, req.ConfigDir, req.InstanceID, launchID, operationID, req.SelfConnection)
 }
 
-func removeRuntimeStateGuarded(gameID, configDir, instanceID, launchID, operationID string, selfLive func() bool) error {
+func removeRuntimeStateGuarded(gameID, configDir, instanceID, launchID, operationID string, selfLive func(connectionID string) bool) error {
 	lock, err := AcquireTransitionLock(gameID, configDir, transitionLockGateTimeout)
 	if err != nil {
 		return err
@@ -441,7 +445,7 @@ func removeRuntimeStateGuarded(gameID, configDir, instanceID, launchID, operatio
 // seen; a caller that cannot know its own socket state (nil selfLive) is
 // treated conservatively. A foreign owner whose fingerprint cannot be
 // inspected is uncertainty, never permission to delete.
-func attachmentBlocksRemoval(a *RuntimeAttachment, instanceID string, selfLive func() bool) bool {
+func attachmentBlocksRemoval(a *RuntimeAttachment, instanceID string, selfLive func(connectionID string) bool) bool {
 	if a == nil {
 		return false
 	}
@@ -455,7 +459,7 @@ func attachmentBlocksRemoval(a *RuntimeAttachment, instanceID string, selfLive f
 		if selfLive == nil {
 			return true
 		}
-		return selfLive()
+		return selfLive(a.ConnectionID)
 	}
 	switch v, _ := VerifyPIDFingerprint(a.OwnerPID, a.OwnerPIDStartTime); v {
 	case StatusStopped:
@@ -472,7 +476,7 @@ func attachmentBlocksRemoval(a *RuntimeAttachment, instanceID string, selfLive f
 // delete state it no longer owns (design/06). Completions that legitimately
 // cleared the operation make their own fully fenced decisions instead of
 // passing through this generic failure cleanup.
-func ReleaseStartClaim(gameID, configDir, instanceID, launchID, operationID string, selfLive func() bool) error {
+func ReleaseStartClaim(gameID, configDir, instanceID, launchID, operationID string, selfLive func(connectionID string) bool) error {
 	return removeRuntimeStateGuarded(gameID, configDir, instanceID, launchID, operationID, selfLive)
 }
 
@@ -484,7 +488,7 @@ func ReleaseStartClaim(gameID, configDir, instanceID, launchID, operationID stri
 // its recovery is not the status path's business), or a claim a bridge just
 // attached to (self-owned records are re-checked against the caller's live
 // socket under the lock).
-func RemoveRuntimeStateIfCurrent(gameID, configDir, instanceID, launchID string, selfLive func() bool) error {
+func RemoveRuntimeStateIfCurrent(gameID, configDir, instanceID, launchID string, selfLive func(connectionID string) bool) error {
 	lock, err := AcquireTransitionLock(gameID, configDir, transitionLockGateTimeout)
 	if err != nil {
 		return err

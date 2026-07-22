@@ -20,6 +20,7 @@ type ControllerInterface interface {
 	DirectChildExited() bool
 	ExitCode() int
 	TerminateDirectChild()
+	MaterializeSpawnSpec() (exe string, workingDir string, err error)
 }
 
 // NewController creates a new controller instance
