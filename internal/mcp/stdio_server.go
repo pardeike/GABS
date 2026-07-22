@@ -173,26 +173,45 @@ func (s *Server) saveRuntimeOwnerLease(game config.GameConfig, state *process.Ru
 	now := time.Now().UTC()
 	lease := s.runtimeOwnerLeaseForOperation(operationTimeout)
 
-	if state != nil {
-		// Never blind-save a stale copy over the live claim: the ownership
-		// refresh mutates only its own fields under the transition lock, so
+	if state != nil && state.SchemaVersion >= process.RuntimeSchemaVersion && state.LaunchID != "" {
+		// Current-schema claims: the refresh is fenced to the launch the
+		// caller loaded — ownership on a successor claim is never touched —
+		// and mutates only its own fields under the transition lock, so
 		// concurrent fenced writes (attachment records, phase promotions)
-		// survive (design/06).
-		updated, err := process.TransitionRuntimeState(game.ID, s.configDir, lifecycleLockTimeout, func(st *process.RuntimeState) error {
+		// survive (design/06). Pinned fields stay pinned: an intentionally
+		// empty stopProcessName is part of the launch snapshot and is never
+		// refilled from current config (design/07; only M2.8's explicit
+		// legacy normalization may consult config).
+		expectedLaunchID := state.LaunchID
+		updated, err := process.FencedTransition(game.ID, s.configDir, expectedLaunchID, "", func(st *process.RuntimeState) error {
 			st.Status = process.RuntimeStateStatusRunning
-			if st.StopProcessName == "" {
-				st.StopProcessName = game.StopProcessName
-			}
 			*st = process.RefreshRuntimeOwnerLease(*st, os.Getpid(), s.instanceID, lease, now)
 			return nil
 		})
-		if err == nil {
-			return updated, nil
-		}
-		if !errors.Is(err, process.ErrNoRuntimeClaim) {
+		if err != nil {
+			if errors.Is(err, process.ErrFencingViolation) || errors.Is(err, process.ErrNoRuntimeClaim) {
+				return nil, fmt.Errorf("the runtime claim for '%s' was replaced or removed while preparing this operation; re-check games_status and retry", game.ID)
+			}
 			return nil, err
 		}
-		// The claim vanished meanwhile; fall through to a fresh record.
+		return updated, nil
+	}
+
+	// Legacy path (no claim, or a pre-profile claim): create or refresh the
+	// ownership record under the transition lock so it can never overwrite
+	// a current-schema claim published in between.
+	lock, err := process.AcquireTransitionLock(game.ID, s.configDir, lifecycleLockTimeout)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Release()
+
+	current, err := process.LoadRuntimeState(game.ID, s.configDir)
+	if err != nil {
+		return nil, err
+	}
+	if current != nil && current.SchemaVersion >= process.RuntimeSchemaVersion {
+		return nil, fmt.Errorf("a launch claim for '%s' was published while preparing this operation; re-check games_status and retry", game.ID)
 	}
 
 	updatedState := process.RuntimeState{
@@ -201,6 +220,14 @@ func (s *Server) saveRuntimeOwnerLease(game config.GameConfig, state *process.Ru
 		OwnerPID:        os.Getpid(),
 		OwnerInstanceID: s.instanceID,
 		StopProcessName: game.StopProcessName,
+	}
+	if current != nil {
+		updatedState = *current
+		updatedState.GameID = game.ID
+		updatedState.Status = process.RuntimeStateStatusRunning
+		if updatedState.StopProcessName == "" {
+			updatedState.StopProcessName = game.StopProcessName
+		}
 	}
 	updatedState = process.RefreshRuntimeOwnerLease(updatedState, os.Getpid(), s.instanceID, lease, now)
 	if err := process.SaveRuntimeState(game.ID, s.configDir, updatedState); err != nil {
@@ -219,10 +246,37 @@ func (s *Server) restoreRuntimeOwnerAfterFailedConnect(gameID string, previousSt
 		return
 	}
 
+	if currentState.SchemaVersion >= process.RuntimeSchemaVersion {
+		// Current-schema claims: the rollback is fenced to the exact launch
+		// whose ownership this connect refreshed — owner PID/instance alone
+		// cannot distinguish a successor launch from the same server — and
+		// it restores ownership fields only, never the whole stale snapshot,
+		// and never deletes a launch claim.
+		if previousState == nil || previousState.LaunchID != currentState.LaunchID {
+			return
+		}
+		if _, err := process.FencedTransition(gameID, s.configDir, previousState.LaunchID, "", func(st *process.RuntimeState) error {
+			st.Status = previousState.Status
+			st.OwnerPID = previousState.OwnerPID
+			st.OwnerInstanceID = previousState.OwnerInstanceID
+			st.OwnerLeaseUntil = previousState.OwnerLeaseUntil
+			st.OwnerLastActive = previousState.OwnerLastActive
+			return nil
+		}); err != nil && !errors.Is(err, process.ErrFencingViolation) && !errors.Is(err, process.ErrNoRuntimeClaim) {
+			s.log.Warnw("failed to restore runtime ownership after connect failure", "gameId", gameID, "error", err)
+		}
+		return
+	}
+
 	if previousState == nil {
 		if err := process.RemoveRuntimeState(gameID, s.configDir); err != nil {
 			s.log.Warnw("failed to clear runtime ownership after connect failure", "gameId", gameID, "error", err)
 		}
+		return
+	}
+	if previousState.SchemaVersion >= process.RuntimeSchemaVersion {
+		// A schema-0 ownership record replaced a launch claim? Impossible
+		// via the fenced refresh; do not guess.
 		return
 	}
 
@@ -872,26 +926,46 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				StructuredContent: statusItem,
 			}, nil
 		} else {
-			// Check all games
+			// Check all games. Probes run concurrently, each bounded by its
+			// own hook timeout (design/10): one game's slow pinned status
+			// hook must not serialize the whole summary. checkGameStatus
+			// holds no server lock while probing, so workers are safe.
 			games := gamesConfig.ListGames()
 			content.WriteString("Game Status Summary:\n\n")
-			statusItems := make([]map[string]interface{}, 0, len(games))
-			for _, game := range games {
-				status := s.checkGameStatus(game.ID)
-				statusDesc := s.getStatusDescriptionFromStatus(status, &game)
-				statusItem := s.gameStatusStructured(game, status)
-				if rs, rsErr := process.LoadRuntimeState(game.ID, s.configDir); rsErr == nil && rs != nil {
-					if rs.ConfigRevision != "" {
-						statusItem["activeConfigRevision"] = rs.ConfigRevision
+			type gameStatusRow struct {
+				desc string
+				item map[string]interface{}
+			}
+			rows := make([]gameStatusRow, len(games))
+			sem := make(chan struct{}, 8)
+			var wg sync.WaitGroup
+			for i := range games {
+				wg.Add(1)
+				go func(i int, game config.GameConfig) {
+					defer wg.Done()
+					sem <- struct{}{}
+					defer func() { <-sem }()
+					status := s.checkGameStatus(game.ID)
+					statusItem := s.gameStatusStructured(game, status)
+					if rs, rsErr := process.LoadRuntimeState(game.ID, s.configDir); rsErr == nil && rs != nil {
+						if rs.ConfigRevision != "" {
+							statusItem["activeConfigRevision"] = rs.ConfigRevision
+						}
+						attachRuntimeLifecycle(statusItem, rs)
 					}
-					attachRuntimeLifecycle(statusItem, rs)
-				}
-				if diagnosticMessage := gameStateDiagnosticMessage(statusItem); diagnosticMessage != "" {
-					content.WriteString(fmt.Sprintf("• **%s**: %s — %s\n", game.ID, statusDesc, diagnosticMessage))
+					rows[i] = gameStatusRow{desc: s.getStatusDescriptionFromStatus(status, &game), item: statusItem}
+				}(i, games[i])
+			}
+			wg.Wait()
+
+			statusItems := make([]map[string]interface{}, 0, len(games))
+			for i, game := range games {
+				if diagnosticMessage := gameStateDiagnosticMessage(rows[i].item); diagnosticMessage != "" {
+					content.WriteString(fmt.Sprintf("• **%s**: %s — %s\n", game.ID, rows[i].desc, diagnosticMessage))
 				} else {
-					content.WriteString(fmt.Sprintf("• **%s**: %s\n", game.ID, statusDesc))
+					content.WriteString(fmt.Sprintf("• **%s**: %s\n", game.ID, rows[i].desc))
 				}
-				statusItems = append(statusItems, statusItem)
+				statusItems = append(statusItems, rows[i].item)
 			}
 
 			structuredAll := map[string]interface{}{
@@ -2305,16 +2379,18 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				}, nil
 			}
 			toolCount := len(s.getGameSpecificTools(game.ID))
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Already connected to '%s'. Re-synced %d tools.", game.ID, toolCount)}},
-				StructuredContent: map[string]interface{}{
-					"gameId":    game.ID,
-					"connected": true,
-					"toolCount": toolCount,
-					"nextActions": []map[string]interface{}{
-						mcpNextAction("games_tool_names", map[string]interface{}{"gameId": game.ID, "brief": true}, "Discover connected game-specific tools."),
-					},
+			structured := map[string]interface{}{
+				"gameId":    game.ID,
+				"connected": true,
+				"toolCount": toolCount,
+				"nextActions": []map[string]interface{}{
+					mcpNextAction("games_tool_names", map[string]interface{}{"gameId": game.ID, "brief": true}, "Discover connected game-specific tools."),
 				},
+			}
+			s.attachClaimIdentity(structured, game.ID)
+			return &ToolResult{
+				Content:           []Content{{Type: "text", Text: fmt.Sprintf("Already connected to '%s'. Re-synced %d tools.", game.ID, toolCount)}},
+				StructuredContent: structured,
 			}, nil
 		}
 
@@ -2419,52 +2495,58 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}
 
 		if hadForeignOwner && forceTakeover {
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Force-took ownership of '%s' from GABS pid %d and connected to the GABP server on port %d. Discovered %d tools.", game.ID, previousOwnerPID, port, toolCount)}},
-				StructuredContent: map[string]interface{}{
-					"gameId":        game.ID,
-					"connected":     true,
-					"forceTakeover": true,
-					"previousPID":   previousOwnerPID,
-					"previousOwner": previousOwnerInstance,
-					"port":          port,
-					"toolCount":     toolCount,
-					"nextActions": []map[string]interface{}{
-						mcpNextAction("games_tool_names", map[string]interface{}{"gameId": game.ID, "brief": true}, "Discover connected game-specific tools."),
-					},
+			structured := map[string]interface{}{
+				"gameId":        game.ID,
+				"connected":     true,
+				"forceTakeover": true,
+				"previousPID":   previousOwnerPID,
+				"previousOwner": previousOwnerInstance,
+				"port":          port,
+				"toolCount":     toolCount,
+				"nextActions": []map[string]interface{}{
+					mcpNextAction("games_tool_names", map[string]interface{}{"gameId": game.ID, "brief": true}, "Discover connected game-specific tools."),
 				},
+			}
+			s.attachClaimIdentity(structured, game.ID)
+			return &ToolResult{
+				Content:           []Content{{Type: "text", Text: fmt.Sprintf("Force-took ownership of '%s' from GABS pid %d and connected to the GABP server on port %d. Discovered %d tools.", game.ID, previousOwnerPID, port, toolCount)}},
+				StructuredContent: structured,
 			}, nil
 		}
 
 		if idleTakeover {
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Took ownership of idle GABS session for '%s' from pid %d and connected to the GABP server on port %d. Discovered %d tools.", game.ID, previousOwnerPID, port, toolCount)}},
-				StructuredContent: map[string]interface{}{
-					"gameId":        game.ID,
-					"connected":     true,
-					"idleTakeover":  true,
-					"previousPID":   previousOwnerPID,
-					"previousOwner": previousOwnerInstance,
-					"port":          port,
-					"toolCount":     toolCount,
-					"nextActions": []map[string]interface{}{
-						mcpNextAction("games_tool_names", map[string]interface{}{"gameId": game.ID, "brief": true}, "Discover connected game-specific tools."),
-					},
-				},
-			}, nil
-		}
-
-		return &ToolResult{
-			Content: []Content{{Type: "text", Text: fmt.Sprintf("Successfully connected to '%s' GABP server on port %d. Discovered %d tools.", game.ID, port, toolCount)}},
-			StructuredContent: map[string]interface{}{
-				"gameId":    game.ID,
-				"connected": true,
-				"port":      port,
-				"toolCount": toolCount,
+			structured := map[string]interface{}{
+				"gameId":        game.ID,
+				"connected":     true,
+				"idleTakeover":  true,
+				"previousPID":   previousOwnerPID,
+				"previousOwner": previousOwnerInstance,
+				"port":          port,
+				"toolCount":     toolCount,
 				"nextActions": []map[string]interface{}{
 					mcpNextAction("games_tool_names", map[string]interface{}{"gameId": game.ID, "brief": true}, "Discover connected game-specific tools."),
 				},
+			}
+			s.attachClaimIdentity(structured, game.ID)
+			return &ToolResult{
+				Content:           []Content{{Type: "text", Text: fmt.Sprintf("Took ownership of idle GABS session for '%s' from pid %d and connected to the GABP server on port %d. Discovered %d tools.", game.ID, previousOwnerPID, port, toolCount)}},
+				StructuredContent: structured,
+			}, nil
+		}
+
+		structured := map[string]interface{}{
+			"gameId":    game.ID,
+			"connected": true,
+			"port":      port,
+			"toolCount": toolCount,
+			"nextActions": []map[string]interface{}{
+				mcpNextAction("games_tool_names", map[string]interface{}{"gameId": game.ID, "brief": true}, "Discover connected game-specific tools."),
 			},
+		}
+		s.attachClaimIdentity(structured, game.ID)
+		return &ToolResult{
+			Content:           []Content{{Type: "text", Text: fmt.Sprintf("Successfully connected to '%s' GABP server on port %d. Discovered %d tools.", game.ID, port, toolCount)}},
+			StructuredContent: structured,
 		}, nil
 	}, normalizationConfig)
 
@@ -3996,7 +4078,24 @@ func (s *Server) resolveClaimStatusByLiveness(gameID string, claim *process.Runt
 				return process.RuntimeStateStatusStarting
 			}
 		}
-		if err := process.RemoveRuntimeState(gameID, s.configDir); err != nil {
+		// Fenced removal (design/06): the stopped verdict may have taken a
+		// seconds-long hook to compute — remove only while the evaluated
+		// launch identity still holds and no operation was admitted
+		// meanwhile; a stale verdict must never delete a successor claim.
+		if err := process.RemoveRuntimeStateIfCurrent(gameID, s.configDir, claim.LaunchID, time.Now().UTC()); err != nil {
+			if errors.Is(err, process.ErrFencingViolation) {
+				if cur, lerr := process.LoadRuntimeState(gameID, s.configDir); lerr == nil && cur != nil {
+					switch cur.Phase {
+					case process.PhaseStopping, process.PhaseKilling:
+						return cur.Phase
+					case process.PhaseActive:
+						return process.RuntimeStateStatusRunning
+					default:
+						return process.RuntimeStateStatusStarting
+					}
+				}
+				return "stale-runtime-cleaned"
+			}
 			s.log.Warnw("failed to remove stopped runtime claim", "gameId", gameID, "error", err)
 			return ""
 		}
@@ -4005,7 +4104,7 @@ func (s *Server) resolveClaimStatusByLiveness(gameID string, claim *process.Runt
 	}
 }
 
-func (s *Server) resolveSharedRuntimeStatus(gameID string) string {
+func (s *Server) resolveSharedRuntimeStatus(gameID string, gabpLive bool) string {
 	runtimeState, err := process.LoadRuntimeState(gameID, s.configDir)
 	if err != nil {
 		s.log.Warnw("failed to read shared runtime state", "gameId", gameID, "error", err)
@@ -4016,10 +4115,10 @@ func (s *Server) resolveSharedRuntimeStatus(gameID string) string {
 	}
 
 	if runtimeState.SchemaVersion >= process.RuntimeSchemaVersion {
-		// Reaching here means no GABP client entry exists for this game
-		// (checkGameStatus returns earlier otherwise) — and this path runs
-		// under s.mu, so it must not re-acquire the lock itself.
-		return s.resolveClaimStatusByLiveness(gameID, runtimeState, false)
+		// checkGameStatus snapshots the in-memory state first and calls
+		// this with s.mu released: evidence probes (status hooks, process
+		// scans) never run under the server mutex.
+		return s.resolveClaimStatusByLiveness(gameID, runtimeState, gabpLive)
 	}
 
 	status := process.ResolveRuntimeStateStatus(runtimeState)
@@ -4382,20 +4481,26 @@ func resolveRuntimeGamePID(game config.GameConfig, controller process.Controller
 	return controller.GetPID()
 }
 
+// checkGameStatus snapshots the in-memory state under s.mu, then evaluates
+// evidence — including pinned status hooks that may run for seconds — with
+// the lock released, so concurrent status calls never serialize behind one
+// another's probes (design/10).
 func (s *Server) checkGameStatus(gameID string) string {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	controller, exists := s.games[gameID]
 	client, clientConnected := s.gabpClients[gameID]
+	s.mu.Unlock()
+
+	gabpLive := clientConnected && client != nil && client.IsConnected()
+
 	if !exists {
 		if clientConnected {
-			if client.IsConnected() {
+			if gabpLive {
 				return "connected"
 			}
 			return "disconnected"
 		}
-		if status := s.resolveSharedRuntimeStatus(gameID); status != "" {
+		if status := s.resolveSharedRuntimeStatus(gameID, gabpLive); status != "" {
 			if status == process.RuntimeStateStatusRunning {
 				return "shared-running"
 			}
@@ -4410,40 +4515,70 @@ func (s *Server) checkGameStatus(gameID string) string {
 	// For Steam/Epic launcher games, check the actual game process
 	if launchMode == "SteamAppId" || launchMode == "EpicAppId" {
 		if controller.IsRunning() {
-			if clientConnected && !client.IsConnected() {
+			if clientConnected && !gabpLive {
 				return "running-disconnected"
 			}
 			return "running" // We can track it and it's running
-		} else {
-			// Check if the launcher process is still active
-			if controller.IsLauncherProcessRunning() {
-				return "launcher-running" // Launcher process is still active
-			}
-
-			// Launcher has exited - determine if we have tracking capability
-			game := s.getGameFromController(controller)
-			if game != nil && game.StopProcessName != "" {
-				// We have tracking capability but game is not running
-				s.cleanupStoppedGameLocked(gameID)
-				return "stopped"
-			} else {
-				// We don't have tracking capability, so we can't know the real status
-				return "launcher-triggered" // We started the launcher, but can't track the game
-			}
 		}
+		// Check if the launcher process is still active
+		if controller.IsLauncherProcessRunning() {
+			return "launcher-running" // Launcher process is still active
+		}
+
+		// Launcher has exited. A current-schema claim owns the verdict:
+		// its pinned context — not the dead helper — decides, and an
+		// in-flight operation's claim is never cleaned from here (P1 fix:
+		// the controller branch must not delete runtime.json while a
+		// stop/kill hook or verification window is still active).
+		if status, handled := s.controllerClaimStatus(gameID, controller, client, gabpLive); handled {
+			return status
+		}
+		game := s.getGameFromController(controller)
+		if game != nil && game.StopProcessName != "" {
+			// We have tracking capability but game is not running
+			s.cleanupStoppedGame(gameID)
+			return "stopped"
+		}
+		// We don't have tracking capability, so we can't know the real status
+		return "launcher-triggered" // We started the launcher, but can't track the game
 	}
 
 	// For direct processes, check if the process is actually running
 	if controller.IsRunning() {
-		if clientConnected && !client.IsConnected() {
+		if clientConnected && !gabpLive {
 			return "running-disconnected"
 		}
 		return "running"
 	}
 
-	// Process is dead, clean up
-	s.cleanupStoppedGameLocked(gameID)
+	// Process is dead. Same rule: the claim owns the verdict when present.
+	if status, handled := s.controllerClaimStatus(gameID, controller, client, gabpLive); handled {
+		return status
+	}
+	s.cleanupStoppedGame(gameID)
 	return "stopped"
+}
+
+// controllerClaimStatus judges a controller-backed game by its persisted
+// current-schema claim: the one liveness rule over the pinned context.
+// handled=false means no current-schema claim exists and the legacy
+// controller-only logic should decide.
+func (s *Server) controllerClaimStatus(gameID string, controller process.ControllerInterface, client *gabp.Client, gabpLive bool) (string, bool) {
+	claim, err := process.LoadRuntimeState(gameID, s.configDir)
+	if err != nil {
+		s.log.Warnw("failed to read runtime claim for controller status", "gameId", gameID, "error", err)
+		return "unknown", true // uncertainty never cleans state
+	}
+	if claim == nil || claim.SchemaVersion < process.RuntimeSchemaVersion {
+		return "", false
+	}
+	status := s.resolveClaimStatusByLiveness(gameID, claim, gabpLive)
+	if status == "stale-runtime-cleaned" {
+		// The fenced removal accepted the stopped verdict: release exactly
+		// the in-memory artifacts observed for the finished launch.
+		s.releaseGameArtifacts(gameID, controller, client)
+	}
+	return status, true
 }
 
 // cleanupStoppedGameLocked centralizes cleanup when s.mu is already held.

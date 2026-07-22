@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -163,11 +164,12 @@ func TestBridgeAttachmentRecordPromotesAndFences(t *testing.T) {
 	spec := process.LaunchSpec{GameId: "adventure", Mode: "SteamAppId", PathOrId: "123"}
 	st := process.NewRuntimeState(spec, process.RuntimeStateStatusStarting)
 	st.SpawnState = process.SpawnStateSpawned
+	st.Endpoint = &process.RuntimeEndpoint{Port: 43210, Token: "launch-token"}
 	if err := process.ClaimRuntimeState("adventure", s.configDir, st); err != nil {
 		t.Fatal(err)
 	}
 
-	s.recordBridgeAttachment("adventure", func() bool { return true })
+	s.recordBridgeAttachment("adventure", 43210, "launch-token", func() bool { return true })
 
 	claim, err := process.LoadRuntimeState("adventure", s.configDir)
 	if err != nil || claim == nil || claim.Attachment == nil {
@@ -185,7 +187,7 @@ func TestBridgeAttachmentRecordPromotesAndFences(t *testing.T) {
 	}
 
 	// A second attachment (reconnect) rotates the connection identity.
-	s.recordBridgeAttachment("adventure", func() bool { return true })
+	s.recordBridgeAttachment("adventure", 43210, "launch-token", func() bool { return true })
 	claim, _ = process.LoadRuntimeState("adventure", s.configDir)
 	if claim.Attachment.ConnectionID == first.ConnectionID {
 		t.Fatal("each attachment lifetime gets its own connectionID")
@@ -205,6 +207,94 @@ func TestBridgeAttachmentRecordPromotesAndFences(t *testing.T) {
 	claim, _ = process.LoadRuntimeState("adventure", s.configDir)
 	if claim.Attachment != nil {
 		t.Fatalf("the matching disconnect must clear the record: %+v", claim.Attachment)
+	}
+}
+
+func TestBridgeAttachmentBindsToAuthenticatingCredential(t *testing.T) {
+	s := newProfiledServer(t)
+
+	// Launch B holds the current claim; a connection authenticated with
+	// launch A's rotated-away credential must not attach to (or promote) B.
+	spec := process.LaunchSpec{GameId: "adventure", Mode: "SteamAppId", PathOrId: "123"}
+	st := process.NewRuntimeState(spec, process.RuntimeStateStatusStarting)
+	st.SpawnState = process.SpawnStateSpawned
+	st.Endpoint = &process.RuntimeEndpoint{Port: 43210, Token: "launch-b-token"}
+	if err := process.ClaimRuntimeState("adventure", s.configDir, st); err != nil {
+		t.Fatal(err)
+	}
+
+	s.recordBridgeAttachment("adventure", 43210, "launch-a-token", func() bool { return true })
+
+	claim, err := process.LoadRuntimeState("adventure", s.configDir)
+	if err != nil || claim == nil {
+		t.Fatal(err)
+	}
+	if claim.Attachment != nil {
+		t.Fatalf("a stale credential must not attach to the successor claim: %+v", claim.Attachment)
+	}
+	if claim.Phase != process.PhaseStarting {
+		t.Fatalf("a stale credential must not promote the successor claim: %+v", claim)
+	}
+}
+
+func TestBridgeAttachmentDisconnectBeforePublicationIsUndone(t *testing.T) {
+	s := newProfiledServer(t)
+
+	spec := process.LaunchSpec{GameId: "adventure", Mode: "SteamAppId", PathOrId: "123"}
+	st := process.NewRuntimeState(spec, process.RuntimeStateStatusStarting)
+	st.SpawnState = process.SpawnStateSpawned
+	st.Endpoint = &process.RuntimeEndpoint{Port: 43210, Token: "launch-token"}
+	if err := process.ClaimRuntimeState("adventure", s.configDir, st); err != nil {
+		t.Fatal(err)
+	}
+
+	// The connection died before the record was published: the disconnect
+	// callback had nothing to clear, so publication must undo itself.
+	s.recordBridgeAttachment("adventure", 43210, "launch-token", func() bool { return false })
+
+	claim, err := process.LoadRuntimeState("adventure", s.configDir)
+	if err != nil || claim == nil {
+		t.Fatal(err)
+	}
+	if claim.Attachment != nil {
+		t.Fatalf("a dead connection must not leave a fresh lease behind: %+v", claim.Attachment)
+	}
+}
+
+func TestBridgeAttachmentDoesNotPromoteMidStartClaim(t *testing.T) {
+	s := newProfiledServer(t)
+
+	ownStart, err := process.ProcessStartTime(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A claim still carrying its live start operation (Stage 2-4): the
+	// attachment record may persist, but the phase belongs to the start's
+	// own fenced completion.
+	spec := process.LaunchSpec{GameId: "adventure", Mode: "DirectPath", PathOrId: "/opt/game"}
+	st := process.NewRuntimeState(spec, process.RuntimeStateStatusStarting)
+	st.SpawnState = process.SpawnStateSpawning
+	st.Endpoint = &process.RuntimeEndpoint{Port: 43210, Token: "launch-token"}
+	st.Operation = &process.RuntimeOperation{
+		OperationID: process.NewFencingID(), Action: "start",
+		ExecutorPID: os.Getpid(), ExecutorPIDStartTime: ownStart,
+		AttemptStartedAt: time.Now().UTC(), Deadline: time.Now().UTC().Add(time.Minute),
+	}
+	if err := process.ClaimRuntimeState("adventure", s.configDir, st); err != nil {
+		t.Fatal(err)
+	}
+
+	s.recordBridgeAttachment("adventure", 43210, "launch-token", func() bool { return true })
+
+	claim, err := process.LoadRuntimeState("adventure", s.configDir)
+	if err != nil || claim == nil {
+		t.Fatal(err)
+	}
+	if claim.Attachment == nil {
+		t.Fatal("the attachment record itself is truthful evidence and must persist")
+	}
+	if claim.Phase != process.PhaseStarting || claim.Operation == nil {
+		t.Fatalf("a mid-start claim must keep its phase and operation: phase=%q op=%+v", claim.Phase, claim.Operation)
 	}
 }
 
@@ -239,6 +329,206 @@ func TestGamesStatusPromotesUnobservedClaimOnRunningEvidence(t *testing.T) {
 	}
 	if claim.Phase != process.PhaseActive || claim.Status != process.RuntimeStateStatusRunning {
 		t.Fatalf("promotion must persist: %+v", claim)
+	}
+}
+
+func TestControllerStatusPreservesInFlightClaim(t *testing.T) {
+	s := newProfiledServer(t)
+
+	// A controller whose direct child is gone (never started) — the legacy
+	// branch would clean up; the claim's in-flight operation must win.
+	controller := process.NewController()
+	s.mu.Lock()
+	s.games["adventure"] = controller
+	s.mu.Unlock()
+
+	ownStart, err := process.ProcessStartTime(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := process.LaunchSpec{GameId: "adventure", Mode: "DirectPath", PathOrId: "/opt/game"}
+	st := process.NewRuntimeState(spec, process.RuntimeStateStatusRunning)
+	st.Phase = process.PhaseStopping
+	st.SpawnState = process.SpawnStateSpawned
+	st.Operation = &process.RuntimeOperation{
+		OperationID: process.NewFencingID(), Action: "stop",
+		ExecutorPID: os.Getpid(), ExecutorPIDStartTime: ownStart,
+		AttemptStartedAt: time.Now().UTC(), Deadline: time.Now().UTC().Add(time.Minute),
+	}
+	if err := process.ClaimRuntimeState("adventure", s.configDir, st); err != nil {
+		t.Fatal(err)
+	}
+
+	if status := s.checkGameStatus("adventure"); status != "stopping" {
+		t.Fatalf("the controller branch must report the in-flight phase, got %q", status)
+	}
+	if claim, _ := process.LoadRuntimeState("adventure", s.configDir); claim == nil {
+		t.Fatal("the controller branch must never delete a claim carrying an in-flight operation")
+	}
+	s.mu.RLock()
+	_, stillTracked := s.games["adventure"]
+	s.mu.RUnlock()
+	if !stillTracked {
+		t.Fatal("the controller must survive while its claim's operation is in flight")
+	}
+}
+
+func TestStatusRemovalFencedAgainstMidProbeReplacement(t *testing.T) {
+	s := newProfiledServer(t)
+
+	spec := process.LaunchSpec{GameId: "adventure", Mode: "DirectPath", PathOrId: "/opt/game", StopProcessName: "swap-target"}
+	st := process.NewRuntimeState(spec, process.RuntimeStateStatusRunning)
+	st.Phase = process.PhaseActive
+	st.SpawnState = process.SpawnStateSpawned
+	if err := process.ClaimRuntimeState("adventure", s.configDir, st); err != nil {
+		t.Fatal(err)
+	}
+
+	var replacement process.RuntimeState
+	swapped := false
+	restore := process.SetFindProcessesByNameForTesting(func(name string) ([]int, error) {
+		if name == "swap-target" && !swapped {
+			swapped = true
+			// While the evidence probe runs, another process replaces the
+			// claim: launch A out, launch B in.
+			if err := process.RemoveRuntimeState("adventure", s.configDir); err != nil {
+				t.Errorf("mid-probe removal failed: %v", err)
+			}
+			replacement = process.NewRuntimeState(process.LaunchSpec{GameId: "adventure", Mode: "DirectPath", PathOrId: "/opt/game"}, process.RuntimeStateStatusStarting)
+			replacement.SpawnState = process.SpawnStateSpawned
+			if err := process.ClaimRuntimeState("adventure", s.configDir, replacement); err != nil {
+				t.Errorf("mid-probe reclaim failed: %v", err)
+			}
+		}
+		return nil, nil // launch A's evidence: stopped
+	})
+	defer restore()
+
+	status := s.checkGameStatus("adventure")
+	claim, err := process.LoadRuntimeState("adventure", s.configDir)
+	if err != nil || claim == nil {
+		t.Fatalf("the successor claim must survive the stale stopped verdict: %v", err)
+	}
+	if claim.LaunchID != replacement.LaunchID {
+		t.Fatalf("wrong claim survived: %+v", claim)
+	}
+	if status == "stale-runtime-cleaned" || status == "stopped" {
+		t.Fatalf("a fenced-out removal must not report cleanup, got %q", status)
+	}
+}
+
+func TestOwnershipRefreshFencedToLoadedClaim(t *testing.T) {
+	s := newProfiledServer(t)
+
+	spec := process.LaunchSpec{GameId: "adventure", Mode: "DirectPath", PathOrId: "/opt/game"}
+	current := process.NewRuntimeState(spec, process.RuntimeStateStatusStarting)
+	current.SpawnState = process.SpawnStateSpawned
+	if err := process.ClaimRuntimeState("adventure", s.configDir, current); err != nil {
+		t.Fatal(err)
+	}
+
+	stale := current
+	stale.LaunchID = process.NewFencingID() // a launch that no longer exists
+	game := config.GameConfig{ID: "adventure", Name: "Adventure"}
+	if _, err := s.saveRuntimeOwnerLease(game, &stale, 0); err == nil {
+		t.Fatal("refreshing ownership from a stale launch must fail, not adopt the successor")
+	}
+
+	claim, _ := process.LoadRuntimeState("adventure", s.configDir)
+	if claim == nil || claim.OwnerInstanceID == s.instanceID && claim.OwnerPID == os.Getpid() && claim.Generation > current.Generation {
+		t.Fatalf("the successor claim must be untouched: %+v", claim)
+	}
+}
+
+func TestOwnershipRefreshKeepsPinnedEmptyStopProcessName(t *testing.T) {
+	s := newProfiledServer(t)
+
+	// A hook-only claim pins StopProcessName as intentionally empty.
+	spec := process.LaunchSpec{GameId: "adventure", Mode: "DirectPath", PathOrId: "/opt/game"}
+	st := process.NewRuntimeState(spec, process.RuntimeStateStatusRunning)
+	st.Phase = process.PhaseActive
+	st.SpawnState = process.SpawnStateSpawned
+	if err := process.ClaimRuntimeState("adventure", s.configDir, st); err != nil {
+		t.Fatal(err)
+	}
+
+	game := config.GameConfig{ID: "adventure", Name: "Adventure", StopProcessName: "from-current-config"}
+	loaded, _ := process.LoadRuntimeState("adventure", s.configDir)
+	if _, err := s.saveRuntimeOwnerLease(game, loaded, 0); err != nil {
+		t.Fatalf("ownership refresh failed: %v", err)
+	}
+
+	claim, _ := process.LoadRuntimeState("adventure", s.configDir)
+	if claim == nil || claim.StopProcessName != "" {
+		t.Fatalf("a pinned empty stopProcessName must survive ownership refresh (design/07): %+v", claim)
+	}
+}
+
+func TestReleaseGameArtifactsIsIdentityTied(t *testing.T) {
+	s := newProfiledServer(t)
+
+	oldController := process.NewController()
+	successor := process.NewController()
+	s.mu.Lock()
+	s.games["adventure"] = successor
+	s.mu.Unlock()
+
+	// Releasing with the finished launch's controller must not delete the
+	// successor's.
+	s.releaseGameArtifacts("adventure", oldController, nil)
+	s.mu.RLock()
+	_, stillTracked := s.games["adventure"]
+	s.mu.RUnlock()
+	if !stillTracked {
+		t.Fatal("a superseded completion must not release a successor's controller")
+	}
+
+	s.releaseGameArtifacts("adventure", successor, nil)
+	s.mu.RLock()
+	_, stillTracked = s.games["adventure"]
+	s.mu.RUnlock()
+	if stillTracked {
+		t.Fatal("the observed controller must be released")
+	}
+}
+
+func TestMultiGameStatusProbesRunConcurrently(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a unix sleep binary as a slow status hook")
+	}
+	dir := t.TempDir()
+	s := NewServerForTesting(util.NewLogger("error"))
+	s.SetConfigDir(dir)
+	games := map[string]config.GameConfig{}
+	for _, id := range []string{"slow-a", "slow-b", "slow-c"} {
+		games[id] = config.GameConfig{ID: id, Name: id, LaunchMode: "DirectPath", Target: "/bin/sleep", Args: []string{"30"}}
+		spec := process.LaunchSpec{GameId: id, Mode: "DirectPath", PathOrId: "/bin/sleep"}
+		st := process.NewRuntimeState(spec, process.RuntimeStateStatusRunning)
+		st.Phase = process.PhaseActive
+		st.SpawnState = process.SpawnStateSpawned
+		st.Lifecycle = &launch.ResolvedLifecycle{Status: &launch.ResolvedHook{
+			Command: "/bin/sleep", Args: []string{"5"}, TimeoutSeconds: 1,
+			RunningExitCodes: []int{0}, StoppedExitCodes: []int{1},
+		}}
+		if err := process.ClaimRuntimeState(id, dir, st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.RegisterGameManagementTools(&config.GamesConfig{Version: "1.0", Games: games}, 0, 0)
+
+	startAt := time.Now()
+	raw, _ := callTool(t, s, "games.status", map[string]interface{}{})
+	elapsed := time.Since(startAt)
+	// Each pinned hook times out after ~1s (+ pipe grace); sequential
+	// probing would need 3x that. Concurrency must keep the summary near
+	// one probe's cost.
+	if elapsed > 2800*time.Millisecond {
+		t.Fatalf("multi-game probes must run concurrently, took %v: %s", elapsed, raw)
+	}
+	for _, id := range []string{"slow-a", "slow-b", "slow-c"} {
+		if claim, _ := process.LoadRuntimeState(id, dir); claim == nil {
+			t.Fatalf("unknown hook verdicts must never clean claims (%s)", id)
+		}
 	}
 }
 

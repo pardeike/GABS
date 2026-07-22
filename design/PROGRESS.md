@@ -152,7 +152,19 @@ contract, not a scratchpad.
       stops on any fencing rejection); bounded lock contention now
       surfaces as ErrTransitionLockBusy and renders as a bounded
       operation_in_progress; M2.9's delivery callbacks reuse these
-      primitives when they land)
+      primitives when they land. Review round 6 closed the paths that
+      still wrote without carrying identity: status-side removal is now
+      fenced (RemoveRuntimeStateIfCurrent — launchID must match and no
+      unexpired operation may exist, with a mid-probe replacement test),
+      attachment publication binds to the launch whose per-launch
+      endpoint credential authenticated the handshake (an A-token
+      connection can never attach to or promote claim B — the token
+      rotation exists precisely for this) and undoes itself when the
+      connection died before publication, and ownership refresh /
+      failed-connect rollback are fenced to the loaded claim's launchID
+      (rollback restores ownership fields only, never a whole stale
+      snapshot, and never deletes or recreates over a current-schema
+      claim))
 - [~] M2.3 Hook runner (tree-kill, output capture, Windows Job Objects,
       exit-code contract) — spec: 01; tests: T-LIFE
       (RunStatusHook/RunActionHook in internal/process/hookrunner.go:
@@ -257,9 +269,14 @@ contract, not a scratchpad.
       promotion landed with M2.6: a bridge attach promotes a starting
       claim to active, and a status observation with positive running
       evidence promotes a completed-unobserved claim — both fenced, and
-      neither touches an in-flight operation. The Steam not-running
-      advisory is M2.15's own item (EnsureClientRunning demotion) and
-      is no longer carried here)
+      neither touches an in-flight operation. Review round 6 tightened
+      the attach-side promotion to require the completed-unobserved
+      markers (Operation nil + spawnState spawned), matching the
+      status side: a mid-start claim keeps its phase for the start's
+      own fenced completion, so phase=active can never coexist with
+      operation.action=start. The Steam not-running advisory is
+      M2.15's own item (EnsureClientRunning demotion) and is no longer
+      carried here)
 - [x] M2.6 Stop/kill: verification matrix, probe clipping,
       lastActionResult, stop_unsupported/kill_unsupported,
       operation_in_progress semantics — spec: 06; tests: T-LIFE, T-FENCE
@@ -319,7 +336,29 @@ contract, not a scratchpad.
       overwrite to an in-place transition after the new connect
       integration test caught it clobbering concurrent fenced writes,
       and RunStatusHook was refactored to share its classifier with the
-      new clipped variant)
+      new clipped variant. Review round 6 (11 findings, all accepted)
+      hardened the remaining unfenced paths: the controller-backed
+      status branch consults the claim before any cleanup and never
+      deletes one carrying an in-flight operation (the legacy child-
+      exited cleanup applies only to claimless/legacy games); stop
+      verification reloads the latest claim every poll — an attachment
+      appearing while the hook runs is seen, a cleared record stops
+      counting, and a removed/replaced claim ends polling as a warned
+      termination_unverified — with a final under-lock re-check that
+      refuses removal outright under a fresh live foreign lease; the
+      live-GABP-versus-stopped-hook contradiction stays running
+      (action_succeeded_running) with the design/04 warning, keeping
+      the unverified treatment only for the stop-only-wrapper and
+      foreign-lease cells; post-terminated cleanup is identity-tied
+      (the observed controller/client instances only, never a
+      successor's, and never a second runtime-state removal — the
+      diagnostic bridge file is also left alone); games_stop/games_kill/
+      games_status/games_connect all report activeProfile and phase per
+      design/10 (EffectiveClaimProfile exported for the observed-profile
+      rule); and no-arg games_status probes all games concurrently under
+      their individual timeouts with s.mu released during evidence
+      probes and deterministic output order — proven by a
+      three-slow-hooks timing test)
 - [ ] M2.7 Restart recovery: liveness-driven, interrupted-phase
       normalization, spawning-window verdicts, executor-vs-owner —
       spec: 07, 05 Stage 3; tests: T-FENCE, T-START (claim-window),

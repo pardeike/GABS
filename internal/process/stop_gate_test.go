@@ -472,6 +472,129 @@ func TestSelfOwnedAttachmentDefersToLiveConnectionState(t *testing.T) {
 	}
 }
 
+func TestVerificationSeesAttachmentAppearingMidAction(t *testing.T) {
+	dir := t.TempDir()
+	pid, start := ownFingerprint(t)
+	action := func(*launch.ResolvedHook, string, string) (bool, HookResult) {
+		// While the stop hook runs (lock not held), another GABS process
+		// attaches its bridge and persists a fresh lease.
+		if _, err := TransitionRuntimeState("g1", dir, time.Second, func(s *RuntimeState) error {
+			s.Attachment = &RuntimeAttachment{
+				ConnectionID: NewFencingID(), OwnerInstanceID: "other-server",
+				OwnerPID: pid, OwnerPIDStartTime: start,
+				ObservedAt: time.Now().UTC(), LeaseDeadline: time.Now().UTC().Add(time.Minute),
+			}
+			return nil
+		}); err != nil {
+			t.Errorf("mid-hook attachment write failed: %v", err)
+		}
+		return true, HookResult{ExitCode: 0}
+	}
+	swapStopActionFuncs(t, action, nil, nil, nil)
+
+	// Stop-only wrapper: without the mid-action attachment this would be
+	// the no-sources row and clear the claim.
+	st := activeStopClaim(t, "g1", dir, &launch.ResolvedLifecycle{Stop: stopHook()})
+	publishClaim(t, dir, st)
+
+	outcome, refusal, err := ExecuteStopAction(stopReq("g1", dir))
+	if err != nil || refusal != nil {
+		t.Fatalf("unexpected refusal: %+v %v", refusal, err)
+	}
+	if outcome.Code != OutcomeTerminationUnverified || outcome.ClaimRemoved {
+		t.Fatalf("a bridge attached during the action must keep the claim: %+v", outcome)
+	}
+	claim, _ := LoadRuntimeState("g1", dir)
+	if claim == nil || claim.Attachment == nil {
+		t.Fatalf("the claim and its live foreign attachment must survive: %+v", claim)
+	}
+}
+
+func TestStopRemovalRefusedUnderFreshForeignAttachment(t *testing.T) {
+	dir := t.TempDir()
+	pid, start := ownFingerprint(t)
+	st := activeStopClaim(t, "g1", dir, nil)
+	opID := NewFencingID()
+	st.Operation = &RuntimeOperation{OperationID: opID, Action: OperationActionStop, AttemptStartedAt: time.Now().UTC(), Deadline: time.Now().UTC().Add(time.Minute)}
+	st.Attachment = &RuntimeAttachment{
+		ConnectionID: NewFencingID(), OwnerInstanceID: "other-server",
+		OwnerPID: pid, OwnerPIDStartTime: start,
+		ObservedAt: time.Now().UTC(), LeaseDeadline: time.Now().UTC().Add(time.Minute),
+	}
+	publishClaim(t, dir, st)
+
+	err := removeRuntimeStateForStopCompletion(stopReq("g1", dir), st.LaunchID, opID)
+	if !errors.Is(err, errStopAttachmentLive) {
+		t.Fatalf("removal must refuse under a live foreign attachment, got %v", err)
+	}
+	if claim, _ := LoadRuntimeState("g1", dir); claim == nil {
+		t.Fatal("the claim must survive the refused removal")
+	}
+}
+
+func TestStopContradictionLiveGABPvsStoppedHook(t *testing.T) {
+	dir := t.TempDir()
+	swapStopActionFuncs(t, actionHookReturning(true, HookResult{ExitCode: 0}, nil), probeReturning(StatusStopped), nil, nil)
+
+	st := activeStopClaim(t, "g1", dir, &launch.ResolvedLifecycle{Status: verifyStatusHook(), Stop: stopHook()})
+	publishClaim(t, dir, st)
+
+	req := stopReq("g1", dir)
+	req.GABPLive = func() bool { return true }
+	outcome, refusal, err := ExecuteStopAction(req)
+	if err != nil || refusal != nil {
+		t.Fatalf("unexpected refusal: %+v %v", refusal, err)
+	}
+	// design/04: hook says stopped while GABP is live → running, with a
+	// warning about the hook — never unverified limbo, never cleanup.
+	if outcome.Code != OutcomeActionSucceededRunning || outcome.ClaimRemoved {
+		t.Fatalf("live bridge vs stopped hook must stay running: %+v", outcome)
+	}
+	if !strings.Contains(strings.Join(outcome.Warnings, "\n"), "exit-code contract") {
+		t.Fatalf("the contradiction must be warned about: %v", outcome.Warnings)
+	}
+	if claim, _ := LoadRuntimeState("g1", dir); claim == nil || claim.Phase != PhaseActive {
+		t.Fatalf("the claim must stay active: %+v", claim)
+	}
+}
+
+func TestVerificationStopsPollingWhenClaimSuperseded(t *testing.T) {
+	dir := t.TempDir()
+	var replacement RuntimeState
+	action := func(*launch.ResolvedHook, string, string) (bool, HookResult) {
+		if err := RemoveRuntimeState("g1", dir); err != nil {
+			t.Errorf("mid-hook removal failed: %v", err)
+		}
+		replacement = NewRuntimeState(m2Spec("g1"), RuntimeStateStatusStarting)
+		if err := ClaimRuntimeState("g1", dir, replacement); err != nil {
+			t.Errorf("mid-hook reclaim failed: %v", err)
+		}
+		return true, HookResult{ExitCode: 0} // hook SUCCEEDS: verification runs
+	}
+	swapStopActionFuncs(t, action, nil, nil, nil)
+
+	st := activeStopClaim(t, "g1", dir, &launch.ResolvedLifecycle{Status: verifyStatusHook(), Stop: stopHook()})
+	publishClaim(t, dir, st)
+
+	outcome, refusal, err := ExecuteStopAction(stopReq("g1", dir))
+	if err != nil || refusal != nil {
+		t.Fatalf("unexpected refusal: %+v %v", refusal, err)
+	}
+	if outcome.Code != OutcomeTerminationUnverified {
+		t.Fatalf("a superseded verification must not claim a verdict about the successor: %+v", outcome)
+	}
+	if !strings.Contains(strings.Join(outcome.Warnings, "\n"), "removed or replaced") {
+		t.Fatalf("supersession must be surfaced: %v", outcome.Warnings)
+	}
+	claim, _ := LoadRuntimeState("g1", dir)
+	if claim == nil || claim.LaunchID != replacement.LaunchID {
+		t.Fatalf("the successor claim must survive: %+v", claim)
+	}
+	if claim.LastActionResult != nil || claim.Phase != PhaseStarting || claim.Operation != nil {
+		t.Fatalf("the successor must be untouched by the finished stop: %+v", claim)
+	}
+}
+
 func TestVerificationProbeClippedToRemainingWindow(t *testing.T) {
 	dir := t.TempDir()
 	var mu sync.Mutex

@@ -84,8 +84,15 @@ func (c *ServerGABPConnector) AttemptConnection(ctx context.Context, gameID stri
 
 	// Persist the attachment record (design/04) before mirroring: a
 	// mirroring failure routes through the disconnect handler, which
-	// clears exactly this record by its connection identity.
-	c.server.recordBridgeAttachment(gameID, client.IsConnected)
+	// clears exactly this record by its connection identity. The record
+	// binds to the claim whose endpoint credential authenticated, and only
+	// while this client is still the game's current live connection.
+	c.server.recordBridgeAttachment(gameID, port, token, func() bool {
+		c.server.mu.RLock()
+		current := c.server.gabpClients[gameID]
+		c.server.mu.RUnlock()
+		return current == client && client.IsConnected()
+	})
 
 	if !c.mirrorSynchronously {
 		c.startAsyncToolMirroring(gameID, client)

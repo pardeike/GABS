@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/pardeike/gabs/internal/config"
+	"github.com/pardeike/gabs/internal/gabp"
 	"github.com/pardeike/gabs/internal/process"
 )
 
@@ -26,11 +27,16 @@ type bridgeAttachmentRef struct {
 
 // recordBridgeAttachment persists the attachment record after a successful
 // GABP connect (design/04): connectionID, owner instance + process
-// fingerprint, and a renewable lease. A starting claim promotes to active —
-// a live bridge is proof of running (design/05 Stage 4 passive promotion).
-// The in-flight start operation, if any, is not touched: operations are
-// completed only by their own fenced transitions.
-func (s *Server) recordBridgeAttachment(gameID string, isConnected func() bool) {
+// fingerprint, and a renewable lease. The record binds to the launch whose
+// endpoint credential authenticated the handshake — the per-launch token
+// (design/03) is exactly what prevents an old connection from attaching to
+// a successor claim. A completed-unobserved starting claim promotes to
+// active (design/05 Stage 4 passive promotion); a claim still carrying its
+// start operation is left for that operation's own fenced completion.
+// stillCurrent reports whether this connection is still the game's current
+// live client; publication is undone immediately when it no longer is
+// (disconnect-before-publication safety).
+func (s *Server) recordBridgeAttachment(gameID string, endpointPort int, endpointToken string, stillCurrent func() bool) {
 	now := time.Now().UTC()
 	connID := process.NewFencingID()
 	ownerPID := os.Getpid()
@@ -50,6 +56,13 @@ func (s *Server) recordBridgeAttachment(gameID string, isConnected func() bool) 
 			// normalization (design/07, lands with M2.8).
 			return errAttachmentSkipped
 		}
+		if st.Endpoint == nil || st.Endpoint.Port != endpointPort || st.Endpoint.Token != endpointToken {
+			// The credential that authenticated is not this claim's: the
+			// connection belongs to an earlier launch (or an adopted stale
+			// environment) and must not become this claim's evidence —
+			// external snapshots truthfully lack attachments (design/07).
+			return errAttachmentSkipped
+		}
 		launchID = st.LaunchID
 		st.Attachment = &process.RuntimeAttachment{
 			ConnectionID:      connID,
@@ -59,7 +72,10 @@ func (s *Server) recordBridgeAttachment(gameID string, isConnected func() bool) 
 			ObservedAt:        now,
 			LeaseDeadline:     now.Add(lease),
 		}
-		if st.Phase == process.PhaseStarting {
+		// Passive promotion only for completed-unobserved claims: an
+		// in-flight start operation owns its own phase completion, and a
+		// mid-spawn claim must not read as active (design/05 Stage 4).
+		if st.Phase == process.PhaseStarting && st.Operation == nil && st.SpawnState == process.SpawnStateSpawned {
 			st.Phase = process.PhaseActive
 			st.Status = process.RuntimeStateStatusRunning
 		}
@@ -79,9 +95,14 @@ func (s *Server) recordBridgeAttachment(gameID string, isConnected func() bool) 
 	s.bridgeAttachments[gameID] = bridgeAttachmentRef{launchID: launchID, connectionID: connID}
 	s.mu.Unlock()
 
-	if isConnected != nil {
-		go s.refreshBridgeAttachmentLease(gameID, launchID, connID, isConnected, lease)
+	// A disconnect that fired before the record existed had nothing to
+	// clear — verify the connection is still the current live one and undo
+	// the publication if it is not.
+	if stillCurrent == nil || !stillCurrent() {
+		s.recordBridgeDetachment(gameID)
+		return
 	}
+	go s.refreshBridgeAttachmentLease(gameID, launchID, connID, stillCurrent, lease)
 }
 
 var errAttachmentSkipped = errors.New("attachment record skipped")
@@ -162,6 +183,24 @@ func (s *Server) takeBridgeAttachmentRefLocked(gameID string) (bridgeAttachmentR
 	return ref, ok
 }
 
+// releaseGameArtifacts removes the in-memory controller, bridge client, and
+// mirrored tools/resources for a finished launch — but only the exact
+// instances the caller observed before the operation, never a successor's,
+// and never the runtime claim (its removal is the fenced completion's
+// business). A nil expected instance means none existed at observation
+// time, and whatever exists now belongs to someone else.
+func (s *Server) releaseGameArtifacts(gameID string, expectedController process.ControllerInterface, expectedClient *gabp.Client) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if expectedController != nil && s.games[gameID] == expectedController {
+		delete(s.games, gameID)
+	}
+	if expectedClient != nil && s.gabpClients[gameID] == expectedClient {
+		s.cleanupGABPConnectionInternal(gameID)
+		s.cleanupGameResourcesInternal(gameID)
+	}
+}
+
 // lifecycleActionResult routes games_stop/games_kill through the design/06
 // pipeline when a current-schema claim exists. It returns nil when the
 // legacy path should handle the call (no claim, or a pre-profile claim that
@@ -178,6 +217,14 @@ func (s *Server) lifecycleActionResult(game config.GameConfig, action string) *T
 		return nil
 	}
 
+	// Capture the exact in-memory instances that belong to the launch being
+	// stopped: post-completion cleanup is identity-tied, never keyed by
+	// gameID alone — a successor's controller or client must survive.
+	s.mu.RLock()
+	priorController := s.games[game.ID]
+	priorClient := s.gabpClients[game.ID]
+	s.mu.RUnlock()
+
 	outcome, refusal, err := process.ExecuteStopAction(process.StopRequest{
 		GameID:     game.ID,
 		ConfigDir:  s.configDir,
@@ -185,11 +232,8 @@ func (s *Server) lifecycleActionResult(game config.GameConfig, action string) *T
 		Action:     action,
 		GABPLive:   func() bool { return s.hasLiveGABPClient(game.ID) },
 		ReapLauncher: func() {
-			s.mu.RLock()
-			controller := s.games[game.ID]
-			s.mu.RUnlock()
-			if controller != nil {
-				controller.TerminateDirectChild()
+			if priorController != nil {
+				priorController.TerminateDirectChild()
 			}
 		},
 	})
@@ -203,11 +247,11 @@ func (s *Server) lifecycleActionResult(game config.GameConfig, action string) *T
 		return s.stopRefusalResult(game, action, refusal)
 	}
 
-	if outcome.Code == process.OutcomeTerminated {
-		// The claim is gone; release the in-memory controller, bridge
-		// client, mirrored tools, and the diagnostic bridge file.
-		s.cleanupStoppedGame(game.ID)
-		s.CleanupBridgeConfig(game.ID)
+	if outcome.Code == process.OutcomeTerminated && outcome.ClaimRemoved {
+		// The fenced removal held to the end: release exactly the observed
+		// instances. A superseded completion (ClaimRemoved false) touches
+		// nothing — the current generation is not ours.
+		s.releaseGameArtifacts(game.ID, priorController, priorClient)
 	}
 	return s.stopOutcomeResult(game, action, outcome)
 }
@@ -220,6 +264,9 @@ func (s *Server) stopRefusalResult(game config.GameConfig, action string, ref *p
 	}
 	if ref.Phase != "" {
 		structured["phase"] = ref.Phase
+	}
+	if ref.ActiveProfile != "" {
+		structured["activeProfile"] = ref.ActiveProfile
 	}
 	if op := ref.Operation; op != nil {
 		structured["operation"] = map[string]interface{}{
@@ -264,6 +311,9 @@ func (s *Server) stopOutcomeResult(game config.GameConfig, action string, outcom
 	}
 	if outcome.ActiveProfile != "" {
 		structured["activeProfile"] = outcome.ActiveProfile
+	}
+	if outcome.FinalPhase != "" {
+		structured["phase"] = outcome.FinalPhase
 	}
 	if outcome.Detail != "" {
 		structured["evidence"] = outcome.Detail
@@ -344,6 +394,17 @@ func (s *Server) stopOutcomeResult(game config.GameConfig, action string, outcom
 	}
 }
 
+// attachClaimIdentity loads the current claim and surfaces its lifecycle
+// facts — activeProfile, phase, operation, lastActionResult — on a tool
+// result (design/10: games_connect reports activeProfile and phase).
+func (s *Server) attachClaimIdentity(structured map[string]interface{}, gameID string) {
+	rs, err := process.LoadRuntimeState(gameID, s.configDir)
+	if err != nil || rs == nil {
+		return
+	}
+	attachRuntimeLifecycle(structured, rs)
+}
+
 // attachRuntimeLifecycle surfaces the persisted lifecycle facts —
 // phase, in-flight operation timing, lastActionResult — in games_status
 // structured output (design/06: status is non-blocking and truthful).
@@ -353,6 +414,9 @@ func attachRuntimeLifecycle(statusItem map[string]interface{}, rs *process.Runti
 	}
 	if rs.Phase != "" {
 		statusItem["phase"] = rs.Phase
+	}
+	if profile := process.EffectiveClaimProfile(rs); profile != "" {
+		statusItem["activeProfile"] = profile
 	}
 	if op := rs.Operation; op != nil {
 		statusItem["operation"] = map[string]interface{}{
