@@ -330,6 +330,32 @@ contract, not a scratchpad.
       lastActionResult, and never removes a claim carrying an in-flight
       operation — closing a latent race where a status call could
       delete a mid-start claim between publication and observability.
+      Review round 7 hardened the credential and authority contracts:
+      connections are credential-bound end to end — the connector
+      refuses to even dial a credential that contradicts the current
+      claim's endpoint, attachment publication returns a typed result
+      and a client whose credential stopped matching mid-connect is
+      closed and removed before it can mirror tools or count as GABP
+      evidence, and the stable stale_bridge_credential outcome is now
+      emitted by real paths: games_connect fails fast when the observed
+      workload provably runs with another launch's credentials
+      (process environment corroborates the exact claim endpoint or
+      exposes staleness — it never replaces it; the launcher-reuse test
+      was inverted accordingly), and games_start surfaces it as a
+      warning instead of adopting the stale environment. checkGameStatus
+      makes the current-schema claim the FIRST status authority — the
+      unified rule over the pinned context runs before any in-memory
+      shortcut (a live wrapper PID can no longer hide a pinned hook's
+      stopped verdict, and M2.7 recovery is reachable regardless of
+      controller state), with GABP evidence only from a
+      credential-bound live client (the in-process attachment ref must
+      carry the claim's launchID). Start-side cleanup is fenced end to
+      end: the deferred release goes through ReleaseStartClaim
+      (launchID + own-or-no operation + no live foreign attachment),
+      never a bare game-ID removal that could delete a successor; and
+      the status-path removal (RemoveRuntimeStateIfCurrent) now refuses
+      ANY admitted operation — expired or not; recovery owns those —
+      and any live foreign attachment.
       Attachment callbacks (M2.2's remainder) landed here, as did both
       passive promotions (M2.5's remainder). Two adjacent fixes: the
       ownership-lease save was rewritten from a blind whole-claim
@@ -400,32 +426,38 @@ contract, not a scratchpad.
       (NormalizeLegacyClaim in internal/process/legacy_migration.go: the
       first lifecycle touch — games_connect, games_stop/games_kill via
       the pipeline router, or a start's duplicate check in GateStart;
-      never read-only status — fully normalizes a schema-0 claim under
-      the transition lock: schema marker stamped, launch ID + generation
-      minted (fencing valid from then on), phase active + unprofiled +
-      source gabs, built-in fallback pinned from the legacy claim's own
-      stopProcessName and PID with a zero fingerprint kept as weak
-      evidence, appliedLaunchInputsState unavailable (a pre-profile
-      launch's inputs are unknowable — same honesty rule as external
-      snapshots), and — the single recorded exception to never-consult-
-      config — launch mode + PID role from the current entry, with
-      normalizedFromLegacy + the revision recorded; idempotent, a
-      marker-stamped claim is returned untouched. The endpoint
-      migration: bridge.json is now structurally diagnostic-only for
-      marker-stamped claims — resolveConnectBridgeEndpoint refuses a
-      fresh pre-endpoint claim ("no attachable endpoint") and an
-      external snapshot ("attachment unavailable", design/07) instead
-      of falling through to the file; the sole live-attach read remains
-      the pre-upgrade path (schema-0, or normalizedFromLegacy with no
-      endpoint yet — the strict lacks-the-marker reading would strand a
-      legacy launch whose bridge was down at first touch, since
-      normalization stamps the marker on that same touch), validated by
-      actually connecting, persisted into the claim exactly once
-      (proven by corrupting bridge.json before a successful reconnect),
-      and followed by attachment-record publication now that the claim
-      carries the credential that authenticated. Degraded
-      status-before-normalization renders no newer-schema-only fields
-      and never normalizes, tested)
+      never read-only status — fully normalizes a marker-absent claim
+      under the transition lock: schema marker stamped, launch ID +
+      generation minted (fencing valid from then on), phase active +
+      unprofiled + source gabs, built-in fallback pinned from the
+      legacy claim's own stopProcessName and PID with a zero
+      fingerprint kept as weak evidence, and — the single recorded
+      exception to never-consult-config — launch mode + PID role from
+      the current entry, with normalizedFromLegacy + the revision
+      recorded; idempotent, a marker-stamped claim is returned
+      untouched. Review round 7 rejected two interpretations I had
+      proposed, and both were reversed: the discriminator is exact
+      marker absence (schemaVersion == 0 — any other version is a
+      different schema, never legacy), and a pre-profile GABS launch's
+      inputs are a KNOWN EMPTY set, never the external-snapshot
+      "unavailable" state. The endpoint migration is marker-absent,
+      locked, and genuinely one-shot per the contract: the single
+      legacy bridge.json candidate is captured while the normalization
+      transition still holds the lock (the sole live-attach read of the
+      file), validated by actually connecting, persisted through the
+      minted launch fence exactly once, and followed by
+      attachment-record publication under the migrated credential; a
+      failed validation does not reopen the window — the marker was
+      stamped on that same touch and the file is never reread (tested:
+      a later live bridge.json still refuses). A connect refused by the
+      ownership gate does not normalize or burn the candidate (the
+      lifecycle touch is the connect that proceeds). bridge.json is
+      structurally diagnostic-only everywhere else: no-claim connects
+      refuse ("nothing is attachable"), fresh pre-endpoint claims
+      refuse ("no attachable endpoint"), and external snapshots refuse
+      with "attachment unavailable" — checked before any process-
+      environment inspection. Degraded status-before-normalization
+      renders no newer-schema-only fields and never normalizes, tested)
 - [ ] M2.9 Expected-context digests + welcome `observed` parsing +
       per-channel aggregation matrix + contextDelivery persistence —
       spec: 03, 07; tests: T-DELIV

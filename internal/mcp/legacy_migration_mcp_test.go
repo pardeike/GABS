@@ -114,6 +114,44 @@ func TestGamesConnectMigratesLegacyEndpointExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestLegacyMigrationDoesNotRetryAfterFailedValidation(t *testing.T) {
+	s := newLegacyServer(t, "DirectPath")
+	writeLegacyClaim(t, "oldgame", s.configDir, 0, "")
+
+	// The candidate captured on the first touch points nowhere.
+	deadPort := unusedLocalPort(t)
+	if _, err := config.WriteBridgeJSONWithEndpoint("oldgame", s.configDir, deadPort, "legacy-token"); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, _ := callTool(t, s, "games.connect", map[string]interface{}{"gameId": "oldgame", "timeout": 1})
+	if !strings.Contains(raw, `"isError":true`) {
+		t.Fatalf("validation against a dead endpoint must fail: %s", raw)
+	}
+	claim, err := process.LoadRuntimeState("oldgame", s.configDir)
+	if err != nil || claim == nil || !claim.NormalizedFromLegacy || claim.Endpoint != nil {
+		t.Fatalf("the failed validation leaves a normalized claim without an endpoint: %+v %v", claim, err)
+	}
+
+	// The migration window is the marker-absent first touch, exactly once:
+	// even a now-live bridge.json is never reread (design/07, T-RT).
+	addr, _ := fakeGABPServer(t, "oldgame")
+	parts := strings.Split(addr, ":")
+	livePort := 0
+	fmt.Sscanf(parts[len(parts)-1], "%d", &livePort)
+	if _, err := config.WriteBridgeJSONWithEndpoint("oldgame", s.configDir, livePort, "legacy-token"); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, _ = callTool(t, s, "games.connect", map[string]interface{}{"gameId": "oldgame", "timeout": 2})
+	if !strings.Contains(raw, `"isError":true`) || !strings.Contains(raw, "no attachable endpoint") {
+		t.Fatalf("a marker-stamped claim must never reenter the file path: %s", raw)
+	}
+	if s.hasLiveGABPClient("oldgame") {
+		t.Fatal("no connection may be established through the diagnostic file after the migration window")
+	}
+}
+
 func TestFreshPreEndpointClaimNeverReadsBridgeFile(t *testing.T) {
 	s := newLegacyServer(t, "DirectPath")
 

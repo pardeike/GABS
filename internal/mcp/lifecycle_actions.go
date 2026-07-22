@@ -25,18 +25,31 @@ type bridgeAttachmentRef struct {
 	connectionID string
 }
 
+// errAttachmentSkipped: no record applies (no claim, a pre-normalization
+// legacy claim, or the migration touch whose publication follows the
+// endpoint persist) — the connection itself is legitimate.
+var errAttachmentSkipped = errors.New("attachment record skipped")
+
+// errStaleAttachmentCredential: the connection's credential is not the
+// current claim's per-launch credential — it authenticated against an
+// earlier launch's bridge and must not survive as this claim's evidence
+// (design/03: tokens rotate every launch exactly for this).
+var errStaleAttachmentCredential = errors.New("stale bridge credential")
+
 // recordBridgeAttachment persists the attachment record after a successful
 // GABP connect (design/04): connectionID, owner instance + process
 // fingerprint, and a renewable lease. The record binds to the launch whose
-// endpoint credential authenticated the handshake — the per-launch token
-// (design/03) is exactly what prevents an old connection from attaching to
-// a successor claim. A completed-unobserved starting claim promotes to
-// active (design/05 Stage 4 passive promotion); a claim still carrying its
-// start operation is left for that operation's own fenced completion.
-// stillCurrent reports whether this connection is still the game's current
-// live client; publication is undone immediately when it no longer is
-// (disconnect-before-publication safety).
-func (s *Server) recordBridgeAttachment(gameID string, endpointPort int, endpointToken string, stillCurrent func() bool) {
+// endpoint credential authenticated the handshake. A completed-unobserved
+// starting claim promotes to active (design/05 Stage 4 passive promotion);
+// a claim still carrying its start operation is left for that operation's
+// own fenced completion. stillCurrent reports whether this connection is
+// still the game's current live client; publication is undone immediately
+// when it no longer is (disconnect-before-publication safety).
+//
+// Returns nil on publication, errAttachmentSkipped when no record applies,
+// and errStaleAttachmentCredential when the credential does not match the
+// current claim — the caller must not keep such a connection.
+func (s *Server) recordBridgeAttachment(gameID string, endpointPort int, endpointToken string, stillCurrent func() bool) error {
 	now := time.Now().UTC()
 	connID := process.NewFencingID()
 	ownerPID := os.Getpid()
@@ -45,23 +58,27 @@ func (s *Server) recordBridgeAttachment(gameID string, endpointPort int, endpoin
 		// Without a verifiable owner fingerprint the record would be
 		// malformed evidence (design/04); skip persisting it.
 		s.log.Warnw("cannot fingerprint this process; bridge attachment not persisted", "gameId", gameID, "error", err)
-		return
+		return errAttachmentSkipped
 	}
 	lease := s.runtimeOwnerLeaseDuration()
 
 	var launchID string
 	_, terr := process.TransitionRuntimeState(gameID, s.configDir, lifecycleLockTimeout, func(st *process.RuntimeState) error {
-		if st.SchemaVersion < process.RuntimeSchemaVersion {
+		if st.SchemaVersion == 0 {
 			// Legacy claims get attachment records only after their full
-			// normalization (design/07, lands with M2.8).
+			// normalization (design/07).
 			return errAttachmentSkipped
 		}
-		if st.Endpoint == nil || st.Endpoint.Port != endpointPort || st.Endpoint.Token != endpointToken {
-			// The credential that authenticated is not this claim's: the
-			// connection belongs to an earlier launch (or an adopted stale
-			// environment) and must not become this claim's evidence —
-			// external snapshots truthfully lack attachments (design/07).
-			return errAttachmentSkipped
+		if st.Endpoint == nil {
+			if st.NormalizedFromLegacy {
+				// The migration touch: publication follows the fenced
+				// endpoint persist in the connect handler.
+				return errAttachmentSkipped
+			}
+			return errStaleAttachmentCredential
+		}
+		if st.Endpoint.Port != endpointPort || st.Endpoint.Token != endpointToken {
+			return errStaleAttachmentCredential
 		}
 		launchID = st.LaunchID
 		st.Attachment = &process.RuntimeAttachment{
@@ -82,10 +99,14 @@ func (s *Server) recordBridgeAttachment(gameID string, endpointPort int, endpoin
 		return nil
 	})
 	if terr != nil {
-		if !errors.Is(terr, errAttachmentSkipped) && !errors.Is(terr, process.ErrNoRuntimeClaim) {
-			s.log.Warnw("failed to persist bridge attachment", "gameId", gameID, "error", terr)
+		if errors.Is(terr, errAttachmentSkipped) || errors.Is(terr, errStaleAttachmentCredential) {
+			return terr
 		}
-		return
+		if errors.Is(terr, process.ErrNoRuntimeClaim) {
+			return errAttachmentSkipped
+		}
+		s.log.Warnw("failed to persist bridge attachment", "gameId", gameID, "error", terr)
+		return errAttachmentSkipped
 	}
 
 	s.mu.Lock()
@@ -100,12 +121,11 @@ func (s *Server) recordBridgeAttachment(gameID string, endpointPort int, endpoin
 	// the publication if it is not.
 	if stillCurrent == nil || !stillCurrent() {
 		s.recordBridgeDetachment(gameID)
-		return
+		return nil
 	}
 	go s.refreshBridgeAttachmentLease(gameID, launchID, connID, stillCurrent, lease)
+	return nil
 }
-
-var errAttachmentSkipped = errors.New("attachment record skipped")
 
 // refreshBridgeAttachmentLease renews the persisted lease while the socket
 // stays connected (design/04); it stops the moment the connection dies, the
@@ -143,6 +163,13 @@ func (s *Server) refreshBridgeAttachmentLease(gameID, launchID, connID string, i
 // carries the given connection identity within the given claim lifetime.
 func (s *Server) clearBridgeAttachment(gameID, launchID, connID string) {
 	if launchID == "" || connID == "" {
+		return
+	}
+	// Lock-free pre-check: when the claim is already gone (stopped,
+	// superseded, cleaned up), there is nothing to clear — and taking the
+	// transition lock would needlessly recreate the game directory.
+	if cur, err := process.LoadRuntimeState(gameID, s.configDir); err != nil || cur == nil ||
+		cur.LaunchID != launchID || cur.Attachment == nil {
 		return
 	}
 	_, err := process.FencedTransition(gameID, s.configDir, launchID, "", func(st *process.RuntimeState) error {
@@ -216,7 +243,7 @@ func (s *Server) lifecycleActionResult(game config.GameConfig, action, configRev
 	if claim == nil {
 		return nil
 	}
-	if claim.SchemaVersion < process.RuntimeSchemaVersion {
+	if claim.SchemaVersion == 0 {
 		normalized, nerr := process.NormalizeLegacyClaim(game.ID, s.configDir, game.LaunchMode, configRevision)
 		if nerr != nil {
 			return &ToolResult{
@@ -454,5 +481,23 @@ func attachRuntimeLifecycle(statusItem map[string]interface{}, rs *process.Runti
 			entry["treeKillWarning"] = true
 		}
 		statusItem["lastActionResult"] = entry
+	}
+}
+
+// staleBridgeCredentialResult renders the stable stale_bridge_credential
+// outcome (design/10): the observed bridge belongs to a previous launch
+// environment and must never be attached to.
+func staleBridgeCredentialResult(gameID, message string) *ToolResult {
+	return &ToolResult{
+		Content: []Content{{Type: "text", Text: message}},
+		StructuredContent: map[string]interface{}{
+			"code":   "stale_bridge_credential",
+			"gameId": gameID,
+			"nextActions": []map[string]interface{}{
+				mcpNextAction("games_status", map[string]interface{}{"gameId": gameID}, "Inspect the running instance; it carries an earlier launch's bridge environment."),
+				mcpNextAction("games_stop", map[string]interface{}{"gameId": gameID}, "Stop the stale instance, then start it again to receive the new bridge environment."),
+			},
+		},
+		IsError: true,
 	}
 }

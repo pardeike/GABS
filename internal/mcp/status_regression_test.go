@@ -186,6 +186,7 @@ func TestGamesStatusDoesNotConsumeAcceptOnceBridgeBeforeConnect(t *testing.T) {
 
 	bridgeToken := "accept-once-token"
 	writeBridgeFileForStatusTest(t, tmpDir, game.ID, listener.Addr().(*net.TCPAddr).Port, bridgeToken)
+	seedClaimEndpointForTest(t, tmpDir, game.ID, listener.Addr().(*net.TCPAddr).Port, bridgeToken)
 	serverDone := make(chan error, 1)
 	go serveTestGabpSession(listener, bridgeToken, serverDone)
 

@@ -154,6 +154,7 @@ func newGamesCallToolTimeoutTestServer(t *testing.T, toolDelay time.Duration) (*
 	if err := os.WriteFile(filepath.Join(bridgeDir, "bridge.json"), bridgeData, 0644); err != nil {
 		t.Fatalf("failed to write bridge.json: %v", err)
 	}
+	seedClaimEndpointForTest(t, tmpDir, "adventure", listener.Addr().(*net.TCPAddr).Port, bridgeToken)
 
 	gamesConfig := &config.GamesConfig{
 		Games: map[string]config.GameConfig{

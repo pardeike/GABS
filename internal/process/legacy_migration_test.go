@@ -57,8 +57,8 @@ func TestNormalizeLegacyClaimFullContract(t *testing.T) {
 	if !normalized.NormalizedFromLegacy || normalized.ConfigRevision != "sha256:rev12345678" {
 		t.Fatalf("normalizedFromLegacy + revision must be recorded: %+v", normalized)
 	}
-	if normalized.AppliedInputsState != AppliedInputsStateUnavailable {
-		t.Fatalf("a pre-profile launch's inputs are unknowable: %+v", normalized)
+	if normalized.AppliedInputsState != "" || len(normalized.AppliedInputNames) != 0 {
+		t.Fatalf("a pre-profile launch used a known empty input set, never 'unavailable': %+v", normalized)
 	}
 
 	// Persisted, not just returned.

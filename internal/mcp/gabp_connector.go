@@ -2,10 +2,12 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/pardeike/gabs/internal/gabp"
+	"github.com/pardeike/gabs/internal/process"
 	"github.com/pardeike/gabs/internal/util"
 )
 
@@ -50,10 +52,33 @@ func newServerGABPConnector(server *Server, backoffMin, backoffMax time.Duration
 	}
 }
 
-// AttemptConnection implements the GABPConnector interface
+// staleBridgeCredentialError is the typed connection refusal for
+// credentials that are not the current claim's per-launch credential
+// (design/03, design/10: stable code stale_bridge_credential).
+type staleBridgeCredentialError struct {
+	gameID string
+}
+
+func (e *staleBridgeCredentialError) Error() string {
+	return fmt.Sprintf("stale bridge credential for '%s': the connection credential is not the current launch's per-launch endpoint; the running bridge belongs to an earlier launch environment", e.gameID)
+}
+
+// AttemptConnection implements the GABPConnector interface. Connections are
+// credential-bound: only the current claim's per-launch endpoint (or the
+// legacy migration candidate on the first touch) may authenticate, and a
+// client whose credential stops matching before publication is closed —
+// it must never survive as GABP evidence or serve mirrored tools.
 func (c *ServerGABPConnector) AttemptConnection(ctx context.Context, gameID string, port int, token string) error {
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	c.log.Debugw("attempting GABP connection for game", "gameId", gameID, "addr", addr)
+
+	// Pre-connect credential check: never even dial with a credential that
+	// contradicts the current claim's endpoint.
+	if claim, err := process.LoadRuntimeState(gameID, c.server.configDir); err == nil && claim != nil &&
+		claim.SchemaVersion >= process.RuntimeSchemaVersion && claim.Endpoint != nil &&
+		(claim.Endpoint.Port != port || claim.Endpoint.Token != token) {
+		return &staleBridgeCredentialError{gameID: gameID}
+	}
 
 	// Create GABP client
 	client := gabp.NewClient(c.log)
@@ -86,13 +111,24 @@ func (c *ServerGABPConnector) AttemptConnection(ctx context.Context, gameID stri
 	// mirroring failure routes through the disconnect handler, which
 	// clears exactly this record by its connection identity. The record
 	// binds to the claim whose endpoint credential authenticated, and only
-	// while this client is still the game's current live connection.
-	c.server.recordBridgeAttachment(gameID, port, token, func() bool {
+	// while this client is still the game's current live connection. A
+	// credential that stopped matching (the claim was replaced mid-
+	// connect) closes the client: it never mirrors tools and never counts
+	// as GABP evidence.
+	if rerr := c.server.recordBridgeAttachment(gameID, port, token, func() bool {
 		c.server.mu.RLock()
 		current := c.server.gabpClients[gameID]
 		c.server.mu.RUnlock()
 		return current == client && client.IsConnected()
-	})
+	}); errors.Is(rerr, errStaleAttachmentCredential) {
+		c.server.mu.Lock()
+		if current, exists := c.server.gabpClients[gameID]; exists && current == client {
+			delete(c.server.gabpClients, gameID)
+		}
+		c.server.mu.Unlock()
+		_ = client.Close()
+		return &staleBridgeCredentialError{gameID: gameID}
+	}
 
 	if !c.mirrorSynchronously {
 		c.startAsyncToolMirroring(gameID, client)

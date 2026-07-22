@@ -86,7 +86,7 @@ func GateStart(g StartGate) (*StartGateResult, error) {
 				Message: fmt.Sprintf("runtime claim for %s is unreadable: %v; inspect it or run repair --forget-runtime", g.GameID, err),
 			}, Warnings: warnings}, nil
 		}
-		if claim != nil && claim.SchemaVersion < RuntimeSchemaVersion {
+		if claim != nil && claim.SchemaVersion == 0 {
 			// A start's duplicate check is a lifecycle touch: the legacy
 			// claim normalizes first, so it is evaluated — and fenced —
 			// like any current claim (design/07). On failure the raw

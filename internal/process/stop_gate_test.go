@@ -853,6 +853,91 @@ func TestConcurrentStopsRunExactlyOneAction(t *testing.T) {
 	}
 }
 
+func TestReleaseStartClaimIsFenced(t *testing.T) {
+	dir := t.TempDir()
+
+	st := NewRuntimeState(m2Spec("g1"), RuntimeStateStatusStarting)
+	opID := NewFencingID()
+	st.Operation = &RuntimeOperation{OperationID: opID, Action: OperationActionStart, AttemptStartedAt: time.Now().UTC(), Deadline: time.Now().UTC().Add(time.Minute)}
+	publishClaim(t, dir, st)
+
+	// Wrong launch identity: the successor claim survives.
+	if err := ReleaseStartClaim("g1", dir, "inst", NewFencingID(), opID); !errors.Is(err, ErrFencingViolation) {
+		t.Fatalf("a foreign launch must never be released, got %v", err)
+	}
+	// A different operation on our launch: someone admitted work — leave it.
+	if err := ReleaseStartClaim("g1", dir, "inst", st.LaunchID, NewFencingID()); !errors.Is(err, ErrFencingViolation) {
+		t.Fatalf("a different operation must fence the release, got %v", err)
+	}
+	// Our own operation: released.
+	if err := ReleaseStartClaim("g1", dir, "inst", st.LaunchID, opID); err != nil {
+		t.Fatalf("our own claim must release: %v", err)
+	}
+	if claim, _ := LoadRuntimeState("g1", dir); claim != nil {
+		t.Fatalf("claim must be gone: %+v", claim)
+	}
+
+	// Operation-free shape (promote-to-active ran before the exit was
+	// discovered): still ours, still released.
+	st2 := NewRuntimeState(m2Spec("g1"), RuntimeStateStatusRunning)
+	st2.Phase = PhaseActive
+	publishClaim(t, dir, st2)
+	if err := ReleaseStartClaim("g1", dir, "inst", st2.LaunchID, NewFencingID()); err != nil {
+		t.Fatalf("an operation-free own claim must release: %v", err)
+	}
+
+	// A live foreign attachment forbids the release.
+	pid, start := ownFingerprint(t)
+	st3 := NewRuntimeState(m2Spec("g1"), RuntimeStateStatusRunning)
+	st3.Attachment = &RuntimeAttachment{
+		ConnectionID: NewFencingID(), OwnerInstanceID: "other-server",
+		OwnerPID: pid, OwnerPIDStartTime: start,
+		ObservedAt: time.Now().UTC(), LeaseDeadline: time.Now().UTC().Add(time.Minute),
+	}
+	publishClaim(t, dir, st3)
+	if err := ReleaseStartClaim("g1", dir, "inst", st3.LaunchID, NewFencingID()); !errors.Is(err, ErrFencingViolation) {
+		t.Fatalf("a claim under a live foreign bridge must not be released, got %v", err)
+	}
+}
+
+func TestRemoveRuntimeStateIfCurrentRefusesOperationsAndAttachments(t *testing.T) {
+	dir := t.TempDir()
+	pid, start := ownFingerprint(t)
+
+	// Any operation — expired or not — refuses the status-path removal.
+	st := activeStopClaim(t, "g1", dir, nil)
+	st.Operation = &RuntimeOperation{OperationID: NewFencingID(), Action: OperationActionStop, AttemptStartedAt: time.Now().UTC().Add(-time.Hour), Deadline: time.Now().UTC().Add(-time.Minute)}
+	publishClaim(t, dir, st)
+	if err := RemoveRuntimeStateIfCurrent("g1", dir, "inst", st.LaunchID); !errors.Is(err, ErrFencingViolation) {
+		t.Fatalf("an admitted operation must refuse the status removal even when expired, got %v", err)
+	}
+	if err := RemoveRuntimeState("g1", dir); err != nil {
+		t.Fatal(err)
+	}
+
+	// A fresh live foreign attachment refuses it too.
+	st2 := activeStopClaim(t, "g1", dir, nil)
+	st2.Attachment = &RuntimeAttachment{
+		ConnectionID: NewFencingID(), OwnerInstanceID: "other-server",
+		OwnerPID: pid, OwnerPIDStartTime: start,
+		ObservedAt: time.Now().UTC(), LeaseDeadline: time.Now().UTC().Add(time.Minute),
+	}
+	publishClaim(t, dir, st2)
+	if err := RemoveRuntimeStateIfCurrent("g1", dir, "inst", st2.LaunchID); !errors.Is(err, ErrFencingViolation) {
+		t.Fatalf("a live foreign attachment must refuse the status removal, got %v", err)
+	}
+	if err := RemoveRuntimeState("g1", dir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Clean, operation-free, unattached: removed.
+	st3 := activeStopClaim(t, "g1", dir, nil)
+	publishClaim(t, dir, st3)
+	if err := RemoveRuntimeStateIfCurrent("g1", dir, "inst", st3.LaunchID); err != nil {
+		t.Fatalf("a clean stopped claim must remove: %v", err)
+	}
+}
+
 func TestBuiltinFallbackStrategyPinnedAtClaimCreation(t *testing.T) {
 	st := NewRuntimeState(m2Spec("g1"), RuntimeStateStatusStarting)
 	if st.BuiltinFallback == nil {

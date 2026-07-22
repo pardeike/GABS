@@ -85,6 +85,9 @@ func TestGamesConnectTakesOverIdleRuntimeOwner(t *testing.T) {
 		t.Fatalf("expected joiner lease to be active: %#v", runtimeState)
 	}
 
+	// Detach synchronously so the async disconnect handler cannot race the
+	// temp-dir teardown with attachment-record writes.
+	joinerServer.CleanupGABPConnection("adventure")
 	if err := <-serverDone; err != nil {
 		t.Fatalf("test GABP server failed: %v", err)
 	}
@@ -103,6 +106,7 @@ func TestGameBoundCallBlocksOldOwnerAfterRoamingTakeover(t *testing.T) {
 	go serveTestGabpSession(listener, bridgeToken, serverDone)
 
 	writeBridgeJSONForTest(t, tmpDir, "adventure", listener.Addr().(*net.TCPAddr).Port, bridgeToken)
+	seedClaimEndpointForTest(t, tmpDir, "adventure", listener.Addr().(*net.TCPAddr).Port, bridgeToken)
 	gamesConfig := roamingGamesConfig()
 	log := util.NewLogger("error")
 
@@ -158,6 +162,7 @@ func TestGameBoundCallBlocksOldOwnerAfterRoamingTakeover(t *testing.T) {
 		t.Fatalf("expected runtime owner block, got: %s", callText)
 	}
 
+	ownerServer.CleanupGABPConnection("adventure")
 	if err := <-serverDone; err != nil {
 		t.Fatalf("test GABP server failed: %v", err)
 	}
@@ -217,6 +222,42 @@ func roamingGamesConfig() *config.GamesConfig {
 				Target:     "/Applications/AdventureGameMac.app/Contents/MacOS/AdventureGame by ExampleStudio Studios",
 			},
 		},
+	}
+}
+
+// seedClaimEndpointForTest publishes a current-schema active claim carrying
+// the endpoint — the authoritative attach source games_connect requires
+// since the bridge.json demotion (design/07). The workload evidence is this
+// test process itself.
+func seedClaimEndpointForTest(t *testing.T, configDir, gameID string, port int, token string) {
+	t.Helper()
+	spec := process.LaunchSpec{GameId: gameID, Mode: "DirectPath", PathOrId: "/opt/game"}
+	st := process.NewRuntimeState(spec, process.RuntimeStateStatusRunning)
+	st.Phase = process.PhaseActive
+	st.SpawnState = process.SpawnStateSpawned
+	st.GamePID = os.Getpid()
+	if start, err := process.ProcessStartTime(os.Getpid()); err == nil {
+		st.PIDStartTime = start
+	}
+	st.Endpoint = &process.RuntimeEndpoint{Port: port, Token: token}
+	if err := process.SaveRuntimeState(gameID, configDir, st); err != nil {
+		t.Fatalf("failed to seed runtime claim: %v", err)
+	}
+}
+
+// setClaimGamePIDForTest re-points the seeded claim's workload evidence at
+// a specific process (e.g. a spawned helper whose environment the test
+// wants inspected).
+func setClaimGamePIDForTest(t *testing.T, configDir, gameID string, pid int) {
+	t.Helper()
+	st, err := process.LoadRuntimeState(gameID, configDir)
+	if err != nil || st == nil {
+		t.Fatalf("failed to load seeded claim: %v", err)
+	}
+	st.GamePID = pid
+	st.PIDStartTime = 0 // existence-only evidence is enough for these tests
+	if err := process.SaveRuntimeState(gameID, configDir, *st); err != nil {
+		t.Fatalf("failed to update seeded claim: %v", err)
 	}
 }
 

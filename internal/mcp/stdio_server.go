@@ -2401,19 +2401,6 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				IsError: true,
 			}, nil
 		}
-		if runtimeState != nil && runtimeState.SchemaVersion < process.RuntimeSchemaVersion {
-			// games_connect is a lifecycle touch: the pre-upgrade claim
-			// normalizes fully before anything acts on it (design/07).
-			normalized, nerr := process.NormalizeLegacyClaim(game.ID, s.configDir, game.LaunchMode, configRevision)
-			if nerr != nil {
-				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("The pre-upgrade runtime claim for '%s' could not be normalized: %v", game.ID, nerr)}},
-					IsError: true,
-				}, nil
-			}
-			runtimeState = normalized
-		}
-
 		hadForeignOwner := process.RuntimeStateOwnedByAnotherLiveOwner(runtimeState, os.Getpid(), s.instanceID)
 		foreignOwnerActive := process.RuntimeStateOwnedByAnotherActiveOwner(runtimeState, os.Getpid(), s.instanceID, s.runtimeOwnerLeaseDuration(), time.Now().UTC())
 		previousOwnerPID := 0
@@ -2441,14 +2428,46 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}
 		idleTakeover := hadForeignOwner && !foreignOwnerActive && !forceTakeover
 
+		// games_connect is a lifecycle touch — but only once it actually
+		// proceeds: a connect refused by the ownership gate above must not
+		// normalize the claim or burn the one-shot migration candidate.
+		var legacyEndpointCandidate *process.RuntimeEndpoint
+		if runtimeState != nil && runtimeState.SchemaVersion == 0 {
+			// The marker-absent claim normalizes fully before anything acts
+			// on it, and the one legacy bridge.json candidate is captured
+			// under that same transition lock (design/07: the sole
+			// live-attach read of the file, exactly once) — validated below
+			// by actually connecting, then persisted through the minted
+			// launch fence. Never reread.
+			normalized, candidate, nerr := process.NormalizeLegacyClaimCapturingEndpoint(game.ID, s.configDir, game.LaunchMode, configRevision)
+			if nerr != nil {
+				return &ToolResult{
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("The pre-upgrade runtime claim for '%s' could not be normalized: %v", game.ID, nerr)}},
+					IsError: true,
+				}, nil
+			}
+			runtimeState = normalized
+			legacyEndpointCandidate = candidate
+		}
+
 		status := s.checkGameStatus(game.ID)
 
-		endpoint, err := s.resolveConnectBridgeEndpoint(*game, runtimeState)
-		if err != nil {
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to resolve live GABP endpoint for '%s': %v", game.ID, err)}},
-				IsError: true,
-			}, nil
+		var endpoint bridgeEndpoint
+		if legacyEndpointCandidate != nil {
+			endpoint = bridgeEndpoint{Port: legacyEndpointCandidate.Port, Token: legacyEndpointCandidate.Token, Source: "legacy-bridge-file"}
+		} else {
+			var eerr error
+			endpoint, eerr = s.resolveConnectBridgeEndpoint(*game, runtimeState)
+			if eerr != nil {
+				var stale *errStaleConnectCredential
+				if errors.As(eerr, &stale) {
+					return staleBridgeCredentialResult(game.ID, stale.Error()), nil
+				}
+				return &ToolResult{
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to resolve live GABP endpoint for '%s': %v", game.ID, eerr)}},
+					IsError: true,
+				}, nil
+			}
 		}
 		port := endpoint.Port
 		token := endpoint.Token
@@ -2458,7 +2477,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			stateCopy := *runtimeState
 			runtimeStateBeforeClaim = &stateCopy
 		}
-		runtimeState, err = s.saveRuntimeOwnerLease(*game, runtimeState, connectTimeout)
+		runtimeState, err := s.saveRuntimeOwnerLease(*game, runtimeState, connectTimeout)
 		if err != nil {
 			return &ToolResult{
 				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to claim runtime ownership for '%s': %v", game.ID, err)}},
@@ -2466,15 +2485,19 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		// Allow reattaching after a GABS restart. Prefer the running process
-		// environment; fall back to the internal bridge file only when no live
-		// environment is readable.
+		// Reattach with the claim's own credential (or the captured legacy
+		// migration candidate) — never a substituted one.
 		connector := NewServerGABPConnector(s, backoffMin, backoffMax)
 		connectCtx, connectCancel := context.WithTimeout(context.Background(), connectTimeout)
 		defer connectCancel()
 
 		err = connector.AttemptConnection(connectCtx, game.ID, port, token)
 		if err != nil {
+			var staleConn *staleBridgeCredentialError
+			if errors.As(err, &staleConn) {
+				s.restoreRuntimeOwnerAfterFailedConnect(game.ID, runtimeStateBeforeClaim)
+				return staleBridgeCredentialResult(game.ID, staleConn.Error()), nil
+			}
 			disconnectNote := s.describeLastGABPDisconnect(game.ID)
 			if status != "running" && status != "connected" {
 				if status == "running-disconnected" {
@@ -2500,8 +2523,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		if runtimeState != nil && runtimeState.NormalizedFromLegacy && runtimeState.Endpoint == nil &&
-			endpoint.Source == "internal-bridge-file" {
+		if legacyEndpointCandidate != nil && endpoint.Source == "legacy-bridge-file" {
 			// The pre-upgrade migration (design/07): the endpoint this live
 			// connection just validated is persisted into the claim exactly
 			// once — bridge.json returns to diagnostic-only status — and the
@@ -4159,7 +4181,7 @@ func (s *Server) resolveClaimStatusByLiveness(gameID string, claim *process.Runt
 		// seconds-long hook to compute — remove only while the evaluated
 		// launch identity still holds and no operation was admitted
 		// meanwhile; a stale verdict must never delete a successor claim.
-		if err := process.RemoveRuntimeStateIfCurrent(gameID, s.configDir, claim.LaunchID, time.Now().UTC()); err != nil {
+		if err := process.RemoveRuntimeStateIfCurrent(gameID, s.configDir, s.instanceID, claim.LaunchID); err != nil {
 			if errors.Is(err, process.ErrFencingViolation) {
 				if cur, lerr := process.LoadRuntimeState(gameID, s.configDir); lerr == nil && cur != nil {
 					switch cur.Phase {
@@ -4391,51 +4413,59 @@ func (s *Server) adoptProcessBridgeEndpointFromDiagnostic(game config.GameConfig
 	}, true
 }
 
+// errStaleConnectCredential marks a connect refusal where the observed
+// process environment carries a previous launch's credentials — the stable
+// stale_bridge_credential outcome (design/10).
+type errStaleConnectCredential struct {
+	gameID string
+	pid    int
+}
+
+func (e *errStaleConnectCredential) Error() string {
+	return fmt.Sprintf("stale bridge credential: the running process (pid %d) carries bridge credentials from a previous launch of '%s'; it cannot serve this launch's bridge — restart the game to pick up the new environment", e.pid, e.gameID)
+}
+
+// resolveConnectBridgeEndpoint resolves the ONLY credential games_connect
+// may attach with: the current claim's per-launch endpoint (design/03,
+// design/07). Process-environment inspection corroborates that exact
+// credential or exposes a stale one — it never replaces it. bridge.json is
+// never read here: the sole live-attach read of that file is the legacy
+// migration candidate captured under the transition lock during
+// normalization (design/07), which the connect handler passes explicitly.
 func (s *Server) resolveConnectBridgeEndpoint(game config.GameConfig, runtimeState *process.RuntimeState) (bridgeEndpoint, error) {
-	// The runtime claim is the authoritative attachment source (design/07):
-	// it carries the per-launch endpoint after a CLI start or a server
-	// restart. Process-environment inspection and bridge.json are
-	// corroboration/diagnostic fallbacks for claims without an endpoint.
-	if runtimeState != nil && runtimeState.Endpoint != nil &&
-		runtimeState.Endpoint.Port > 0 && strings.TrimSpace(runtimeState.Endpoint.Token) != "" {
-		return bridgeEndpoint{
-			Port:   runtimeState.Endpoint.Port,
-			Token:  runtimeState.Endpoint.Token,
-			Source: "runtime-claim",
-			PID:    runtimeState.GamePID,
-		}, nil
+	if runtimeState == nil {
+		return bridgeEndpoint{}, fmt.Errorf("no runtime claim exists for '%s'; nothing is attachable — start the game, or check games_status", game.ID)
 	}
-	processEnv := s.inspectGameBridgeEnvironment(game, runtimeState)
-	endpoint, _ := s.adoptProcessBridgeEndpointFromDiagnostic(game, processEnv, bridgeEndpoint{})
-	if endpoint.Port > 0 && strings.TrimSpace(endpoint.Token) != "" {
-		return endpoint, nil
+	if runtimeState.Source == process.SourceExternal {
+		return bridgeEndpoint{}, fmt.Errorf("attachment unavailable: '%s' is an externally started instance and never received this GABS's bridge environment; status/stop/kill remain available", game.ID)
 	}
-
-	if readableProcessEnvLacksAttachableBridgeEndpoint(game, processEnv) {
-		return bridgeEndpoint{}, fmt.Errorf("%s", processBridgeEnvironmentMissingMessage(game, processEnv))
-	}
-
-	// bridge.json is diagnostic-only for marker-stamped claims: the sole
-	// live-attach read is the pre-upgrade migration path (design/07) — a
-	// claim that lacks the marker, or one normalized from legacy whose
-	// endpoint was never migrated. A fresh pre-endpoint claim and an
-	// external snapshot never enter it.
-	if runtimeState != nil && runtimeState.SchemaVersion >= process.RuntimeSchemaVersion &&
-		!(runtimeState.NormalizedFromLegacy && runtimeState.Endpoint == nil) {
-		if runtimeState.Source == process.SourceExternal {
-			return bridgeEndpoint{}, fmt.Errorf("attachment unavailable: '%s' is an externally started instance and never received this GABS's bridge environment; status/stop/kill remain available", game.ID)
-		}
+	if runtimeState.Endpoint == nil || runtimeState.Endpoint.Port <= 0 || strings.TrimSpace(runtimeState.Endpoint.Token) == "" {
 		return bridgeEndpoint{}, fmt.Errorf("the runtime claim for '%s' carries no attachable endpoint yet; if a start is in flight, re-check games_status", game.ID)
 	}
 
-	_, port, token, err := config.ReadBridgeJSON(game.ID, s.configDir)
-	if err != nil {
-		return bridgeEndpoint{}, fmt.Errorf("no readable live process environment and internal bridge endpoint was unavailable: %w", err)
+	endpoint := bridgeEndpoint{
+		Port:   runtimeState.Endpoint.Port,
+		Token:  runtimeState.Endpoint.Token,
+		Source: "runtime-claim",
+		PID:    runtimeState.GamePID,
 	}
-	if port <= 0 || strings.TrimSpace(token) == "" {
-		return bridgeEndpoint{}, fmt.Errorf("internal bridge endpoint is incomplete")
+	processEnv := s.inspectGameBridgeEnvironment(game, runtimeState)
+	switch {
+	case processEnv.Present && processEnv.Port == endpoint.Port && processEnv.Token == endpoint.Token:
+		endpoint.Source = "process-environment"
+		endpoint.PID = processEnv.PID
+	case processEnv.Present && processEnv.Port > 0 && strings.TrimSpace(processEnv.Token) != "":
+		// The workload demonstrably runs with another launch's
+		// credentials: connecting with either credential would be a stale
+		// attach — fail with the stable code instead of a timeout.
+		return bridgeEndpoint{}, &errStaleConnectCredential{gameID: game.ID, pid: processEnv.PID}
+	case readableProcessEnvLacksAttachableBridgeEndpoint(game, processEnv):
+		// The workload's environment is readable and provably lacks the
+		// bridge variables: it never received a GABS environment, so no
+		// dial can succeed — diagnose instead of timing out.
+		return bridgeEndpoint{}, fmt.Errorf("%s", processBridgeEnvironmentMissingMessage(game, processEnv))
 	}
-	return bridgeEndpoint{Port: port, Token: token, Source: "internal-bridge-file"}, nil
+	return endpoint, nil
 }
 
 func (s *Server) attemptStartupGABPConnection(
@@ -4575,14 +4605,60 @@ func resolveRuntimeGamePID(game config.GameConfig, controller process.Controller
 // evidence — including pinned status hooks that may run for seconds — with
 // the lock released, so concurrent status calls never serialize behind one
 // another's probes (design/10).
+//
+// A current-schema claim is the FIRST status authority (design/04): its
+// pinned context is evaluated through the unified liveness rule before any
+// in-memory shortcut — a live wrapper PID cannot hide a pinned hook's
+// stopped verdict, a lingering client cannot masquerade as evidence, and
+// M2.7 recovery is reachable regardless of controller state. GABP evidence
+// comes only from a credential-bound live client: one this server attached
+// under this claim's launch identity.
 func (s *Server) checkGameStatus(gameID string) string {
 	s.mu.Lock()
 	controller, exists := s.games[gameID]
 	client, clientConnected := s.gabpClients[gameID]
+	attachRef, hasAttachRef := s.bridgeAttachments[gameID]
 	s.mu.Unlock()
 
 	gabpLive := clientConnected && client != nil && client.IsConnected()
 
+	claim, err := process.LoadRuntimeState(gameID, s.configDir)
+	if err != nil {
+		s.log.Warnw("failed to read runtime claim for status", "gameId", gameID, "error", err)
+		return "unknown" // uncertainty never cleans state
+	}
+	if claim != nil && claim.SchemaVersion >= process.RuntimeSchemaVersion {
+		boundGABP := gabpLive && hasAttachRef && attachRef.launchID == claim.LaunchID
+		status := s.resolveClaimStatusByLiveness(gameID, claim, boundGABP)
+		switch status {
+		case process.RuntimeStateStatusRunning:
+			// Preserve the existing rendering vocabulary on top of the
+			// claim verdict.
+			if boundGABP {
+				if exists {
+					return "running"
+				}
+				return "connected"
+			}
+			if clientConnected && !gabpLive {
+				return "running-disconnected"
+			}
+			if exists {
+				return "running"
+			}
+			return "shared-running"
+		case "stale-runtime-cleaned":
+			// The fenced removal accepted the stopped verdict: release
+			// exactly the in-memory artifacts observed for that launch.
+			s.releaseGameArtifacts(gameID, controller, client)
+			return status
+		default:
+			return status // starting/stopping/killing/unknown
+		}
+	}
+
+	// Legacy flows only from here: no claim, or a pre-profile claim that no
+	// lifecycle touch has normalized yet.
 	if !exists {
 		if clientConnected {
 			if gabpLive {
@@ -4615,14 +4691,6 @@ func (s *Server) checkGameStatus(gameID string) string {
 			return "launcher-running" // Launcher process is still active
 		}
 
-		// Launcher has exited. A current-schema claim owns the verdict:
-		// its pinned context — not the dead helper — decides, and an
-		// in-flight operation's claim is never cleaned from here (P1 fix:
-		// the controller branch must not delete runtime.json while a
-		// stop/kill hook or verification window is still active).
-		if status, handled := s.controllerClaimStatus(gameID, controller, client, gabpLive); handled {
-			return status
-		}
 		game := s.getGameFromController(controller)
 		if game != nil && game.StopProcessName != "" {
 			// We have tracking capability but game is not running
@@ -4641,34 +4709,10 @@ func (s *Server) checkGameStatus(gameID string) string {
 		return "running"
 	}
 
-	// Process is dead. Same rule: the claim owns the verdict when present.
-	if status, handled := s.controllerClaimStatus(gameID, controller, client, gabpLive); handled {
-		return status
-	}
+	// Process is dead, clean up (legacy tracking only — a current-schema
+	// claim never reaches here).
 	s.cleanupStoppedGame(gameID)
 	return "stopped"
-}
-
-// controllerClaimStatus judges a controller-backed game by its persisted
-// current-schema claim: the one liveness rule over the pinned context.
-// handled=false means no current-schema claim exists and the legacy
-// controller-only logic should decide.
-func (s *Server) controllerClaimStatus(gameID string, controller process.ControllerInterface, client *gabp.Client, gabpLive bool) (string, bool) {
-	claim, err := process.LoadRuntimeState(gameID, s.configDir)
-	if err != nil {
-		s.log.Warnw("failed to read runtime claim for controller status", "gameId", gameID, "error", err)
-		return "unknown", true // uncertainty never cleans state
-	}
-	if claim == nil || claim.SchemaVersion < process.RuntimeSchemaVersion {
-		return "", false
-	}
-	status := s.resolveClaimStatusByLiveness(gameID, claim, gabpLive)
-	if status == "stale-runtime-cleaned" {
-		// The fenced removal accepted the stopped verdict: release exactly
-		// the in-memory artifacts observed for the finished launch.
-		s.releaseGameArtifacts(gameID, controller, client)
-	}
-	return status, true
 }
 
 // cleanupStoppedGameLocked centralizes cleanup when s.mu is already held.
@@ -4773,8 +4817,16 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 
 	cleanupRuntimeState := true
 	defer func() {
-		if cleanupRuntimeState {
-			s.cleanupRuntimeStateInternal(game.ID)
+		if !cleanupRuntimeState {
+			return
+		}
+		// Release only OUR claim: fenced by the launch + operation identity
+		// this start created — a cleanup that lost a race (its transition
+		// fenced out, its claim superseded) must never delete a successor
+		// claim by bare game ID (design/06).
+		if err := process.ReleaseStartClaim(game.ID, s.configDir, s.instanceID, launchID, opID); err != nil &&
+			!errors.Is(err, process.ErrFencingViolation) && !errors.Is(err, process.ErrNoRuntimeClaim) {
+			s.log.Warnw("failed to release start claim", "gameId", game.ID, "error", err)
 		}
 	}()
 
@@ -4983,10 +5035,26 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	s.games[game.ID] = controller
 	s.mu.Unlock()
 
-	endpoint := bridgeEndpoint{Port: port, Token: token, Source: "bridge.json"}
-	endpoint, adoptedProcessEnv := s.adoptProcessBridgeEndpoint(game, &runtimeState, endpoint)
-	port = endpoint.Port
-	token = endpoint.Token
+	// The claim's per-launch credential is the ONLY credential this launch
+	// may attach with (design/03). Process-environment inspection can
+	// corroborate it — or expose that the observed workload still carries a
+	// previous launch's environment (an adopted process that never received
+	// this launch's context): that is stale_bridge_credential, surfaced as
+	// a warning, never adopted as an attach credential.
+	endpoint := bridgeEndpoint{Port: port, Token: token, Source: "runtime-claim"}
+	adoptedProcessEnv := false
+	if processEnv := s.inspectGameBridgeEnvironment(game, &runtimeState); processEnv.Present {
+		switch {
+		case processEnv.Port == port && processEnv.Token == token:
+			endpoint.Source = "process-environment"
+			endpoint.PID = processEnv.PID
+		case processEnv.Port > 0 && strings.TrimSpace(processEnv.Token) != "":
+			startWarnings = append(startWarnings, fmt.Sprintf(
+				"stale_bridge_credential: the running workload (pid %d) carries bridge credentials from a previous launch environment; this launch's bridge cannot attach to it — restart the game to pick up the new environment",
+				processEnv.PID))
+			result.StartWarnings = startWarnings
+		}
+	}
 
 	synchronousGABPTimeout := boundedStartupGABPWait(totalGABPTimeout)
 	connector := NewAsyncServerGABPConnector(s, backoffMin, backoffMax)

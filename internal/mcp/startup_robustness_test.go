@@ -66,7 +66,13 @@ func TestGamesStartCapsSynchronousGABPWaitForLargeTimeout(t *testing.T) {
 	}
 }
 
-func TestGamesStartUsesLauncherReusedBridgeEnvironmentWithoutMutatingBridgeFile(t *testing.T) {
+// TestGamesStartRejectsStaleLauncherBridgeEnvironment: a workload that
+// still carries a previous launch's bridge environment is never adopted as
+// an attach credential (design/03: the per-launch token exists exactly to
+// reject the delayed-superseded-process case). The start stays non-error,
+// surfaces stale_bridge_credential, and the claim's fresh credential is
+// never replaced.
+func TestGamesStartRejectsStaleLauncherBridgeEnvironment(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("process environment inspection is not supported on Windows")
 	}
@@ -164,26 +170,35 @@ wait
 	})
 
 	if strings.Contains(startText, `"isError":true`) {
-		t.Fatalf("start should adopt stale launcher env and return a bounded non-error result, got: %s", startText)
+		t.Fatalf("a stale launcher env start is bounded and non-error (bridge-pending), got: %s", startText)
+	}
+	if !strings.Contains(startText, "stale_bridge_credential") {
+		t.Fatalf("the stale environment must surface stale_bridge_credential, got: %s", startText)
 	}
 
-	_, adoptedPort, adoptedToken, err := config.ReadBridgeJSON(game.ID, tmpDir)
+	_, filePort, fileToken, err := config.ReadBridgeJSON(game.ID, tmpDir)
 	if err != nil {
 		t.Fatalf("failed to read internal bridge endpoint: %v", err)
 	}
 	// The port is reusable, but the token rotates per launch (design/03) —
-	// so the file must carry a freshly minted token, and adoption of the
-	// stale process environment must never write the adopted endpoint into
-	// the debug-only bridge file.
-	if adoptedPort != freshPort {
+	// the file must carry the freshly minted credential, and the stale
+	// process environment must never replace it anywhere.
+	if filePort != freshPort {
 		statusText := marshalMessage(t, server.HandleMessage(toolCallMessage("status-stale-launcher", "games.status", game.ID)))
-		t.Fatalf("expected internal bridge endpoint to keep port %d, got %d; status: %s", freshPort, adoptedPort, statusText)
+		t.Fatalf("expected internal bridge endpoint to keep port %d, got %d; status: %s", freshPort, filePort, statusText)
 	}
-	if adoptedToken == staleToken {
-		t.Fatalf("adopted stale process-env token must never be written into the bridge file")
+	if fileToken == staleToken {
+		t.Fatalf("the stale process-env token must never be written into the bridge file")
 	}
-	if adoptedToken == freshToken {
+	if fileToken == freshToken {
 		t.Fatalf("the per-launch token must rotate on start; the pre-start token is still in the bridge file")
+	}
+	claim, err := process.LoadRuntimeState(game.ID, tmpDir)
+	if err != nil || claim == nil || claim.Endpoint == nil {
+		t.Fatalf("the claim must keep its endpoint: %+v %v", claim, err)
+	}
+	if claim.Endpoint.Token == staleToken || claim.Endpoint.Port == stalePort {
+		t.Fatalf("the claim endpoint must never be replaced by the stale environment: %+v", claim.Endpoint)
 	}
 }
 

@@ -1,7 +1,9 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -549,7 +551,7 @@ func TestMultiGameStatusProbesRunConcurrently(t *testing.T) {
 		st.Phase = process.PhaseActive
 		st.SpawnState = process.SpawnStateSpawned
 		st.Lifecycle = &launch.ResolvedLifecycle{Status: &launch.ResolvedHook{
-			Command: "/bin/sleep", Args: []string{"5"}, TimeoutSeconds: 1,
+			Command: "/bin/sleep", Args: []string{"30"}, TimeoutSeconds: 2,
 			RunningExitCodes: []int{0}, StoppedExitCodes: []int{1},
 		}}
 		if err := process.ClaimRuntimeState(id, dir, st); err != nil {
@@ -561,16 +563,70 @@ func TestMultiGameStatusProbesRunConcurrently(t *testing.T) {
 	startAt := time.Now()
 	raw, _ := callTool(t, s, "games.status", map[string]interface{}{})
 	elapsed := time.Since(startAt)
-	// Each pinned hook times out after ~1s (+ pipe grace); sequential
-	// probing would need 3x that. Concurrency must keep the summary near
-	// one probe's cost.
-	if elapsed > 2800*time.Millisecond {
+	// Each pinned hook times out after ~2s (+ pipe grace); sequential
+	// probing would need at least 6s. Concurrency must keep the summary
+	// near one probe's cost, with generous headroom for loaded machines.
+	if elapsed > 4500*time.Millisecond {
 		t.Fatalf("multi-game probes must run concurrently, took %v: %s", elapsed, raw)
 	}
 	for _, id := range []string{"slow-a", "slow-b", "slow-c"} {
 		if claim, _ := process.LoadRuntimeState(id, dir); claim == nil {
 			t.Fatalf("unknown hook verdicts must never clean claims (%s)", id)
 		}
+	}
+}
+
+func TestBridgeAttachmentStaleCredentialIsRejected(t *testing.T) {
+	s := newProfiledServer(t)
+
+	spec := process.LaunchSpec{GameId: "adventure", Mode: "DirectPath", PathOrId: "/opt/game"}
+	st := process.NewRuntimeState(spec, process.RuntimeStateStatusRunning)
+	st.Phase = process.PhaseActive
+	st.SpawnState = process.SpawnStateSpawned
+	st.Endpoint = &process.RuntimeEndpoint{Port: 40001, Token: "fresh-token"}
+	if err := process.ClaimRuntimeState("adventure", s.configDir, st); err != nil {
+		t.Fatal(err)
+	}
+
+	err := s.recordBridgeAttachment("adventure", 40001, "previous-launch-token", func() bool { return true })
+	if !errors.Is(err, errStaleAttachmentCredential) {
+		t.Fatalf("a mismatched credential must be typed stale, got %v", err)
+	}
+	claim, _ := process.LoadRuntimeState("adventure", s.configDir)
+	if claim == nil || claim.Attachment != nil {
+		t.Fatalf("a stale credential must never persist a record: %+v", claim)
+	}
+}
+
+func TestConnectorRefusesStaleCredentialBeforeDialing(t *testing.T) {
+	s := newProfiledServer(t)
+
+	spec := process.LaunchSpec{GameId: "adventure", Mode: "DirectPath", PathOrId: "/opt/game"}
+	st := process.NewRuntimeState(spec, process.RuntimeStateStatusRunning)
+	st.Phase = process.PhaseActive
+	st.SpawnState = process.SpawnStateSpawned
+	st.Endpoint = &process.RuntimeEndpoint{Port: 40002, Token: "fresh-token"}
+	if err := process.ClaimRuntimeState("adventure", s.configDir, st); err != nil {
+		t.Fatal(err)
+	}
+
+	connector := NewServerGABPConnector(s, 10*time.Millisecond, 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	startAt := time.Now()
+	err := connector.AttemptConnection(ctx, "adventure", 40002, "previous-launch-token")
+	var stale *staleBridgeCredentialError
+	if !errors.As(err, &stale) {
+		t.Fatalf("a contradicted credential must refuse before dialing, got %v", err)
+	}
+	if elapsed := time.Since(startAt); elapsed > time.Second {
+		t.Fatalf("the refusal must not dial or back off, took %v", elapsed)
+	}
+	s.mu.RLock()
+	_, hasClient := s.gabpClients["adventure"]
+	s.mu.RUnlock()
+	if hasClient {
+		t.Fatal("no client may be registered for a refused credential")
 	}
 }
 

@@ -427,22 +427,67 @@ func removeRuntimeStateGuarded(gameID, configDir, instanceID, launchID, operatio
 	if cur.Operation == nil || cur.Operation.OperationID != operationID {
 		return ErrFencingViolation
 	}
-	if a := cur.Attachment; a != nil && !attachmentOwnedBy(a, instanceID) &&
-		a.OwnerPID > 0 && a.OwnerPIDStartTime != 0 &&
-		!a.LeaseDeadline.IsZero() && time.Now().Before(a.LeaseDeadline) {
-		if v, _ := VerifyPIDFingerprint(a.OwnerPID, a.OwnerPIDStartTime); v == StatusRunning {
-			return errStopAttachmentLive
-		}
+	if foreignAttachmentLive(cur.Attachment, instanceID) {
+		return errStopAttachmentLive
+	}
+	return RemoveRuntimeState(gameID, configDir)
+}
+
+// foreignAttachmentLive reports whether the record is another process's
+// fresh fingerprint-matched lease: the evidence that forbids clearing a
+// claim under a live bridge (design/04).
+func foreignAttachmentLive(a *RuntimeAttachment, instanceID string) bool {
+	if a == nil || attachmentOwnedBy(a, instanceID) {
+		return false
+	}
+	if a.OwnerPID <= 0 || a.OwnerPIDStartTime == 0 || a.LeaseDeadline.IsZero() || !time.Now().Before(a.LeaseDeadline) {
+		return false
+	}
+	v, _ := VerifyPIDFingerprint(a.OwnerPID, a.OwnerPIDStartTime)
+	return v == StatusRunning
+}
+
+// ReleaseStartClaim removes a start attempt's own claim after a failure —
+// fenced by the launch identity it created, so a cleanup path that lost a
+// race (its claim superseded, its transition fenced out) can never delete
+// a successor claim by bare game ID (design/06). It accepts either the
+// attempt's own operation or an operation-free claim (the attempt may have
+// completed its promote-to-active transition before discovering the exit),
+// never a different operation; a live foreign attachment likewise leaves
+// the claim in place — another process owns a bridge into it.
+func ReleaseStartClaim(gameID, configDir, instanceID, launchID, operationID string) error {
+	lock, err := AcquireTransitionLock(gameID, configDir, transitionLockGateTimeout)
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+	cur, err := LoadRuntimeState(gameID, configDir)
+	if err != nil {
+		return err
+	}
+	if cur == nil {
+		return ErrNoRuntimeClaim
+	}
+	if cur.LaunchID != launchID {
+		return ErrFencingViolation
+	}
+	if cur.Operation != nil && cur.Operation.OperationID != operationID {
+		return ErrFencingViolation
+	}
+	if foreignAttachmentLive(cur.Attachment, instanceID) {
+		return ErrFencingViolation
 	}
 	return RemoveRuntimeState(gameID, configDir)
 }
 
 // RemoveRuntimeStateIfCurrent removes the claim only while it still carries
-// the evaluated launch identity and no unexpired in-flight operation — the
-// status path's fenced removal (design/06): a stopped verdict computed over
-// a seconds-long hook must never delete a successor claim or an operation
-// that was admitted meanwhile.
-func RemoveRuntimeStateIfCurrent(gameID, configDir, launchID string, now time.Time) error {
+// the evaluated launch identity, no operation at all, and no live foreign
+// attachment — the status path's fenced removal (design/06): a stopped
+// verdict computed over a seconds-long hook must never delete a successor
+// claim, an attempt that was admitted meanwhile (expired or not — its
+// recovery is not the status path's business), or a claim another process
+// just attached to.
+func RemoveRuntimeStateIfCurrent(gameID, configDir, instanceID, launchID string) error {
 	lock, err := AcquireTransitionLock(gameID, configDir, transitionLockGateTimeout)
 	if err != nil {
 		return err
@@ -458,7 +503,10 @@ func RemoveRuntimeStateIfCurrent(gameID, configDir, launchID string, now time.Ti
 	if cur.LaunchID != launchID {
 		return ErrFencingViolation
 	}
-	if op := cur.Operation; op != nil && (op.Deadline.IsZero() || now.Before(op.Deadline)) {
+	if cur.Operation != nil {
+		return ErrFencingViolation
+	}
+	if foreignAttachmentLive(cur.Attachment, instanceID) {
 		return ErrFencingViolation
 	}
 	return RemoveRuntimeState(gameID, configDir)
