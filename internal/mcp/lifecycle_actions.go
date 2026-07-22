@@ -803,12 +803,11 @@ func (s *Server) applyPinnedWorkloadStart(gameID string, st *process.RuntimeStat
 // round 10). Returns the classification so the caller can carry it to the
 // render step. Only design-eligible codes write; the pure classification is
 // always returned for rendering.
-func (s *Server) recordTerminalStartFailure(game config.GameConfig, hc historyContext, code string, wrapperExit bool) process.Classification {
+func (s *Server) recordTerminalStartFailure(game config.GameConfig, hc historyContext, code string) process.Classification {
 	cls := process.Classify(code, process.ClassifyContext{
 		Proven:                s.contextProven(game.ID, hc),
 		InputCombinationFresh: !s.inputComboProven(game.ID, hc),
 		SuppliedInputs:        hc.inputNames,
-		WrapperExit:           wrapperExit,
 	})
 	if writeEligibleStartFailure(code) && hc.contextHash != "" && hc.launchID != "" {
 		if err := process.RecordFailure(game.ID, s.configDir, hc.launchID, hc.profile, hc.contextHash, code, cls.Class, hc.inputNames, time.Now().UTC()); err != nil {
@@ -823,12 +822,11 @@ func (s *Server) recordTerminalStartFailure(game config.GameConfig, hc historyCo
 // record step (in startGame, while the claim was alive) already wrote. It
 // never mutates history (round 10: the write and render are split by the
 // claim lifetime).
-func (s *Server) finalizeStartFailure(structured map[string]interface{}, game config.GameConfig, hc historyContext, code string, wrapperExit bool) {
+func (s *Server) finalizeStartFailure(structured map[string]interface{}, game config.GameConfig, hc historyContext, code string) {
 	cls := process.Classify(code, process.ClassifyContext{
 		Proven:                s.contextProven(game.ID, hc),
 		InputCombinationFresh: !s.inputComboProven(game.ID, hc),
 		SuppliedInputs:        hc.inputNames,
-		WrapperExit:           wrapperExit,
 	})
 	s.attachFailureAttribution(structured, game, hc, cls.Class, cls.SecondaryNote)
 }

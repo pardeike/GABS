@@ -213,7 +213,13 @@ combination whose workload crashes keeps its outcome-implied class (game)
 with the candidate-input secondary note, bare-set proof intact, and
 editing that declaration resets only its bucket; proof-adjusted
 classification — missing target on proven context → environment, on
-never-proven → config; "workload proven, bridge never connected" renders
+never-proven → config; a post-spawn `exited_during_start` is `game` by the
+evidence-based default across every launch mode (DirectPath, CustomCommand,
+SteamManaged) and however the exit was surfaced (dead PID or status hook
+reporting stopped) — never re-attributed to environment on the basis of
+launch mode or hook result (design/05 §"Why exited_during_start is always
+game"); an OS process-creation failure stays `spawn_failed`/environment;
+"workload proven, bridge never connected" renders
 the game-side hint; every failure result carries causeClass +
 track-record line; no non-config nextActions template mentions config
 editing (template-level assertion); call-class errors (unknown profile,

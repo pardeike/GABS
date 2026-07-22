@@ -163,7 +163,17 @@ Outcomes:
   `exited_during_start` with exit code and output tail; claim released.
   Typical causes surfaced in the hint: crash, missing/corrupt data or
   save, mod loader failure, DRM refusing to start outside its launcher,
-  anti-cheat rejecting a modified process, online login required.
+  anti-cheat rejecting a modified process, online login required. **Cause
+  class is `game` by the evidence-based default** (08-track-record.md): a
+  process GABS created and then observed exit is attributed to the workload.
+  GABS observes only the *first* process it creates and cannot reliably tell
+  a game binary from a user-owned wrapper/container launcher, so a
+  post-spawn exit is never re-attributed to the environment on the basis of
+  launch mode, target shape, or the status hook — none of those is cause
+  evidence. The wrapper/container stderr that would say *what* failed is
+  preserved verbatim in `outputTail`; the guidance tells the caller to read
+  it. (An OS **process-creation** failure — the child never started — is a
+  different outcome, `spawn_failed`, and stays `environment`.)
 - **Unobserved** — nothing observable when the budget expires (mostly URL
   modes: wrong app ID, game not installed, store updating the game first,
   a login/EULA dialog waiting on the desktop). Outcome `unobserved`: the
@@ -182,7 +192,10 @@ Outcomes:
   background poller.
 - **Stopped by hook** — status hook definitively reports stopped after
   spawn (e.g. container exited immediately): treated as
-  exited-during-start, with hook evidence plus captured output.
+  exited-during-start, with hook evidence plus captured output. The hook is
+  **liveness** evidence, not **cause** evidence, so this stays `game` by the
+  evidence-based default — the caller reads the captured output to see what
+  the wrapper reported.
 
 ## Stage 5 — Bridge attach
 
@@ -216,5 +229,30 @@ Existing `timeout`/`resetEndpoint` semantics preserved. Outcomes:
 | Steam re-exec drops context | adoption, delivery not verified | `adopted` warning, `started_bridge_pending` | environment | `steam_appid.txt`, Steam launch options, or wrapper |
 | Steam/Epic updating or dialog (URL modes) | nothing observable | `unobserved`, claim kept `starting` | environment | check desktop; re-check status |
 | Wrong app ID / not installed | nothing observable | `unobserved` | config; environment when proven | verify target in store |
-| Online server down | runs, no bridge or exits | `started_bridge_pending` / `exited_during_start` | environment | game-side issue; evidence attached |
-| Container image missing / name conflict | wrapper exits fast | `exited_during_start` + wrapper stderr | environment | stderr says exactly what |
+| Online server down | runs, no bridge or exits | `started_bridge_pending` / `exited_during_start` | pending / `game` on exit | game-side issue; read output tail |
+| Container image missing / name conflict | wrapper exits fast | `exited_during_start` + wrapper stderr in `outputTail` | `game` (evidence-based default) | stderr in output tail says exactly what; GABS cannot tell a wrapper exit from a game crash |
+
+### Why `exited_during_start` is always `game`, not a launch-mode guess
+
+A post-spawn `exited_during_start` is classified `game` whenever no stronger
+producer evidence exists, and no such evidence exists at the process boundary
+GABS controls. GABS observes only the *first* process it creates; it cannot
+reliably distinguish a game binary from a user-owned wrapper or container
+launcher, and neither the launch **mode** (`CustomCommand`, `SteamManaged`),
+the **target** shape, nor a **status-hook** "stopped" result is cause evidence
+— a `SteamManaged` or `CustomCommand` game that genuinely crashes exits exactly
+like a wrapper that failed. Two tempting signals were **rejected**:
+
+- A **launch-mode heuristic** (`CustomCommand`/`SteamManaged` → environment)
+  would misclassify the common case — a real game crash under those modes — as
+  an environment problem, sending agents to "fix the environment" for a bug
+  that is game-side. False attribution is worse than the honest default.
+- A **classification-only config flag** (e.g. `launchKind: container`) would
+  push a cause GABS cannot observe onto the user to declare, and drift from
+  reality the moment the same command is reused for a non-container target.
+
+The honest contract is the evidence-based default: attribute the exit to the
+workload, and surface the wrapper/container's own stderr verbatim in
+`outputTail` so the caller can read what actually failed. An OS
+process-**creation** failure — where the child never ran — is a distinct
+outcome (`spawn_failed`, `environment`) and is unaffected.

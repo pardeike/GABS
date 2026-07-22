@@ -105,17 +105,19 @@ func TestClassifyActionSucceededRunning(t *testing.T) {
 	}
 }
 
-func TestClassifyExitedWrapperVsGame(t *testing.T) {
-	// A bare crash on start is game class (design/08 "crash on start → game").
+func TestClassifyExitedIsAlwaysGame(t *testing.T) {
+	// exited_during_start is ALWAYS game — the evidence-based default (design/05
+	// F6 adjudication): GABS observes only the first process it created and
+	// cannot distinguish a game crash from a wrapper/container exit, so no
+	// evidence available at classification time flips it to environment.
 	if Classify("exited_during_start", ClassifyContext{}).Class != CauseGame {
 		t.Error("a bare crash on start is game class")
 	}
-	// A status hook merely reporting "stopped" is LIVENESS evidence, not
-	// cause evidence — a plain game with a status hook that crashes stays
-	// game-class (round 11 P2-5). Only a positive wrapper/container exit is
-	// environment.
-	if Classify("exited_during_start", ClassifyContext{WrapperExit: true}).Class != CauseEnvironment {
-		t.Error("a wrapper/container that exits (missing image, host failure) is environment class")
+	if Classify("exited_during_start", ClassifyContext{Proven: true}).Class != CauseGame {
+		t.Error("a proven context that exits is still game class — the exit is the workload's")
+	}
+	if Classify("exited_during_start", ClassifyContext{Proven: true, InputCombinationFresh: true, SuppliedInputs: []string{"scenario"}}).Class != CauseGame {
+		t.Error("an unproven input combination adjusts only the secondary note, never the class")
 	}
 }
 

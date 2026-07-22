@@ -23,17 +23,26 @@ type fakeController struct {
 	aliveThenDead  bool // report running on the first IsRunning check, dead after
 	isRunningCalls int
 	exitCode       int
+	mode           string
 	afterObs       func(pid int, startTime int64, spawnErr error)
 	beforeObs      func() error
 }
 
 func newExitBeforeStage4Controller() process.ControllerInterface {
-	return &fakeController{running: false, exitCode: 1}
+	return &fakeController{running: false, exitCode: 1, mode: "DirectPath"}
+}
+
+// newExitBeforeStage4ControllerMode is the mode-parameterized variant used to
+// prove exited_during_start is game-class regardless of launch mode (F6).
+func newExitBeforeStage4ControllerMode(mode string) func() process.ControllerInterface {
+	return func() process.ControllerInterface {
+		return &fakeController{running: false, exitCode: 1, mode: mode}
+	}
 }
 
 func newVerifiedThenDeathController() process.ControllerInterface {
 	// running for the Stage-4 verification, dead for the Stage-5 bridge wait.
-	return &fakeController{aliveThenDead: true, exitCode: 1}
+	return &fakeController{aliveThenDead: true, exitCode: 1, mode: "DirectPath"}
 }
 
 func (f *fakeController) Configure(spec process.LaunchSpec) error { return nil }
@@ -62,8 +71,13 @@ func (f *fakeController) IsRunning() bool {
 	}
 	return f.running
 }
-func (f *fakeController) GetPID() int                    { return deadFakePID }
-func (f *fakeController) GetLaunchMode() string          { return "DirectPath" }
+func (f *fakeController) GetPID() int { return deadFakePID }
+func (f *fakeController) GetLaunchMode() string {
+	if f.mode != "" {
+		return f.mode
+	}
+	return "DirectPath"
+}
 func (f *fakeController) GetStopProcessName() string     { return "" }
 func (f *fakeController) IsLauncherProcessRunning() bool { return false }
 func (f *fakeController) FinalEnvironment() []string     { return nil }

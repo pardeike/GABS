@@ -1274,7 +1274,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				if len(unobsErr.warnings) > 0 {
 					structured["startWarnings"] = unobsErr.warnings
 				}
-				s.finalizeStartFailure(structured, *game, hctx, "unobserved", false)
+				s.finalizeStartFailure(structured, *game, hctx, "unobserved")
 				addValidationWarnings(structured, validationWarnings)
 				addResolvedContext(structured, resolved)
 				return &ToolResult{
@@ -1298,15 +1298,15 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				if len(exitedErr.warnings) > 0 {
 					structured["startWarnings"] = exitedErr.warnings
 				}
-				// wrapperExit=false: a status hook reporting stopped is liveness
-				// evidence, not wrapper CAUSE evidence, so a crash stays game-
-				// class (round 11 P2-5). The hook evidence still enriches the
-				// hint above, just not the class.
-				s.finalizeStartFailure(structured, *game, hctx, "exited_during_start", false)
+				// exited_during_start is game-class by the evidence-based
+				// default (design/05 F6): GABS cannot tell a game crash from a
+				// wrapper/container exit at the first process it created, so the
+				// caller reads the captured output tail for the actual cause.
+				s.finalizeStartFailure(structured, *game, hctx, "exited_during_start")
 				addValidationWarnings(structured, validationWarnings)
 				addResolvedContext(structured, resolved)
 				return &ToolResult{
-					Content:           []Content{{Type: "text", Text: fmt.Sprintf("'%s' exited during start (exit code %d). Typical causes: crash, missing or corrupt data/save, mod loader failure, DRM refusing to run outside its launcher, anti-cheat rejecting a modified process, or a required online login. Output tail:\n%s", game.ID, exitedErr.exitCode, exitedErr.tail)}},
+					Content:           []Content{{Type: "text", Text: fmt.Sprintf("'%s' exited during start (exit code %d). This is attributed to the workload; read the output tail below for the exact cause — a game crash, missing/corrupt data or save, mod loader failure, DRM refusing to run outside its launcher, anti-cheat rejecting a modified process, a required online login, or (if this launch is a wrapper/container) the wrapper's own error. Output tail:\n%s", game.ID, exitedErr.exitCode, exitedErr.tail)}},
 					IsError:           true,
 					StructuredContent: structured,
 				}, nil
@@ -1342,7 +1342,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				structured := map[string]interface{}{
 					"code": "endpoint_unavailable", "gameId": game.ID, "detail": epErr.err.Error(),
 				}
-				s.finalizeStartFailure(structured, *game, hctx, "endpoint_unavailable", false)
+				s.finalizeStartFailure(structured, *game, hctx, "endpoint_unavailable")
 				return &ToolResult{
 					Content:           []Content{{Type: "text", Text: fmt.Sprintf("Cannot start %s: %v", game.ID, epErr)}},
 					IsError:           true,
@@ -1354,7 +1354,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				structured := map[string]interface{}{
 					"code": "spec_too_large", "part": sizeIssue.Part, "gameId": game.ID,
 				}
-				s.finalizeStartFailure(structured, *game, hctx, "spec_too_large", false)
+				s.finalizeStartFailure(structured, *game, hctx, "spec_too_large")
 				return &ToolResult{
 					Content:           []Content{{Type: "text", Text: fmt.Sprintf("Refusing to start %s: %s", game.ID, sizeIssue.Message)}},
 					IsError:           true,
@@ -1377,7 +1377,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				structured := map[string]interface{}{
 					"code": "spawn_failed", "gameId": game.ID, "osError": procErr.Err.Error(),
 				}
-				s.finalizeStartFailure(structured, *game, hctx, "spawn_failed", false)
+				s.finalizeStartFailure(structured, *game, hctx, "spawn_failed")
 				return &ToolResult{
 					Content:           []Content{{Type: "text", Text: fmt.Sprintf("Failed to start %s: %v", game.ID, err)}},
 					IsError:           true,
@@ -5122,19 +5122,18 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	// cleanup-path codes record here, immediately before the release.
 	failureRecorded := false
 	var pendingFailCode string
-	var pendingFailWrapperExit bool
-	recordFail := func(code string, wrapperExit bool) {
+	recordFail := func(code string) {
 		if failureRecorded || code == "" {
 			return
 		}
 		failureRecorded = true
-		s.recordTerminalStartFailure(game, hc, code, wrapperExit)
+		s.recordTerminalStartFailure(game, hc, code)
 	}
 	defer func() {
 		if !cleanupRuntimeState {
 			return
 		}
-		recordFail(pendingFailCode, pendingFailWrapperExit)
+		recordFail(pendingFailCode)
 		// Release only OUR claim: fenced by the launch + operation identity
 		// this start created — a cleanup that lost a race (its transition
 		// fenced out, its claim superseded) must never delete a successor
@@ -5331,11 +5330,14 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	exitedFailure := func(ev *process.LivenessEvidence) (*process.ProcessStartResult, error) {
 		// Record while the claim is still ours (round 10): some exited paths
 		// remove the claim right after this returns, so the fenced write must
-		// land here, not in the handler's post-release renderer. wrapperExit is
-		// false: a status hook reporting stopped is liveness evidence, not
-		// wrapper cause evidence, so a crash stays game-class (round 11 P2-5).
+		// land here, not in the handler's post-release renderer.
+		// exited_during_start is ALWAYS game (the evidence-based default,
+		// design/05 F6 adjudication): the status hook here is liveness, not
+		// cause — it only enriches the captured output (hookEvidence), never
+		// the class. GABS cannot tell a game crash from a wrapper/container
+		// exit at the first process it created.
 		hookStopped := ev != nil && ev.Source == process.LivenessSourceStatusHook
-		recordFail("exited_during_start", false)
+		recordFail("exited_during_start")
 		e := &exitedDuringStartError{
 			exitCode:            controller.ExitCode(),
 			tail:                controller.LaunchLogTail(16 * 1024),

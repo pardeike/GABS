@@ -551,19 +551,22 @@ contract, not a scratchpad.
       operation_in_progress/blocked_unknown_state; occupied persistence
       failure is blocked_unknown_state), and the detach s.mu/
       transition-lock inversion is removed)
-- [!] M2.10 History store + classifier + input-combination buckets +
+- [x] M2.10 History store + classifier + input-combination buckets +
       edit notice + causeClass/track-record rendering — spec: 08; tests:
       T-TRACK
-      (BLOCKED on the design/05:220 wrapper/container→environment bad-case
-      row: no producer fact distinguishes a fast-exiting container wrapper
-      from a game crash at classification time — Resolved/LaunchSpec carry no
-      chain/wrapper/container signal, and CustomCommand is indistinguishable
-      from a container launch. exited_during_start therefore defaults to game
-      in production; the wrapper→environment path is classifier-ready
-      (ClassifyContext.WrapperExit) and unit-tested but UNREACHABLE until a
-      real producer fact is wired. Marked [!] per protocol §18 — an
-      unresolved deviation is [!], not [~] — round 12 F6. All other round-12
-      findings are closed; see the round-12 Deviations entry)
+      (F6 RESOLVED by reviewer adjudication: exited_during_start is `game` by
+      the evidence-based default — a post-spawn exit is attributed to the
+      workload because GABS observes only the first process it created and
+      cannot distinguish a game binary from a user-owned wrapper/container
+      launcher; launch mode, target shape, and status-hook results are not
+      cause evidence. design/05:220 and its dependents were amended to that
+      implementable contract, the launch-mode heuristic and classification-only
+      config flag were rejected (recorded in the round-12 Deviations), the
+      ClassifyContext.WrapperExit seam and its unit-only branch were removed,
+      and production tests prove DirectPath/CustomCommand/SteamManaged and the
+      status-hook render path all classify game. spawn_failed (process-creation
+      failure) stays environment; wrapper stderr surfaces in outputTail with
+      guidance to read it)
       (internal/process/history.go + classifier.go: a per-game 0600
       atomic history.json beside runtime.json, every read-modify-write
       under the per-game transition lock so a server delivery callback
@@ -698,17 +701,26 @@ contract, not a scratchpad.
 
 ## Deviations
 
-- 2026-07-22, M2.10, round 12 F6, design/05:220 (UNRESOLVED — blocks M2.10 at
-  [!]): the bad-case map requires a fast-exiting container/wrapper to classify
-  environment, but no producer fact distinguishes it from a game crash at
-  classification time — Resolved/LaunchSpec expose no chain-length, re-exec, or
-  container marker, and CustomCommand can equally run a game or a container.
-  exited_during_start defaults to game in production (design/08 "crash on start
-  → game"); the wrapper→environment path exists in the classifier
-  (ClassifyContext.WrapperExit) and is unit-tested but is unreachable until a
-  real producer fact is wired (a launch-chain/container flag on the resolved
-  spec). Recorded as unresolved; M2.10 stays [!] per protocol §18 until either
-  the signal is wired or the design drops the row.
+- 2026-07-22, M2.10, round 12 F6, design/05:220 (RESOLVED by reviewer
+  adjudication — design amended): the bad-case map's fast-exiting-wrapper →
+  environment row was not implementable — no producer fact distinguishes a
+  container/wrapper exit from a game crash at the first process GABS creates,
+  and Resolved/LaunchSpec expose no chain/container marker. Adjudicated
+  contract: a post-spawn exited_during_start is `game` by the evidence-based
+  default; launch mode, target shape, and status-hook "stopped" results are NOT
+  cause evidence; the wrapper's stderr is surfaced in outputTail and the caller
+  is told to read it; an OS process-CREATION failure stays spawn_failed →
+  environment. design/05 (bad-case rows + a new rationale section), design/30
+  (T-TRACK cells) were amended; the ClassifyContext.WrapperExit seam and its
+  unit-only branch were removed and replaced by production tests over
+  DirectPath/CustomCommand/SteamManaged + the status-hook render path. Two
+  alternatives were REJECTED and are recorded so they are not re-proposed: (1) a
+  launch-mode heuristic (CustomCommand/SteamManaged → environment) would
+  misclassify the common real game crash under those modes as an environment
+  problem — false attribution is worse than the honest default; (2) a
+  classification-only config flag (launchKind: container) would push a cause
+  GABS cannot observe onto the user to declare and would drift the moment the
+  command is reused for a non-container target. M2.10 → [x].
 - 2026-07-22, M2.10, round 12 F9 (idempotency scope): the Stage-4 workloadStart
   credit is now idempotent by launchID (CreditedLaunchIDs on the entry), because
   its semantics are exactly-once-per-launch and the history write precedes the

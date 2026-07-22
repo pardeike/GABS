@@ -23,6 +23,15 @@ var steamResolveExecutable = func(appID string) (string, error) {
 	return app.Executable, nil
 }
 
+// SetSteamResolveExecutableForTesting swaps the SteamManaged resolvability
+// probe so a test can pin a resolved executable without a real Steam install
+// (round 12 F6 production tests). Returns a restore func.
+func SetSteamResolveExecutableForTesting(fn func(appID string) (string, error)) func() {
+	prev := steamResolveExecutable
+	steamResolveExecutable = fn
+	return func() { steamResolveExecutable = prev }
+}
+
 // SpecIssue is one Stage 1 static-resolvability failure: the config points
 // at something that does not resolve on this machine. Maps to the stable
 // code launch_spec_unresolvable with both the JSON path and the resolved

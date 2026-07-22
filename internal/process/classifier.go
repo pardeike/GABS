@@ -18,15 +18,6 @@ type ClassifyContext struct {
 	// combination has never been proven on an otherwise-proven context.
 	InputCombinationFresh bool
 	SuppliedInputs        []string
-	// WrapperExit is CAUSE evidence for exited_during_start: the exit was
-	// produced by a wrapper/container in the launch chain (a missing image,
-	// name conflict, or host failure) rather than the game process itself —
-	// environment-class. A status hook merely reporting "stopped" is LIVENESS
-	// evidence, not cause evidence (round 11 P2-5), so it does NOT set this:
-	// a plain game with a status hook that crashes stays game-class. With no
-	// wrapper signal, exited_during_start defaults to game (design/08's
-	// "crash on start → game").
-	WrapperExit bool
 }
 
 // Classification is a cause class plus an optional secondary note (the
@@ -80,15 +71,15 @@ func Classify(code string, ctx ClassifyContext) Classification {
 		"action_failed", "action_timed_out":
 		return Classification{Class: CauseEnvironment}
 
-	// exited_during_start defaults to game (design/08: "crash on start →
-	// game"). It is environment ONLY with positive wrapper/container CAUSE
-	// evidence — the wrapper itself exited (missing image, host failure). A
-	// status hook reporting "stopped" is liveness, not cause, so it never
-	// flips a plain game crash to environment (round 11 P2-5).
+	// exited_during_start is ALWAYS game — the evidence-based default
+	// (design/05 §"Why exited_during_start is always game"). GABS observes
+	// only the first process it creates and cannot distinguish a game binary
+	// from a user-owned wrapper/container launcher, so launch mode, target
+	// shape, and a status-hook "stopped" result are NOT cause evidence; a
+	// post-spawn exit is attributed to the workload, and the wrapper stderr
+	// that says what failed is surfaced in outputTail. (An OS process-CREATION
+	// failure is a different outcome, spawn_failed → environment.)
 	case "exited_during_start":
-		if ctx.WrapperExit {
-			return withInputNote(Classification{Class: CauseEnvironment}, ctx)
-		}
 		return withInputNote(Classification{Class: CauseGame}, ctx)
 
 	// Proof-adjusted (design/05 dual-class rows): proven → environment
