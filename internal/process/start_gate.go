@@ -86,6 +86,15 @@ func GateStart(g StartGate) (*StartGateResult, error) {
 				Message: fmt.Sprintf("runtime claim for %s is unreadable: %v; inspect it or run repair --forget-runtime", g.GameID, err),
 			}, Warnings: warnings}, nil
 		}
+		if claim != nil && claim.SchemaVersion < RuntimeSchemaVersion {
+			// A start's duplicate check is a lifecycle touch: the legacy
+			// claim normalizes first, so it is evaluated — and fenced —
+			// like any current claim (design/07). On failure the raw
+			// claim still gets the degraded legacy evaluation below.
+			if normalized, nerr := NormalizeLegacyClaim(g.GameID, g.ConfigDir, g.Spec.Mode, g.Spec.ConfigRevision); nerr == nil {
+				claim = normalized
+			}
+		}
 		if claim != nil {
 			refusal, ws := gateExistingClaim(g, claim, now)
 			warnings = append(warnings, ws...)

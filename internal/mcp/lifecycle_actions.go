@@ -202,10 +202,10 @@ func (s *Server) releaseGameArtifacts(gameID string, expectedController process.
 }
 
 // lifecycleActionResult routes games_stop/games_kill through the design/06
-// pipeline when a current-schema claim exists. It returns nil when the
-// legacy path should handle the call (no claim, or a pre-profile claim that
-// M2.8's normalization has not touched yet).
-func (s *Server) lifecycleActionResult(game config.GameConfig, action string) *ToolResult {
+// pipeline. A pre-profile claim is fully normalized first — stop/kill are
+// lifecycle touches (design/07). It returns nil only when no claim exists
+// at all (the in-memory legacy path handles that).
+func (s *Server) lifecycleActionResult(game config.GameConfig, action, configRevision string) *ToolResult {
 	claim, err := process.LoadRuntimeState(game.ID, s.configDir)
 	if err != nil {
 		return &ToolResult{
@@ -213,8 +213,18 @@ func (s *Server) lifecycleActionResult(game config.GameConfig, action string) *T
 			IsError: true,
 		}
 	}
-	if claim == nil || claim.SchemaVersion < process.RuntimeSchemaVersion {
+	if claim == nil {
 		return nil
+	}
+	if claim.SchemaVersion < process.RuntimeSchemaVersion {
+		normalized, nerr := process.NormalizeLegacyClaim(game.ID, s.configDir, game.LaunchMode, configRevision)
+		if nerr != nil {
+			return &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("The pre-upgrade runtime claim for '%s' could not be normalized: %v. Retry, or use 'gabs games repair %s --forget-runtime' if the game is provably gone.", game.ID, nerr, game.ID)}},
+				IsError: true,
+			}
+		}
+		claim = normalized
 	}
 
 	// Capture the exact in-memory instances that belong to the launch being

@@ -574,8 +574,9 @@ func TestMultiGameStatusProbesRunConcurrently(t *testing.T) {
 	}
 }
 
-// fakeGABPServer accepts one GABP connection and answers the handshake and
-// any follow-up requests generically until the connection closes.
+// fakeGABPServer accepts GABP connections (multiple, sequentially) and
+// answers the handshake and any follow-up requests generically until each
+// connection closes.
 func fakeGABPServer(t *testing.T, agentID string) (addr string, closeConn func()) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -584,13 +585,9 @@ func fakeGABPServer(t *testing.T, agentID string) (addr string, closeConn func()
 	}
 	t.Cleanup(func() { listener.Close() })
 
-	connCh := make(chan net.Conn, 1)
-	go func() {
-		conn, err := listener.Accept()
-		if err != nil {
-			return
-		}
-		connCh <- conn
+	connCh := make(chan net.Conn, 8)
+	serve := func(conn net.Conn) {
+		defer conn.Close()
 		reader := util.NewLSPFrameReader(conn)
 		writer := util.NewLSPFrameWriter(conn)
 		for {
@@ -617,14 +614,30 @@ func fakeGABPServer(t *testing.T, agentID string) (addr string, closeConn func()
 				return
 			}
 		}
+	}
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			select {
+			case connCh <- conn:
+			default:
+			}
+			go serve(conn)
+		}
 	}()
 
 	return listener.Addr().String(), func() {
 		listener.Close()
-		select {
-		case conn := <-connCh:
-			conn.Close()
-		case <-time.After(2 * time.Second):
+		for {
+			select {
+			case conn := <-connCh:
+				conn.Close()
+			case <-time.After(500 * time.Millisecond):
+				return
+			}
 		}
 	}
 }

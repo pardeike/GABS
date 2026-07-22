@@ -395,8 +395,37 @@ contract, not a scratchpad.
       replacement, design/06). Recovered claims render truthfully in
       games_status: normalized phase, interrupted lastActionResult, no
       operation)
-- [ ] M2.8 Legacy claim migration + full normalization — spec: 07;
+- [x] M2.8 Legacy claim migration + full normalization — spec: 07;
       tests: T-RT
+      (NormalizeLegacyClaim in internal/process/legacy_migration.go: the
+      first lifecycle touch — games_connect, games_stop/games_kill via
+      the pipeline router, or a start's duplicate check in GateStart;
+      never read-only status — fully normalizes a schema-0 claim under
+      the transition lock: schema marker stamped, launch ID + generation
+      minted (fencing valid from then on), phase active + unprofiled +
+      source gabs, built-in fallback pinned from the legacy claim's own
+      stopProcessName and PID with a zero fingerprint kept as weak
+      evidence, appliedLaunchInputsState unavailable (a pre-profile
+      launch's inputs are unknowable — same honesty rule as external
+      snapshots), and — the single recorded exception to never-consult-
+      config — launch mode + PID role from the current entry, with
+      normalizedFromLegacy + the revision recorded; idempotent, a
+      marker-stamped claim is returned untouched. The endpoint
+      migration: bridge.json is now structurally diagnostic-only for
+      marker-stamped claims — resolveConnectBridgeEndpoint refuses a
+      fresh pre-endpoint claim ("no attachable endpoint") and an
+      external snapshot ("attachment unavailable", design/07) instead
+      of falling through to the file; the sole live-attach read remains
+      the pre-upgrade path (schema-0, or normalizedFromLegacy with no
+      endpoint yet — the strict lacks-the-marker reading would strand a
+      legacy launch whose bridge was down at first touch, since
+      normalization stamps the marker on that same touch), validated by
+      actually connecting, persisted into the claim exactly once
+      (proven by corrupting bridge.json before a successful reconnect),
+      and followed by attachment-record publication now that the claim
+      carries the credential that authenticated. Degraded
+      status-before-normalization renders no newer-schema-only fields
+      and never normalizes, tested)
 - [ ] M2.9 Expected-context digests + welcome `observed` parsing +
       per-channel aggregation matrix + contextDelivery persistence —
       spec: 03, 07; tests: T-DELIV

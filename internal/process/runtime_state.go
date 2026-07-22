@@ -161,6 +161,11 @@ type RuntimeState struct {
 	PIDStartTime  int64  `json:"pidStartTime,omitempty"`
 	Adopted       bool   `json:"adopted,omitempty"`
 
+	// NormalizedFromLegacy marks a claim that entered the current schema
+	// via the one-time legacy normalization (design/07) — the only claims
+	// for which the legacy bridge.json endpoint may still be migrated.
+	NormalizedFromLegacy bool `json:"normalizedFromLegacy,omitempty"`
+
 	Profile           string   `json:"profile,omitempty"`
 	AppliedInputNames []string `json:"appliedInputNames,omitempty"` // names only, never values
 	// AppliedInputsState distinguishes "known to have used no inputs"

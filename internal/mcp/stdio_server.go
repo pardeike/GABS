@@ -1341,7 +1341,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		if res := strictArgs(args, "gameId"); res != nil {
 			return res, nil
 		}
-		gamesConfig, _, cfgErr := s.currentGamesConfig()
+		gamesConfig, configRevision, cfgErr := s.currentGamesConfig()
 		if gamesConfig == nil {
 			return configUnavailableResult(cfgErr), nil
 		}
@@ -1358,10 +1358,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			return resolveFail, nil
 		}
 
-		// Current-schema claims go through the design/06 pipeline; the
-		// legacy path below remains for claims M2.8 has not normalized and
-		// for in-memory-only tracking.
-		if res := s.lifecycleActionResult(*game, process.OperationActionStop); res != nil {
+		// Any persisted claim goes through the design/06 pipeline (legacy
+		// claims normalize first); the path below remains for
+		// in-memory-only tracking with no claim at all.
+		if res := s.lifecycleActionResult(*game, process.OperationActionStop, configRevision); res != nil {
 			return res, nil
 		}
 
@@ -1405,7 +1405,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		if res := strictArgs(args, "gameId"); res != nil {
 			return res, nil
 		}
-		gamesConfig, _, cfgErr := s.currentGamesConfig()
+		gamesConfig, configRevision, cfgErr := s.currentGamesConfig()
 		if gamesConfig == nil {
 			return configUnavailableResult(cfgErr), nil
 		}
@@ -1422,7 +1422,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			return resolveFail, nil
 		}
 
-		if res := s.lifecycleActionResult(*game, process.OperationActionKill); res != nil {
+		if res := s.lifecycleActionResult(*game, process.OperationActionKill, configRevision); res != nil {
 			return res, nil
 		}
 
@@ -2340,7 +2340,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		if res := strictArgs(args, "forceTakeover", "gameId", "timeout"); res != nil {
 			return res, nil
 		}
-		gamesConfig, _, cfgErr := s.currentGamesConfig()
+		gamesConfig, configRevision, cfgErr := s.currentGamesConfig()
 		if gamesConfig == nil {
 			return configUnavailableResult(cfgErr), nil
 		}
@@ -2400,6 +2400,18 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to inspect shared runtime state for '%s': %v", game.ID, runtimeErr)}},
 				IsError: true,
 			}, nil
+		}
+		if runtimeState != nil && runtimeState.SchemaVersion < process.RuntimeSchemaVersion {
+			// games_connect is a lifecycle touch: the pre-upgrade claim
+			// normalizes fully before anything acts on it (design/07).
+			normalized, nerr := process.NormalizeLegacyClaim(game.ID, s.configDir, game.LaunchMode, configRevision)
+			if nerr != nil {
+				return &ToolResult{
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("The pre-upgrade runtime claim for '%s' could not be normalized: %v", game.ID, nerr)}},
+					IsError: true,
+				}, nil
+			}
+			runtimeState = normalized
 		}
 
 		hadForeignOwner := process.RuntimeStateOwnedByAnotherLiveOwner(runtimeState, os.Getpid(), s.instanceID)
@@ -2486,6 +2498,38 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to connect to GABP server for '%s' on port %d after %s: %v. Make sure the GABP bridge is loaded.%s", game.ID, port, connectTimeout.Round(time.Second), err, disconnectNote)}},
 				IsError: true,
 			}, nil
+		}
+
+		if runtimeState != nil && runtimeState.NormalizedFromLegacy && runtimeState.Endpoint == nil &&
+			endpoint.Source == "internal-bridge-file" {
+			// The pre-upgrade migration (design/07): the endpoint this live
+			// connection just validated is persisted into the claim exactly
+			// once — bridge.json returns to diagnostic-only status — and the
+			// attachment record is published now that the claim carries the
+			// credential that authenticated.
+			if _, merr := process.FencedTransition(game.ID, s.configDir, runtimeState.LaunchID, "", func(st *process.RuntimeState) error {
+				if st.Endpoint != nil {
+					return process.ErrFencingViolation // already migrated meanwhile
+				}
+				st.Endpoint = &process.RuntimeEndpoint{Port: port, Token: token}
+				return nil
+			}); merr != nil {
+				if !errors.Is(merr, process.ErrFencingViolation) && !errors.Is(merr, process.ErrNoRuntimeClaim) {
+					s.log.Warnw("failed to migrate legacy bridge endpoint into the claim", "gameId", game.ID, "error", merr)
+				}
+			} else {
+				s.mu.RLock()
+				migratedClient := s.gabpClients[game.ID]
+				s.mu.RUnlock()
+				if migratedClient != nil {
+					s.recordBridgeAttachment(game.ID, port, token, func() bool {
+						s.mu.RLock()
+						cur := s.gabpClients[game.ID]
+						s.mu.RUnlock()
+						return cur == migratedClient && migratedClient.IsConnected()
+					})
+				}
+			}
 		}
 
 		toolCount := len(s.getGameSpecificTools(game.ID))
@@ -4369,6 +4413,19 @@ func (s *Server) resolveConnectBridgeEndpoint(game config.GameConfig, runtimeSta
 
 	if readableProcessEnvLacksAttachableBridgeEndpoint(game, processEnv) {
 		return bridgeEndpoint{}, fmt.Errorf("%s", processBridgeEnvironmentMissingMessage(game, processEnv))
+	}
+
+	// bridge.json is diagnostic-only for marker-stamped claims: the sole
+	// live-attach read is the pre-upgrade migration path (design/07) — a
+	// claim that lacks the marker, or one normalized from legacy whose
+	// endpoint was never migrated. A fresh pre-endpoint claim and an
+	// external snapshot never enter it.
+	if runtimeState != nil && runtimeState.SchemaVersion >= process.RuntimeSchemaVersion &&
+		!(runtimeState.NormalizedFromLegacy && runtimeState.Endpoint == nil) {
+		if runtimeState.Source == process.SourceExternal {
+			return bridgeEndpoint{}, fmt.Errorf("attachment unavailable: '%s' is an externally started instance and never received this GABS's bridge environment; status/stop/kill remain available", game.ID)
+		}
+		return bridgeEndpoint{}, fmt.Errorf("the runtime claim for '%s' carries no attachable endpoint yet; if a start is in flight, re-check games_status", game.ID)
 	}
 
 	_, port, token, err := config.ReadBridgeJSON(game.ID, s.configDir)
