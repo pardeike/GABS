@@ -163,6 +163,12 @@ func (c *ServerGABPConnector) AttemptConnection(ctx context.Context, gameID stri
 		return &supersededConnectionError{gameID: gameID}
 	}
 
+	// The welcome-time delivery report is evaluated against the
+	// spawn-pinned digests and persisted under the published connection
+	// identity (design/03; delivery callbacks fence on launchID +
+	// connectionID per design/06). A missing report persists as unknown.
+	c.server.recordContextDelivery(gameID, client.ObservedContext())
+
 	if !c.mirrorSynchronously {
 		c.startAsyncToolMirroring(gameID, client)
 		return nil

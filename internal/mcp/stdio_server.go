@@ -2606,6 +2606,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				return failMigration("operation_in_progress", fmt.Sprintf("The migrated bridge attachment for '%s' could not be published (%v); the connection was closed — re-check games_status.", game.ID, perr))
 			}
 			if migratedClient != nil {
+				s.recordContextDelivery(game.ID, migratedClient.ObservedContext())
+			}
+			if migratedClient != nil {
 				if merr := connector.MirrorConnectedClient(connectCtx, game.ID, migratedClient); merr != nil {
 					s.HandleUnexpectedGABPDisconnect(game.ID, migratedClient, merr)
 					s.restoreRuntimeOwnerAfterFailedConnect(game.ID, runtimeStateBeforeClaim)
@@ -4946,9 +4949,15 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 
 	// The claim carries the endpoint (port + per-launch token): it is the
 	// normal attachment source for games_connect after a CLI start or a
-	// server restart (design/07).
+	// server restart (design/07). The expected-context digests are pinned
+	// in the same transition — non-reversible salted hashes of the argv
+	// payload, canonical cwd, and forwarded env values (design/03), so a
+	// delayed welcome report verifies against what was actually spawned,
+	// never current config.
+	spawnDigests := computeSpawnDigests(launchSpec, controller)
 	if _, err := process.FencedTransition(game.ID, s.configDir, launchID, opID, func(st *process.RuntimeState) error {
 		st.Endpoint = &process.RuntimeEndpoint{Port: port, Token: token}
+		st.ContextDigests = spawnDigests
 		return nil
 	}); err != nil {
 		return nil, fmt.Errorf("failed to persist endpoint into runtime claim for '%s': %w", game.ID, err)

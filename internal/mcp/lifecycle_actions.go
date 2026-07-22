@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/pardeike/gabs/internal/config"
@@ -505,6 +507,16 @@ func attachRuntimeLifecycle(statusItem map[string]interface{}, rs *process.Runti
 			"deadline":         op.Deadline.Format(time.RFC3339),
 		}
 	}
+	if cd := rs.ContextDelivery; cd != nil {
+		entry := map[string]interface{}{"overall": cd.Overall}
+		if len(cd.Channels) > 0 {
+			entry["channels"] = cd.Channels
+		}
+		if len(cd.Reasons) > 0 {
+			entry["reasons"] = cd.Reasons
+		}
+		statusItem["contextDelivery"] = entry
+	}
 	if lar := rs.LastActionResult; lar != nil {
 		entry := map[string]interface{}{
 			"action":    lar.Action,
@@ -575,5 +587,97 @@ func attachStatusEvidence(statusItem map[string]interface{}, ev *process.Livenes
 	statusItem["evidence"] = entry
 	if len(ev.Warnings) > 0 {
 		statusItem["statusWarnings"] = ev.Warnings
+	}
+}
+
+// computeSpawnDigests pins the expected launch context from the fully
+// materialized spawn state (design/03): the argv payload is the resolved
+// argument list (argv[0] excluded by construction), the cwd is the
+// effective working directory, and the env values are exactly the names
+// the wrapper contract forwards (GABS_FORWARD_ENV, falling back to the
+// managed GABS_*/GABP_* variables for legacy specs).
+func computeSpawnDigests(spec process.LaunchSpec, controller process.ControllerInterface) *process.RuntimeContextDigests {
+	finalEnv := map[string]string{}
+	for _, kv := range controller.FinalEnvironment() {
+		if i := strings.IndexByte(kv, '='); i > 0 {
+			finalEnv[kv[:i]] = kv[i+1:]
+		}
+	}
+
+	forward := map[string]string{}
+	if names := strings.TrimSpace(finalEnv["GABS_FORWARD_ENV"]); names != "" {
+		for _, n := range strings.Split(names, ",") {
+			n = strings.TrimSpace(n)
+			if n == "" {
+				continue
+			}
+			if v, ok := finalEnv[n]; ok {
+				forward[n] = v
+			}
+		}
+	} else {
+		for k, v := range finalEnv {
+			if strings.HasPrefix(k, "GABS_") || strings.HasPrefix(k, "GABP_") {
+				forward[k] = v
+			}
+		}
+	}
+
+	var absent []string
+	if names := strings.TrimSpace(finalEnv["GABS_ABSENT_ENV"]); names != "" {
+		for _, n := range strings.Split(names, ",") {
+			if n = strings.TrimSpace(n); n != "" {
+				absent = append(absent, n)
+			}
+		}
+	}
+
+	cwd := spec.WorkingDir
+	unverifiable := false
+	switch {
+	case cwd == "":
+		if wd, err := os.Getwd(); err == nil {
+			cwd = wd
+		} else {
+			unverifiable = true
+		}
+	case !filepath.IsAbs(cwd):
+		// The legacy relative workingDir: incomparable by contract
+		// (design/03) — unverifiable, never a guessed digest.
+		unverifiable = true
+	}
+
+	digests, err := process.ComputeContextDigests(spec.Args, cwd, unverifiable, forward, absent)
+	if err != nil {
+		return nil
+	}
+	return digests
+}
+
+// recordContextDelivery evaluates the welcome-time observation against the
+// spawn-pinned digests and persists the verdict, fenced by the launch AND
+// the current connection identity (design/06: delivery callbacks validate
+// launchID + connectionID) — a report from an old connection can never
+// stamp a verdict onto a newer launch. A nil observation is itself an
+// observation: an old bridge yields overall unknown, persisted.
+func (s *Server) recordContextDelivery(gameID string, obs *gabp.ObservedContext) {
+	s.mu.RLock()
+	ref, ok := s.bridgeAttachments[gameID]
+	s.mu.RUnlock()
+	if !ok {
+		return // no published attachment: nothing to attribute the report to
+	}
+	var pobs *process.ObservedContext
+	if obs != nil {
+		pobs = &process.ObservedContext{Argv: obs.Argv, Cwd: obs.Cwd, Env: obs.Env, Absent: obs.Absent}
+	}
+	if _, err := process.FencedTransition(gameID, s.configDir, ref.launchID, "", func(st *process.RuntimeState) error {
+		if st.Attachment == nil || st.Attachment.ConnectionID != ref.connectionID {
+			return process.ErrFencingViolation
+		}
+		st.ContextDelivery = process.EvaluateContextDelivery(st.ContextDigests, pobs)
+		return nil
+	}); err != nil && !errors.Is(err, process.ErrFencingViolation) && !errors.Is(err, process.ErrNoRuntimeClaim) {
+		s.log.Warnw("failed to persist context delivery verdict", "gameId", gameID, "error", err)
 	}
 }

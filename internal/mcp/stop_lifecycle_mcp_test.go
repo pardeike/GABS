@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/pardeike/gabs/internal/config"
-	"github.com/pardeike/gabs/internal/gabp"
 	"github.com/pardeike/gabs/internal/launch"
 	"github.com/pardeike/gabs/internal/process"
 	"github.com/pardeike/gabs/internal/util"
@@ -634,12 +633,22 @@ func TestConnectorRefusesStaleCredentialBeforeDialing(t *testing.T) {
 // answers the handshake and any follow-up requests generically until each
 // connection closes.
 func fakeGABPServer(t *testing.T, agentID string) (addr string, closeConn func()) {
-	return fakeGABPServerWithHello(t, agentID, nil)
+	return fakeGABPServerFull(t, agentID, nil, nil)
+}
+
+func fakeGABPServerWithObserved(t *testing.T, agentID string, observed map[string]interface{}) (addr string, closeConn func()) {
+	return fakeGABPServerFull(t, agentID, nil, observed)
 }
 
 // fakeGABPServerWithHello lets a test interleave work (e.g. replacing the
 // runtime claim) at the exact moment the handshake arrives.
 func fakeGABPServerWithHello(t *testing.T, agentID string, onHello func()) (addr string, closeConn func()) {
+	return fakeGABPServerFull(t, agentID, onHello, nil)
+}
+
+// fakeGABPServerFull combines the hello hook with an optional welcome-time
+// observed delivery report (design/03 wire shape).
+func fakeGABPServerFull(t *testing.T, agentID string, onHello func(), observed map[string]interface{}) (addr string, closeConn func()) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -669,11 +678,15 @@ func fakeGABPServerWithHello(t *testing.T, agentID string, onHello func()) (addr
 				if onHello != nil {
 					onHello()
 				}
-				result = gabp.SessionWelcomeResult{
-					AgentID:       agentID,
-					Capabilities:  gabp.Capabilities{Methods: []string{"tools/list"}},
-					SchemaVersion: "1.0",
+				welcome := map[string]interface{}{
+					"agentId":       agentID,
+					"capabilities":  map[string]interface{}{"methods": []string{"tools/list"}},
+					"schemaVersion": "1.0",
 				}
+				if observed != nil {
+					welcome["observed"] = observed
+				}
+				result = welcome
 			}
 			if err := writer.WriteJSON(util.NewGABPResponse(request.ID, result)); err != nil {
 				return

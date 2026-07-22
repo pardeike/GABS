@@ -124,6 +124,12 @@ type RuntimeContextDigests struct {
 	ArgvSHA256 string            `json:"argvSha256,omitempty"`
 	CwdSHA256  string            `json:"cwdSha256,omitempty"`
 	EnvSHA256  map[string]string `json:"envSha256,omitempty"`
+	// AbsentEnvNames pins the GABS_ABSENT_ENV names (never values) for the
+	// isolation check; CwdUnverifiable marks the contract-level
+	// incomparable case (legacy relative workingDir) so verification
+	// reports unverifiable instead of a false verdict (design/03).
+	AbsentEnvNames  []string `json:"absentEnvNames,omitempty"`
+	CwdUnverifiable bool     `json:"cwdUnverifiable,omitempty"`
 }
 
 // RuntimeContextDelivery is the persisted per-launch delivery verdict so

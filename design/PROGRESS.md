@@ -488,9 +488,41 @@ contract, not a scratchpad.
       with "attachment unavailable" — checked before any process-
       environment inspection. Degraded status-before-normalization
       renders no newer-schema-only fields and never normalizes, tested)
-- [ ] M2.9 Expected-context digests + welcome `observed` parsing +
+- [x] M2.9 Expected-context digests + welcome `observed` parsing +
       per-channel aggregation matrix + contextDelivery persistence —
       spec: 03, 07; tests: T-DELIV
+      (ComputeContextDigests/EvaluateContextDelivery in
+      internal/process/context_delivery.go: per-launch random salt,
+      salted SHA-256 of the argv payload (argv[0] excluded — element
+      zero legitimately differs across hops), the platform-canonical
+      cwd (absolute, symlink-resolved, case/separator-folded on
+      Windows; canonicalization failure on either side is unknown,
+      never a false mismatch), and each forwarded env value; the
+      GABS_ABSENT_ENV names (never values) ride along for the
+      isolation check, and cwdUnverifiable marks the one contract-
+      level incomparable case (legacy relative workingDir) — both
+      additive digest fields, same honesty rule as detail. Pinned at
+      spawn in the same fenced transition as the endpoint, with the
+      forward set taken from the final environment's own
+      GABS_FORWARD_ENV (managed-prefix fallback for legacy specs) —
+      verification compares against what was actually spawned, never
+      current config, proven by a restart+fresh-server test. The gabp
+      client parses the optional backward-compatible welcome `observed`
+      field ({argv, cwd, env, absent}) — raw values are hashed locally,
+      compared, and discarded. The four channels (argv, cwd,
+      managedEnv, contextEnv) aggregate by the pinned matrix, every
+      row tested: no observed → all-unknown overall unknown (an old
+      bridge never reads as partial); dropped context key → channel
+      unknown, overall partial with the managed channel still
+      verified; wrong value and reintroduced absent name → mismatched
+      (isolation violation named per key); unreported absence and
+      omitted env lists → unknown; unverifiable cwd caps overall at
+      partial; only-unknown/unverifiable → unknown. The verdict
+      persists via a delivery callback fenced by launchID + the
+      published connectionID (design/06) in both the ordinary
+      connector path and the migration flow, and games_status renders
+      the persisted verdict without re-deriving. deliveriesVerified
+      counting is M2.10's history store)
 - [ ] M2.10 History store + classifier + input-combination buckets +
       edit notice + causeClass/track-record rendering — spec: 08; tests:
       T-TRACK

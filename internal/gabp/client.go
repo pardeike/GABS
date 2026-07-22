@@ -26,6 +26,7 @@ type Client struct {
 	reader         *util.LSPFrameReader
 	token          string
 	agentId        string
+	observed       *ObservedContext
 	capabilities   Capabilities
 	pendingReqs    map[string]chan *util.GABPMessage
 	mu             sync.RWMutex
@@ -196,9 +197,50 @@ func (c *Client) handshakeWithTimeout(timeout time.Duration) error {
 
 	c.agentId = welcome.AgentID
 	c.capabilities = welcome.Capabilities
+	c.observed = parseObservedContext(result)
 
-	c.log.Infow("GABP handshake complete", "agentId", c.agentId, "methods", len(c.capabilities.Methods))
+	c.log.Infow("GABP handshake complete", "agentId", c.agentId, "methods", len(c.capabilities.Methods), "deliveryReport", c.observed != nil)
 	return nil
+}
+
+// ObservedContext is the optional, backward-compatible welcome-time
+// delivery report (design/03): the raw values the bridge observed inside
+// the game process. Env carries the values of the keys named in
+// GABS_FORWARD_ENV; Absent lists the GABS_ABSENT_ENV names the bridge
+// confirms absent. GABS hashes locally, compares, and discards — the raw
+// values never persist.
+type ObservedContext struct {
+	Argv   []string          `json:"argv,omitempty"`
+	Cwd    string            `json:"cwd,omitempty"`
+	Env    map[string]string `json:"env,omitempty"`
+	Absent []string          `json:"absent,omitempty"`
+}
+
+// parseObservedContext extracts the optional `observed` field from the raw
+// welcome result. Older bridges omit it entirely — nil, never an empty
+// report (the aggregation matrix distinguishes the two, design/03).
+func parseObservedContext(result interface{}) *ObservedContext {
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	raw, exists := resultMap["observed"]
+	if !exists || raw == nil {
+		return nil
+	}
+	var obs ObservedContext
+	if err := mapToStruct(raw, &obs); err != nil {
+		return nil
+	}
+	return &obs
+}
+
+// ObservedContext returns the welcome-time delivery report, or nil when the
+// bridge reported none.
+func (c *Client) ObservedContext() *ObservedContext {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.observed
 }
 
 func timeoutFromContextOrDefault(ctx context.Context, fallback time.Duration) time.Duration {
