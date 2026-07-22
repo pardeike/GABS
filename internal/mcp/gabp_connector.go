@@ -19,6 +19,19 @@ type ServerGABPConnector struct {
 	backoffMax          time.Duration
 	mirrorSynchronously bool
 	asyncMirrorDelay    time.Duration
+	// authenticateOnly connects and handshakes but neither publishes an
+	// attachment nor mirrors tools — the legacy migration validation mode:
+	// the connect handler persists the validated endpoint through the
+	// minted launch fence, publishes, and only then exposes tools.
+	authenticateOnly bool
+}
+
+// NewLegacyMigrationConnector authenticates a captured legacy candidate
+// without publication or mirroring (design/07).
+func NewLegacyMigrationConnector(server *Server, backoffMin, backoffMax time.Duration) *ServerGABPConnector {
+	c := newServerGABPConnector(server, backoffMin, backoffMax, true, 0)
+	c.authenticateOnly = true
+	return c
 }
 
 // NewServerGABPConnector creates a new GABP connector for the server
@@ -61,6 +74,18 @@ type staleBridgeCredentialError struct {
 
 func (e *staleBridgeCredentialError) Error() string {
 	return fmt.Sprintf("stale bridge credential for '%s': the connection credential is not the current launch's per-launch endpoint; the running bridge belongs to an earlier launch environment", e.gameID)
+}
+
+// supersededConnectionError is the typed refusal for a connection whose
+// attachment could not be published — the claim vanished or was replaced
+// during the handshake, or the connection stopped being current. Such a
+// client is closed and never mirrors tools (review round 8).
+type supersededConnectionError struct {
+	gameID string
+}
+
+func (e *supersededConnectionError) Error() string {
+	return fmt.Sprintf("the launch of '%s' was superseded while the bridge connected; the connection was closed — re-check games_status", e.gameID)
 }
 
 // AttemptConnection implements the GABPConnector interface. Connections are
@@ -107,27 +132,35 @@ func (c *ServerGABPConnector) AttemptConnection(ctx context.Context, gameID stri
 
 	c.log.Infow("GABP connection established", "gameId", gameID, "addr", addr)
 
-	// Persist the attachment record (design/04) before mirroring: a
-	// mirroring failure routes through the disconnect handler, which
-	// clears exactly this record by its connection identity. The record
-	// binds to the claim whose endpoint credential authenticated, and only
-	// while this client is still the game's current live connection. A
-	// credential that stopped matching (the claim was replaced mid-
-	// connect) closes the client: it never mirrors tools and never counts
-	// as GABP evidence.
-	if rerr := c.server.recordBridgeAttachment(gameID, port, token, func() bool {
+	if c.authenticateOnly {
+		// Legacy migration validation: the handshake proved the candidate;
+		// publication and mirroring are the handler's job, in that order.
+		return nil
+	}
+
+	// Persist the attachment record (design/04) BEFORE mirroring: an
+	// ordinary connection may expose tools only after a successful
+	// attachment commit — a client without a persisted launch/connection
+	// binding must not survive (review round 8). The record binds to the
+	// claim whose endpoint credential authenticated, and only while this
+	// client is still the game's current live connection.
+	rerr := c.server.recordBridgeAttachment(gameID, port, token, func() bool {
 		c.server.mu.RLock()
 		current := c.server.gabpClients[gameID]
 		c.server.mu.RUnlock()
 		return current == client && client.IsConnected()
-	}); errors.Is(rerr, errStaleAttachmentCredential) {
+	})
+	if rerr != nil {
 		c.server.mu.Lock()
 		if current, exists := c.server.gabpClients[gameID]; exists && current == client {
 			delete(c.server.gabpClients, gameID)
 		}
 		c.server.mu.Unlock()
 		_ = client.Close()
-		return &staleBridgeCredentialError{gameID: gameID}
+		if errors.Is(rerr, errStaleAttachmentCredential) {
+			return &staleBridgeCredentialError{gameID: gameID}
+		}
+		return &supersededConnectionError{gameID: gameID}
 	}
 
 	if !c.mirrorSynchronously {
@@ -141,6 +174,13 @@ func (c *ServerGABPConnector) AttemptConnection(ctx context.Context, gameID stri
 	}
 
 	return nil
+}
+
+// MirrorConnectedClient exposes an already-published client's tools — the
+// migration flow's final step, after endpoint persist and attachment
+// publication both landed.
+func (c *ServerGABPConnector) MirrorConnectedClient(ctx context.Context, gameID string, client *gabp.Client) error {
+	return c.setupToolMirroring(ctx, gameID, client)
 }
 
 func (c *ServerGABPConnector) startAsyncToolMirroring(gameID string, client *gabp.Client) {

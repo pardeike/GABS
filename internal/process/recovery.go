@@ -23,11 +23,16 @@ func OperationInFlight(op *RuntimeOperation, now time.Time) bool {
 // ClaimRecovery is the outcome of normalizing a claim that carried a dead
 // operation. Applied reports whether anything was persisted; Claim is the
 // post-recovery state when kept (the original claim when nothing applied).
+// Superseded means the evaluated claim lost its fence mid-recovery — it was
+// removed or replaced — and the caller must reload and re-evaluate the
+// CURRENT claim; the evaluated snapshot must never be presented as
+// post-recovery state.
 type ClaimRecovery struct {
-	Removed  bool
-	Applied  bool
-	Claim    *RuntimeState
-	Evidence LivenessEvidence
+	Removed    bool
+	Applied    bool
+	Superseded bool
+	Claim      *RuntimeState
+	Evidence   LivenessEvidence
 }
 
 // RecoverInterruptedClaim implements restart recovery (design/07, design/05
@@ -53,7 +58,7 @@ type ClaimRecovery struct {
 // Attachment records are never touched: the executor is distinct from the
 // attachment owner (a CLI attempt dying must not disturb the server that
 // owns the live bridge).
-func RecoverInterruptedClaim(gameID, configDir, instanceID string, claim *RuntimeState, gabpLive bool, now time.Time) (*ClaimRecovery, error) {
+func RecoverInterruptedClaim(gameID, configDir, instanceID string, claim *RuntimeState, gabpLive bool, selfLive func() bool, now time.Time) (*ClaimRecovery, error) {
 	if claim == nil || claim.SchemaVersion < RuntimeSchemaVersion {
 		return nil, nil
 	}
@@ -68,9 +73,13 @@ func RecoverInterruptedClaim(gameID, configDir, instanceID string, claim *Runtim
 			// claim is the start gate's supersession business.
 			return &ClaimRecovery{Claim: claim}, nil
 		}
-		if err := removeRuntimeStateGuarded(gameID, configDir, instanceID, claim.LaunchID, op.OperationID); err != nil {
+		if err := removeRuntimeStateGuarded(gameID, configDir, instanceID, claim.LaunchID, op.OperationID, selfLive); err != nil {
+			if errors.Is(err, errStopAttachmentLive) {
+				// A bridge holds the claim: not removable, leave occupied.
+				return &ClaimRecovery{Claim: claim}, nil
+			}
 			if errors.Is(err, ErrFencingViolation) || errors.Is(err, ErrNoRuntimeClaim) {
-				return &ClaimRecovery{Claim: claim}, nil // superseded meanwhile
+				return &ClaimRecovery{Superseded: true}, nil
 			}
 			return nil, err
 		}
@@ -89,12 +98,16 @@ func RecoverInterruptedClaim(gameID, configDir, instanceID string, claim *Runtim
 
 	// A dead start attempt is not a stop/kill outcome: lastActionResult
 	// records lifecycle attempts only (design/06).
+	reason := "its pinned deadline expired"
+	if executorProvablyGone(op) {
+		reason = "its executor is no longer running"
+	}
 	var interrupted *RuntimeActionResult
 	if op.Action == OperationActionStop || op.Action == OperationActionKill {
 		interrupted = &RuntimeActionResult{
 			Action:    op.Action,
 			Outcome:   OutcomeInterrupted,
-			Detail:    fmt.Sprintf("a %s attempt begun %s was interrupted (its executor is no longer running)", op.Action, op.AttemptStartedAt.Format(time.RFC3339)),
+			Detail:    fmt.Sprintf("a %s attempt begun %s was interrupted (%s)", op.Action, op.AttemptStartedAt.Format(time.RFC3339), reason),
 			Timestamp: now,
 		}
 	}
@@ -123,7 +136,7 @@ func RecoverInterruptedClaim(gameID, configDir, instanceID string, claim *Runtim
 	case StatusRunning:
 		if err := normalize(); err != nil {
 			if errors.Is(err, ErrFencingViolation) || errors.Is(err, ErrNoRuntimeClaim) {
-				return rec, nil // superseded meanwhile; nothing of ours to fix
+				return &ClaimRecovery{Superseded: true, Evidence: ev}, nil
 			}
 			return nil, err
 		}
@@ -136,13 +149,13 @@ func RecoverInterruptedClaim(gameID, configDir, instanceID string, claim *Runtim
 		}
 		if err := normalize(); err != nil {
 			if errors.Is(err, ErrFencingViolation) || errors.Is(err, ErrNoRuntimeClaim) {
-				return rec, nil
+				return &ClaimRecovery{Superseded: true, Evidence: ev}, nil
 			}
 			return nil, err
 		}
 		return rec, nil
 	default: // stopped
-		err := removeRuntimeStateGuarded(gameID, configDir, instanceID, claim.LaunchID, op.OperationID)
+		err := removeRuntimeStateGuarded(gameID, configDir, instanceID, claim.LaunchID, op.OperationID, selfLive)
 		switch {
 		case err == nil:
 			rec.Removed = true
@@ -150,17 +163,19 @@ func RecoverInterruptedClaim(gameID, configDir, instanceID string, claim *Runtim
 			rec.Claim = nil
 			return rec, nil
 		case errors.Is(err, errStopAttachmentLive):
-			// A live foreign bridge appeared between evaluation and
-			// removal: never cleared under a live bridge — normalize to
-			// active instead.
+			// A live bridge appeared between evaluation and removal: never
+			// cleared under a live bridge — normalize to active instead.
 			ev.Verdict = StatusRunning
 			rec.Evidence = ev
-			if nerr := normalize(); nerr != nil && !errors.Is(nerr, ErrFencingViolation) && !errors.Is(nerr, ErrNoRuntimeClaim) {
+			if nerr := normalize(); nerr != nil {
+				if errors.Is(nerr, ErrFencingViolation) || errors.Is(nerr, ErrNoRuntimeClaim) {
+					return &ClaimRecovery{Superseded: true, Evidence: ev}, nil
+				}
 				return nil, nerr
 			}
 			return rec, nil
 		case errors.Is(err, ErrFencingViolation) || errors.Is(err, ErrNoRuntimeClaim):
-			return rec, nil
+			return &ClaimRecovery{Superseded: true, Evidence: ev}, nil
 		default:
 			return nil, err
 		}

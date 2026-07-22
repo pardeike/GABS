@@ -27,7 +27,7 @@ func recoverNow(t *testing.T, gameID, dir string, gabpLive bool) *ClaimRecovery 
 	if err != nil || claim == nil {
 		t.Fatalf("claim must exist before recovery: %v", err)
 	}
-	rec, err := RecoverInterruptedClaim(gameID, dir, "inst-recover", claim, gabpLive, time.Now().UTC())
+	rec, err := RecoverInterruptedClaim(gameID, dir, "inst-recover", claim, gabpLive, func() bool { return gabpLive }, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("recovery failed: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestRecoveryNoOpForLiveOperation(t *testing.T) {
 	publishClaim(t, dir, st)
 
 	claim, _ := LoadRuntimeState("g1", dir)
-	rec, err := RecoverInterruptedClaim("g1", dir, "inst-recover", claim, false, time.Now().UTC())
+	rec, err := RecoverInterruptedClaim("g1", dir, "inst-recover", claim, false, func() bool { return false }, time.Now().UTC())
 	if err != nil || rec != nil {
 		t.Fatalf("a live bounded attempt is never normalized: %+v %v", rec, err)
 	}

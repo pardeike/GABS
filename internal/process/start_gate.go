@@ -37,10 +37,13 @@ type StartGate struct {
 	InstanceID       string
 	RequestedProfile string
 	GABPLive         bool
-	Spec             LaunchSpec
-	Budget           time.Duration // process-start budget; pins ProcessStartDeadline
-	Probes           map[string]*launch.ResolvedLifecycle
-	StopProcessName  string
+	// BridgeLive re-checks the caller's own credential-bound connection at
+	// removal time (under the lock); nil is treated conservatively.
+	BridgeLive      func() bool
+	Spec            LaunchSpec
+	Budget          time.Duration // process-start budget; pins ProcessStartDeadline
+	Probes          map[string]*launch.ResolvedLifecycle
+	StopProcessName string
 }
 
 // StartRefusal is a structured Stage 2 refusal with a stable code.
@@ -103,7 +106,7 @@ func GateStart(g StartGate) (*StartGateResult, error) {
 			}
 			// Clear the stale claim — only the exact launch identity that
 			// was just evaluated; a racing start's fresh claim survives.
-			if rerr := removeRuntimeStateIfLaunch(g.GameID, g.ConfigDir, claim.LaunchID); rerr != nil {
+			if rerr := removeEvaluatedClaim(g, claim); rerr != nil {
 				if errors.Is(rerr, ErrFencingViolation) {
 					continue // someone replaced it mid-evaluation; re-evaluate
 				}
@@ -153,7 +156,7 @@ func GateStart(g StartGate) (*StartGateResult, error) {
 	probeWarnings, refusal, err := runPreStartProbes(g, &state, now)
 	warnings = append(warnings, probeWarnings...)
 	if err != nil {
-		_ = removeRuntimeStateIfLaunch(g.GameID, g.ConfigDir, state.LaunchID)
+		_ = removeRuntimeStateGuarded(g.GameID, g.ConfigDir, g.InstanceID, state.LaunchID, state.Operation.OperationID, g.BridgeLive)
 		return nil, err
 	}
 	if refusal != nil {
@@ -288,25 +291,38 @@ func claimStatusHook(claim *RuntimeState) *launch.ResolvedHook {
 	return claim.Lifecycle.Status
 }
 
-// removeRuntimeStateIfLaunch removes the claim only while it still carries
-// the evaluated launch identity — a racing start's fresh claim survives.
-func removeRuntimeStateIfLaunch(gameID, configDir, launchID string) error {
-	lock, err := AcquireTransitionLock(gameID, configDir, transitionLockGateTimeout)
+// removeEvaluatedClaim clears a stale claim only while it is EXACTLY the
+// claim that was evaluated: same launch identity, an operation unchanged
+// since the evaluation (the same dead attempt, or none then and none now),
+// and no removal-blocking attachment — a stop/kill admitted or a bridge
+// attached after a slow evidence probe fences the removal, and the gate
+// loop re-evaluates the changed claim instead of deleting it (design/06).
+func removeEvaluatedClaim(g StartGate, evaluated *RuntimeState) error {
+	lock, err := AcquireTransitionLock(g.GameID, g.ConfigDir, transitionLockGateTimeout)
 	if err != nil {
 		return err
 	}
 	defer lock.Release()
-	cur, err := LoadRuntimeState(gameID, configDir)
+	cur, err := LoadRuntimeState(g.GameID, g.ConfigDir)
 	if err != nil {
 		return err
 	}
 	if cur == nil {
-		return nil
+		return nil // already gone: the goal state
 	}
-	if cur.LaunchID != launchID {
+	if cur.LaunchID != evaluated.LaunchID {
 		return ErrFencingViolation
 	}
-	return RemoveRuntimeState(gameID, configDir)
+	switch {
+	case cur.Operation == nil && evaluated.Operation == nil:
+	case cur.Operation != nil && evaluated.Operation != nil && cur.Operation.OperationID == evaluated.Operation.OperationID:
+	default:
+		return ErrFencingViolation
+	}
+	if attachmentBlocksRemoval(cur.Attachment, g.InstanceID, g.BridgeLive) {
+		return ErrFencingViolation
+	}
+	return RemoveRuntimeState(g.GameID, g.ConfigDir)
 }
 
 // runPreStartProbes probes every profile's status hook concurrently, each
@@ -373,7 +389,7 @@ func runPreStartProbes(g StartGate, state *RuntimeState, now time.Time) ([]strin
 	}
 	if len(running) > 1 {
 		// GABS never guesses among candidates: report all, persist nothing.
-		if err := removeRuntimeStateIfLaunch(g.GameID, g.ConfigDir, state.LaunchID); err != nil && !errors.Is(err, ErrFencingViolation) {
+		if err := removeRuntimeStateGuarded(g.GameID, g.ConfigDir, g.InstanceID, state.LaunchID, state.Operation.OperationID, g.BridgeLive); err != nil && !errors.Is(err, ErrFencingViolation) {
 			return warnings, nil, err
 		}
 		return warnings, &StartRefusal{
@@ -409,7 +425,7 @@ func runPreStartProbes(g StartGate, state *RuntimeState, now time.Time) ([]strin
 				SnapshotPersisted: true,
 			}, nil
 		case len(pids) > 1:
-			if err := removeRuntimeStateIfLaunch(g.GameID, g.ConfigDir, state.LaunchID); err != nil && !errors.Is(err, ErrFencingViolation) {
+			if err := removeRuntimeStateGuarded(g.GameID, g.ConfigDir, g.InstanceID, state.LaunchID, state.Operation.OperationID, g.BridgeLive); err != nil && !errors.Is(err, ErrFencingViolation) {
 				return warnings, nil, err
 			}
 			candidates := make([]string, 0, len(pids))

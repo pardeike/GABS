@@ -39,13 +39,18 @@ func diagnoseHookContradiction(ev *LivenessEvidence, in LivenessInput) {
 // a caller can see. StopProcessName is the caller's fallback; a claim's own
 // snapshot wins when present (callers never re-guess launch context).
 type LivenessInput struct {
-	GABPLive        bool // the caller owns a live bridge connection
-	Claim           *RuntimeState
-	StatusHook      *launch.ResolvedHook
-	GameID          string
-	Profile         string
-	StopProcessName string
-	Now             time.Time
+	GABPLive bool // the caller owns a live credential-bound bridge connection
+	// CallerInstanceID identifies the evaluating process so attachment
+	// records can be classified self-versus-foreign: a self-owned record is
+	// never evidence on its own — the caller's actual in-process connection
+	// state (GABPLive) is the truth for its own bridge.
+	CallerInstanceID string
+	Claim            *RuntimeState
+	StatusHook       *launch.ResolvedHook
+	GameID           string
+	Profile          string
+	StopProcessName  string
+	Now              time.Time
 	// DiagnoseHook also runs the status hook when higher evidence already
 	// proves running, so contradictions are reported instead of hidden.
 	DiagnoseHook bool
@@ -64,29 +69,51 @@ type LivenessEvidence struct {
 // EvaluateLiveness applies the one liveness rule (design/04): live GABP /
 // fresh fingerprint-matched attachment lease → status hook → PID fingerprint
 // with stopProcessName fallback. unknown never cleans state and never
-// authorizes a start while a claim exists.
+// authorizes a start while a claim exists. An attachment owner that cannot
+// be inspected taints the evaluation: downstream stopped evidence can never
+// clear a claim past an uninspectable live-looking lease.
 func EvaluateLiveness(in LivenessInput) LivenessEvidence {
+	ev, attachmentTaint := evaluateLiveness(in)
+	if attachmentTaint != "" && ev.Verdict == StatusStopped {
+		return LivenessEvidence{
+			Verdict:    StatusUnknown,
+			Source:     LivenessSourceAttachment,
+			Detail:     attachmentTaint + "; downstream stopped evidence cannot clear the claim past it",
+			HookResult: ev.HookResult,
+			Warnings:   ev.Warnings,
+		}
+	}
+	return ev
+}
+
+func evaluateLiveness(in LivenessInput) (LivenessEvidence, string) {
 	now := in.Now
 	if now.IsZero() {
 		now = time.Now()
 	}
+	attachmentTaint := ""
 
 	// 1. A live bridge proves running.
 	if in.GABPLive {
 		ev := LivenessEvidence{Verdict: StatusRunning, Source: LivenessSourceGABP, Detail: "live GABP connection"}
 		diagnoseHookContradiction(&ev, in)
-		return ev
+		return ev, ""
 	}
-	// A persisted attachment is running-evidence for other processes only
+	// A persisted attachment is running-evidence only for OTHER processes'
+	// records: a self-owned record defers entirely to the caller's actual
+	// in-process connection state (GABPLive above) — a lease this process
+	// wrote cannot outvote its own dead socket. A foreign record counts
 	// while the lease is fresh AND the owner fingerprint matches a live
-	// process; expired leases are history. Attachments postdate the
-	// fingerprint schema, so a missing (zero) fingerprint is a malformed
-	// record, never legacy existence-only evidence — a reused owner PID
-	// must not impersonate a live bridge.
+	// process; an owner that cannot be inspected is uncertainty (taint),
+	// and expired leases are history. Attachments postdate the fingerprint
+	// schema, so a missing (zero) fingerprint is a malformed record, never
+	// legacy existence-only evidence.
 	if in.Claim != nil && in.Claim.Attachment != nil {
 		a := in.Claim.Attachment
-		if a.OwnerPID > 0 && a.OwnerPIDStartTime != 0 && !a.LeaseDeadline.IsZero() && now.Before(a.LeaseDeadline) {
-			if verdict, _ := VerifyPIDFingerprint(a.OwnerPID, a.OwnerPIDStartTime); verdict == StatusRunning {
+		fresh := a.OwnerPID > 0 && a.OwnerPIDStartTime != 0 && !a.LeaseDeadline.IsZero() && now.Before(a.LeaseDeadline)
+		if fresh && !attachmentOwnedBy(a, in.CallerInstanceID) {
+			switch verdict, detail := VerifyPIDFingerprint(a.OwnerPID, a.OwnerPIDStartTime); verdict {
+			case StatusRunning:
 				ev := LivenessEvidence{
 					Verdict: StatusRunning, Source: LivenessSourceAttachment,
 					Detail: fmt.Sprintf("bridge attachment lease fresh (owner pid %d alive, lease until %s)",
@@ -95,7 +122,9 @@ func EvaluateLiveness(in LivenessInput) LivenessEvidence {
 				// Same precedence tier as a live bridge: contradictions are
 				// reported here too, not hidden behind the early return.
 				diagnoseHookContradiction(&ev, in)
-				return ev
+				return ev, ""
+			case StatusUnknown:
+				attachmentTaint = fmt.Sprintf("a fresh bridge attachment lease's owner (pid %d) could not be inspected (%s)", a.OwnerPID, detail)
 			}
 		}
 	}
@@ -112,7 +141,7 @@ func EvaluateLiveness(in LivenessInput) LivenessEvidence {
 		default:
 			ev.Detail = fmt.Sprintf("status hook exit code %d", hr.ExitCode)
 		}
-		return ev
+		return ev, attachmentTaint
 	}
 
 	// 3. Built-in evidence.
@@ -125,14 +154,14 @@ func EvaluateLiveness(in LivenessInput) LivenessEvidence {
 			pids, err := findProcessesByNameFunc(in.StopProcessName)
 			if err != nil {
 				return LivenessEvidence{Verdict: StatusUnknown, Source: LivenessSourceProcessName,
-					Detail: fmt.Sprintf("no runtime claim; process scan for %q failed: %v", in.StopProcessName, err)}
+					Detail: fmt.Sprintf("no runtime claim; process scan for %q failed: %v", in.StopProcessName, err)}, attachmentTaint
 			}
 			if len(pids) > 0 {
 				return LivenessEvidence{Verdict: StatusRunning, Source: LivenessSourceProcessName,
-					Detail: fmt.Sprintf("no runtime claim, but %d process(es) named %q — external instance candidate", len(pids), in.StopProcessName)}
+					Detail: fmt.Sprintf("no runtime claim, but %d process(es) named %q — external instance candidate", len(pids), in.StopProcessName)}, attachmentTaint
 			}
 		}
-		return LivenessEvidence{Verdict: StatusStopped, Source: LivenessSourceNone, Detail: "no runtime claim"}
+		return LivenessEvidence{Verdict: StatusStopped, Source: LivenessSourceNone, Detail: "no runtime claim"}, attachmentTaint
 	}
 
 	pidVerdict, pidDetail := "", ""
@@ -144,7 +173,7 @@ func EvaluateLiveness(in LivenessInput) LivenessEvidence {
 	case in.Claim.GamePID > 0:
 		pidVerdict, pidDetail = VerifyPIDFingerprint(in.Claim.GamePID, in.Claim.PIDStartTime)
 		if pidVerdict == StatusRunning {
-			return LivenessEvidence{Verdict: StatusRunning, Source: LivenessSourcePID, Detail: pidDetail}
+			return LivenessEvidence{Verdict: StatusRunning, Source: LivenessSourcePID, Detail: pidDetail}, attachmentTaint
 		}
 	default:
 		pidDetail = "no workload PID recorded"
@@ -158,29 +187,29 @@ func EvaluateLiveness(in LivenessInput) LivenessEvidence {
 		pids, err := findProcessesByNameFunc(name)
 		if err != nil {
 			return LivenessEvidence{Verdict: StatusUnknown, Source: LivenessSourceProcessName,
-				Detail: fmt.Sprintf("process scan for %q failed: %v", name, err)}
+				Detail: fmt.Sprintf("process scan for %q failed: %v", name, err)}, attachmentTaint
 		}
 		if len(pids) > 0 {
 			return LivenessEvidence{Verdict: StatusRunning, Source: LivenessSourceProcessName,
-				Detail: fmt.Sprintf("%d process(es) named %q", len(pids), name)}
+				Detail: fmt.Sprintf("%d process(es) named %q", len(pids), name)}, attachmentTaint
 		}
 		if pidVerdict == StatusUnknown {
 			// The tracked PID may still exist but could not be inspected; an
 			// empty name scan must not downgrade that to stopped.
-			return LivenessEvidence{Verdict: StatusUnknown, Source: LivenessSourcePID, Detail: pidDetail}
+			return LivenessEvidence{Verdict: StatusUnknown, Source: LivenessSourcePID, Detail: pidDetail}, attachmentTaint
 		}
 		return LivenessEvidence{Verdict: StatusStopped, Source: LivenessSourceProcessName,
-			Detail: fmt.Sprintf("no process named %q (%s)", name, pidDetail)}
+			Detail: fmt.Sprintf("no process named %q (%s)", name, pidDetail)}, attachmentTaint
 	}
 
 	switch pidVerdict {
 	case StatusStopped:
-		return LivenessEvidence{Verdict: StatusStopped, Source: LivenessSourcePID, Detail: pidDetail}
+		return LivenessEvidence{Verdict: StatusStopped, Source: LivenessSourcePID, Detail: pidDetail}, attachmentTaint
 	case StatusUnknown:
-		return LivenessEvidence{Verdict: StatusUnknown, Source: LivenessSourcePID, Detail: pidDetail}
+		return LivenessEvidence{Verdict: StatusUnknown, Source: LivenessSourcePID, Detail: pidDetail}, attachmentTaint
 	default:
 		// Helper-role or no PID, no hook, no name: nothing can prove the
 		// workload either way.
-		return LivenessEvidence{Verdict: StatusUnknown, Source: LivenessSourceNone, Detail: pidDetail}
+		return LivenessEvidence{Verdict: StatusUnknown, Source: LivenessSourceNone, Detail: pidDetail}, attachmentTaint
 	}
 }

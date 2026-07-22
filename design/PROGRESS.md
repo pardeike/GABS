@@ -384,7 +384,37 @@ contract, not a scratchpad.
       rule); and no-arg games_status probes all games concurrently under
       their individual timeouts with s.mu released during evidence
       probes and deterministic output order — proven by a
-      three-slow-hooks timing test)
+      three-slow-hooks timing test. Review round 8 (12 findings, all
+      accepted) completed the credential-binding and safe-deletion
+      contracts end to end: attachment publication is an explicit typed
+      result and EVERY unpublished connection closes before mirroring
+      (claim vanished mid-handshake, unreadable claim, lock/save
+      failure, fingerprint failure, or no-longer-current — typed
+      superseded; credential mismatch — typed stale), with rollback
+      targeting exactly the record the loser created (a concurrent
+      publication B survives A's rollback, tested); one common
+      claim-bound lookup (live client + in-process attachment ref
+      carrying the freshly loaded claim's launchID) now feeds connect's
+      already-connected fast path (moved behind the claim load), start
+      gating, stop/kill GABP evidence, status, mirroring, attention,
+      and tool calls; liveness is caller-aware (self-owned leases defer
+      to the caller's actual socket, foreign owners that cannot be
+      inspected taint downstream stopped evidence to unknown); all
+      final deletion guards are tri-state (only positively dead or
+      expired attachments permit removal; self-owned records re-check
+      the live socket under the lock; GateStart's stale-claim clearing
+      re-checks operation identity and attachments and re-evaluates
+      instead of deleting); ReleaseStartClaim requires the exact
+      original start operation (the Stage-5 exited path makes its own
+      fully fenced operation-free decision); Stage 4 outcomes are
+      emitted only after their fenced transitions land (fencing loss →
+      supersession, persistence failure → occupied claim + structured
+      failure); recovery reports fence loss as an explicit superseded
+      result rendered from the CURRENT claim; games_status surfaces the
+      liveness observation (verdict/source/detail/hook facts/warnings)
+      with contradiction diagnosis enabled under bridge evidence; and
+      the detach path uses a no-create transition lock so teardown can
+      never be resurrected)
 - [x] M2.7 Restart recovery: liveness-driven, interrupted-phase
       normalization, spawning-window verdicts, executor-vs-owner —
       spec: 07, 05 Stage 3; tests: T-FENCE, T-START (claim-window),
@@ -519,6 +549,30 @@ contract, not a scratchpad.
   ordinary readers like antivirus would cause false
   operation_in_progress), M2.3 reopened to [~] until the new
   windows-latest CI lane runs the new Windows tests.
+- 2026-07-22, M2.6, design/04 + design/06 (interpretation, adjudicated):
+  the stop-verification matrix treats bridge evidence asymmetrically —
+  a live in-process GABP connection versus an explicit stopped status
+  hook stays RUNNING with the design/04 contradiction warning, while
+  the two narrow cells stay `termination_unverified`: the stop-only
+  wrapper (no independent source) and a fresh foreign attachment lease
+  (T-FENCE: a CLI can never clear a claim under another process's live
+  bridge, but a lease alone cannot upgrade to positive running).
+  Adjudicated by review rounds 7-8; recorded here because design/04
+  row 1 alone could be read to make any bridge evidence positive.
+- 2026-07-22, M2.6, design/06 §lastActionResult: RuntimeActionResult
+  gained an additive `detail` field for built-in and verification facts
+  that have no exit code or stderr to speak for them (a builtin scan
+  failure, a verification summary, the interrupted reason). The
+  specified fields are unchanged; review round 7 judged the addition
+  reasonable without a contract amendment.
+- 2026-07-22, M2.8, design/07 §legacy claims: "first lifecycle touch"
+  is implemented as the first lifecycle touch THAT PROCEEDS — a
+  games_connect refused by the runtime-ownership gate neither
+  normalizes the claim nor burns the one-shot bridge.json migration
+  candidate. Design/07 does not address the ownership-refused case;
+  normalizing on a refused touch would spend the migration window
+  without an attach attempt. Flagged for formal clarification in the
+  design docs (M3.3's docs pass).
 - 2026-07-21, M1.10 + M1.11 + M2.1 + test.yml, protocol §rules +
   design/21 ordering: review round 4 caught four more
   completeness/ordering violations — M1.10's launch_mode_incompatible

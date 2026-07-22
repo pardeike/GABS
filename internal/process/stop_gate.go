@@ -405,10 +405,10 @@ var errStopAttachmentLive = errors.New("live foreign bridge attachment")
 // when no fresh fingerprint-matched foreign attachment lease exists — the
 // last-instant re-check behind the per-round evidence reads.
 func removeRuntimeStateForStopCompletion(req StopRequest, launchID, operationID string) error {
-	return removeRuntimeStateGuarded(req.GameID, req.ConfigDir, req.InstanceID, launchID, operationID)
+	return removeRuntimeStateGuarded(req.GameID, req.ConfigDir, req.InstanceID, launchID, operationID, req.GABPLive)
 }
 
-func removeRuntimeStateGuarded(gameID, configDir, instanceID, launchID, operationID string) error {
+func removeRuntimeStateGuarded(gameID, configDir, instanceID, launchID, operationID string, selfLive func() bool) error {
 	lock, err := AcquireTransitionLock(gameID, configDir, transitionLockGateTimeout)
 	if err != nil {
 		return err
@@ -427,67 +427,64 @@ func removeRuntimeStateGuarded(gameID, configDir, instanceID, launchID, operatio
 	if cur.Operation == nil || cur.Operation.OperationID != operationID {
 		return ErrFencingViolation
 	}
-	if foreignAttachmentLive(cur.Attachment, instanceID) {
+	if attachmentBlocksRemoval(cur.Attachment, instanceID, selfLive) {
 		return errStopAttachmentLive
 	}
 	return RemoveRuntimeState(gameID, configDir)
 }
 
-// foreignAttachmentLive reports whether the record is another process's
-// fresh fingerprint-matched lease: the evidence that forbids clearing a
-// claim under a live bridge (design/04).
-func foreignAttachmentLive(a *RuntimeAttachment, instanceID string) bool {
-	if a == nil || attachmentOwnedBy(a, instanceID) {
+// attachmentBlocksRemoval is the tri-state final-deletion guard (design/04):
+// only a positively dead owner, an expired lease, or a malformed record
+// permits removal. A self-owned record defers to the caller's actual
+// in-process connection state — selfLive is evaluated under the lock, so a
+// bridge that attached between the last evidence poll and the removal is
+// seen; a caller that cannot know its own socket state (nil selfLive) is
+// treated conservatively. A foreign owner whose fingerprint cannot be
+// inspected is uncertainty, never permission to delete.
+func attachmentBlocksRemoval(a *RuntimeAttachment, instanceID string, selfLive func() bool) bool {
+	if a == nil {
 		return false
 	}
-	if a.OwnerPID <= 0 || a.OwnerPIDStartTime == 0 || a.LeaseDeadline.IsZero() || !time.Now().Before(a.LeaseDeadline) {
-		return false
+	if a.OwnerPID <= 0 || a.OwnerPIDStartTime == 0 {
+		return false // malformed: never evidence (design/04)
 	}
-	v, _ := VerifyPIDFingerprint(a.OwnerPID, a.OwnerPIDStartTime)
-	return v == StatusRunning
+	if a.LeaseDeadline.IsZero() || !time.Now().Before(a.LeaseDeadline) {
+		return false // expired: history
+	}
+	if attachmentOwnedBy(a, instanceID) {
+		if selfLive == nil {
+			return true
+		}
+		return selfLive()
+	}
+	switch v, _ := VerifyPIDFingerprint(a.OwnerPID, a.OwnerPIDStartTime); v {
+	case StatusStopped:
+		return false // positively dead: the connection died with the owner
+	default:
+		return true // running, or inspection failure: never delete on uncertainty
+	}
 }
 
 // ReleaseStartClaim removes a start attempt's own claim after a failure —
-// fenced by the launch identity it created, so a cleanup path that lost a
-// race (its claim superseded, its transition fenced out) can never delete
-// a successor claim by bare game ID (design/06). It accepts either the
-// attempt's own operation or an operation-free claim (the attempt may have
-// completed its promote-to-active transition before discovering the exit),
-// never a different operation; a live foreign attachment likewise leaves
-// the claim in place — another process owns a bridge into it.
-func ReleaseStartClaim(gameID, configDir, instanceID, launchID, operationID string) error {
-	lock, err := AcquireTransitionLock(gameID, configDir, transitionLockGateTimeout)
-	if err != nil {
-		return err
-	}
-	defer lock.Release()
-	cur, err := LoadRuntimeState(gameID, configDir)
-	if err != nil {
-		return err
-	}
-	if cur == nil {
-		return ErrNoRuntimeClaim
-	}
-	if cur.LaunchID != launchID {
-		return ErrFencingViolation
-	}
-	if cur.Operation != nil && cur.Operation.OperationID != operationID {
-		return ErrFencingViolation
-	}
-	if foreignAttachmentLive(cur.Attachment, instanceID) {
-		return ErrFencingViolation
-	}
-	return RemoveRuntimeState(gameID, configDir)
+// fenced by the launch identity AND the exact original start operation it
+// created, so a cleanup path that lost a race (its claim superseded, its
+// operation cleared by recovery or completion, a bridge attached) can never
+// delete state it no longer owns (design/06). Completions that legitimately
+// cleared the operation make their own fully fenced decisions instead of
+// passing through this generic failure cleanup.
+func ReleaseStartClaim(gameID, configDir, instanceID, launchID, operationID string, selfLive func() bool) error {
+	return removeRuntimeStateGuarded(gameID, configDir, instanceID, launchID, operationID, selfLive)
 }
 
 // RemoveRuntimeStateIfCurrent removes the claim only while it still carries
-// the evaluated launch identity, no operation at all, and no live foreign
-// attachment — the status path's fenced removal (design/06): a stopped
-// verdict computed over a seconds-long hook must never delete a successor
-// claim, an attempt that was admitted meanwhile (expired or not — its
-// recovery is not the status path's business), or a claim another process
-// just attached to.
-func RemoveRuntimeStateIfCurrent(gameID, configDir, instanceID, launchID string) error {
+// the evaluated launch identity, no operation at all, and no removal-
+// blocking attachment — the status path's fenced removal (design/06): a
+// stopped verdict computed over a seconds-long hook must never delete a
+// successor claim, an attempt that was admitted meanwhile (expired or not —
+// its recovery is not the status path's business), or a claim a bridge just
+// attached to (self-owned records are re-checked against the caller's live
+// socket under the lock).
+func RemoveRuntimeStateIfCurrent(gameID, configDir, instanceID, launchID string, selfLive func() bool) error {
 	lock, err := AcquireTransitionLock(gameID, configDir, transitionLockGateTimeout)
 	if err != nil {
 		return err
@@ -506,7 +503,7 @@ func RemoveRuntimeStateIfCurrent(gameID, configDir, instanceID, launchID string)
 	if cur.Operation != nil {
 		return ErrFencingViolation
 	}
-	if foreignAttachmentLive(cur.Attachment, instanceID) {
+	if attachmentBlocksRemoval(cur.Attachment, instanceID, selfLive) {
 		return ErrFencingViolation
 	}
 	return RemoveRuntimeState(gameID, configDir)

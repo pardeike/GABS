@@ -30,6 +30,51 @@ type bridgeAttachmentRef struct {
 // endpoint persist) — the connection itself is legitimate.
 var errAttachmentSkipped = errors.New("attachment record skipped")
 
+// errAttachmentSuperseded: the claim vanished, was replaced, could not be
+// written, or the connection stopped being current before publication — the
+// connection has no persisted binding and must not survive to mirror tools
+// or count as evidence (review round 8).
+var errAttachmentSuperseded = errors.New("attachment publication superseded")
+
+// claimBoundClient returns the game's live GABP client only when it is
+// credential-bound to the CURRENT claim: a live socket plus this server's
+// in-process attachment ref carrying the freshly loaded claim's launch
+// identity. Every consumer of GABP evidence or mirrored capability uses
+// this lookup — a live client for launch A must never prove, keep, or
+// service launch B (design/03, design/04).
+func (s *Server) claimBoundClient(gameID string) (*gabp.Client, *process.RuntimeState) {
+	s.mu.RLock()
+	client, ok := s.gabpClients[gameID]
+	ref, hasRef := s.bridgeAttachments[gameID]
+	s.mu.RUnlock()
+	if !ok || client == nil || !client.IsConnected() || !hasRef {
+		return nil, nil
+	}
+	claim, err := process.LoadRuntimeState(gameID, s.configDir)
+	if err != nil || claim == nil || claim.SchemaVersion != process.RuntimeSchemaVersion {
+		return nil, nil
+	}
+	if ref.launchID != claim.LaunchID {
+		return nil, nil
+	}
+	return client, claim
+}
+
+// bridgeLiveForLaunch returns a closure reporting — at call time, under
+// whatever lock the caller holds on the claim file — whether this server
+// holds a live client credential-bound to the given launch. Final-removal
+// guards evaluate it so a bridge attaching between the last evidence poll
+// and the under-lock removal is seen.
+func (s *Server) bridgeLiveForLaunch(gameID, launchID string) func() bool {
+	return func() bool {
+		s.mu.RLock()
+		client, ok := s.gabpClients[gameID]
+		ref, hasRef := s.bridgeAttachments[gameID]
+		s.mu.RUnlock()
+		return ok && client != nil && client.IsConnected() && hasRef && ref.launchID == launchID
+	}
+}
+
 // errStaleAttachmentCredential: the connection's credential is not the
 // current claim's per-launch credential — it authenticated against an
 // earlier launch's bridge and must not survive as this claim's evidence
@@ -56,9 +101,9 @@ func (s *Server) recordBridgeAttachment(gameID string, endpointPort int, endpoin
 	ownerStart, err := process.ProcessStartTime(ownerPID)
 	if err != nil {
 		// Without a verifiable owner fingerprint the record would be
-		// malformed evidence (design/04); skip persisting it.
+		// malformed evidence (design/04) — no binding, no survival.
 		s.log.Warnw("cannot fingerprint this process; bridge attachment not persisted", "gameId", gameID, "error", err)
-		return errAttachmentSkipped
+		return errAttachmentSuperseded
 	}
 	lease := s.runtimeOwnerLeaseDuration()
 
@@ -102,11 +147,13 @@ func (s *Server) recordBridgeAttachment(gameID string, endpointPort int, endpoin
 		if errors.Is(terr, errAttachmentSkipped) || errors.Is(terr, errStaleAttachmentCredential) {
 			return terr
 		}
-		if errors.Is(terr, process.ErrNoRuntimeClaim) {
-			return errAttachmentSkipped
+		// The claim disappeared during the handshake, could not be read, or
+		// the write failed: the connection has no binding and must not
+		// survive (review round 8).
+		if !errors.Is(terr, process.ErrNoRuntimeClaim) {
+			s.log.Warnw("failed to persist bridge attachment", "gameId", gameID, "error", terr)
 		}
-		s.log.Warnw("failed to persist bridge attachment", "gameId", gameID, "error", terr)
-		return errAttachmentSkipped
+		return errAttachmentSuperseded
 	}
 
 	s.mu.Lock()
@@ -117,11 +164,18 @@ func (s *Server) recordBridgeAttachment(gameID string, endpointPort int, endpoin
 	s.mu.Unlock()
 
 	// A disconnect that fired before the record existed had nothing to
-	// clear — verify the connection is still the current live one and undo
-	// the publication if it is not.
+	// clear — verify the connection is still the current live one and, if
+	// not, roll back EXACTLY the record just created: pop the in-memory
+	// entry only if it is still ours and clear only our connectionID, so a
+	// connection B that published meanwhile is never touched (design/06).
 	if stillCurrent == nil || !stillCurrent() {
-		s.recordBridgeDetachment(gameID)
-		return nil
+		s.mu.Lock()
+		if cur, ok := s.bridgeAttachments[gameID]; ok && cur.connectionID == connID {
+			delete(s.bridgeAttachments, gameID)
+		}
+		s.mu.Unlock()
+		s.clearBridgeAttachment(gameID, launchID, connID)
+		return errAttachmentSuperseded
 	}
 	go s.refreshBridgeAttachmentLease(gameID, launchID, connID, stillCurrent, lease)
 	return nil
@@ -165,21 +219,10 @@ func (s *Server) clearBridgeAttachment(gameID, launchID, connID string) {
 	if launchID == "" || connID == "" {
 		return
 	}
-	// Lock-free pre-check: when the claim is already gone (stopped,
-	// superseded, cleaned up), there is nothing to clear — and taking the
-	// transition lock would needlessly recreate the game directory.
-	if cur, err := process.LoadRuntimeState(gameID, s.configDir); err != nil || cur == nil ||
-		cur.LaunchID != launchID || cur.Attachment == nil {
-		return
-	}
-	_, err := process.FencedTransition(gameID, s.configDir, launchID, "", func(st *process.RuntimeState) error {
-		a := st.Attachment
-		if a == nil || a.ConnectionID != connID {
-			return process.ErrFencingViolation
-		}
-		st.Attachment = nil
-		return nil
-	})
+	// The detach completion uses the no-create transition lock: a detach
+	// racing directory teardown finds nothing and, crucially, never
+	// recreates the game directory or lock file (review round 8).
+	err := process.ClearAttachmentIfCurrent(gameID, s.configDir, launchID, connID, lifecycleLockTimeout)
 	if err != nil && !errors.Is(err, process.ErrFencingViolation) && !errors.Is(err, process.ErrNoRuntimeClaim) {
 		s.log.Warnw("failed to clear bridge attachment", "gameId", gameID, "error", err)
 	}
@@ -499,5 +542,38 @@ func staleBridgeCredentialResult(gameID, message string) *ToolResult {
 			},
 		},
 		IsError: true,
+	}
+}
+
+// attachStatusEvidence renders the liveness observation behind a status
+// verdict — verdict, source, detail, hook facts, warnings — so unknown says
+// what was observed and contradictions surface (design/04; T-LIFE).
+func attachStatusEvidence(statusItem map[string]interface{}, ev *process.LivenessEvidence) {
+	if ev == nil {
+		return
+	}
+	entry := map[string]interface{}{
+		"verdict": ev.Verdict,
+		"source":  ev.Source,
+	}
+	if ev.Detail != "" {
+		entry["detail"] = ev.Detail
+	}
+	if hr := ev.HookResult; hr != nil {
+		hook := map[string]interface{}{"exitCode": hr.ExitCode}
+		if hr.TimedOut {
+			hook["timedOut"] = true
+		}
+		if hr.ExecError != nil {
+			hook["execError"] = hr.ExecError.Error()
+		}
+		if hr.StderrTail != "" {
+			hook["stderrTail"] = hr.StderrTail
+		}
+		entry["statusHook"] = hook
+	}
+	statusItem["evidence"] = entry
+	if len(ev.Warnings) > 0 {
+		statusItem["statusWarnings"] = ev.Warnings
 	}
 }

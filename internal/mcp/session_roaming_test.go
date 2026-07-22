@@ -129,16 +129,16 @@ func TestGameBoundCallBlocksOldOwnerAfterRoamingTakeover(t *testing.T) {
 		t.Fatalf("expected owner connect to succeed, got: %s", connectText)
 	}
 
-	newOwner := process.RuntimeState{
-		GameID:          "adventure",
-		Status:          process.RuntimeStateStatusRunning,
-		OwnerPID:        os.Getpid(),
-		OwnerInstanceID: "new-owner-instance",
-		OwnerLastActive: time.Now().UTC(),
-		OwnerLeaseUntil: time.Now().UTC().Add(time.Minute),
-		GamePID:         os.Getpid(),
-	}
-	if err := process.SaveRuntimeState("adventure", tmpDir, newOwner); err != nil {
+	// Ownership roams to another session ON THE SAME LAUNCH (a takeover
+	// refreshes owner fields; the launch identity is untouched) — the old
+	// owner's client stays credential-bound, so the ownership gate is the
+	// guard that must block it.
+	if _, err := process.TransitionRuntimeState("adventure", tmpDir, time.Second, func(st *process.RuntimeState) error {
+		st.OwnerInstanceID = "new-owner-instance"
+		st.OwnerLastActive = time.Now().UTC()
+		st.OwnerLeaseUntil = time.Now().UTC().Add(time.Minute)
+		return nil
+	}); err != nil {
 		t.Fatalf("failed to move runtime ownership: %v", err)
 	}
 

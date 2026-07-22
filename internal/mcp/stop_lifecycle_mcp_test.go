@@ -634,6 +634,12 @@ func TestConnectorRefusesStaleCredentialBeforeDialing(t *testing.T) {
 // answers the handshake and any follow-up requests generically until each
 // connection closes.
 func fakeGABPServer(t *testing.T, agentID string) (addr string, closeConn func()) {
+	return fakeGABPServerWithHello(t, agentID, nil)
+}
+
+// fakeGABPServerWithHello lets a test interleave work (e.g. replacing the
+// runtime claim) at the exact moment the handshake arrives.
+func fakeGABPServerWithHello(t *testing.T, agentID string, onHello func()) (addr string, closeConn func()) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -660,6 +666,9 @@ func fakeGABPServer(t *testing.T, agentID string) (addr string, closeConn func()
 			}
 			var result interface{} = map[string]interface{}{}
 			if request.Method == "session/hello" {
+				if onHello != nil {
+					onHello()
+				}
 				result = gabp.SessionWelcomeResult{
 					AgentID:       agentID,
 					Capabilities:  gabp.Capabilities{Methods: []string{"tools/list"}},

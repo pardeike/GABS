@@ -23,6 +23,21 @@ func tryLockFile(path string) (*TransitionLock, error) {
 	return &TransitionLock{file: f}, nil
 }
 
+// tryLockFileExisting is the no-create variant for detach-time cleanup: it
+// never creates the lock file (or, transitively, the game directory), so a
+// disconnect racing directory teardown cannot resurrect either.
+func tryLockFileExisting(path string) (*TransitionLock, error) {
+	f, err := os.OpenFile(path, os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return &TransitionLock{file: f}, nil
+}
+
 func unlockFile(f *os.File) {
 	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 }

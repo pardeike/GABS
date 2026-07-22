@@ -421,20 +421,64 @@ func TestFencedTransition(t *testing.T) {
 	}
 }
 
-func TestRemoveRuntimeStateIfLaunchFenced(t *testing.T) {
+func TestRemoveEvaluatedClaimFenced(t *testing.T) {
 	dir := t.TempDir()
+	g := gateFor("g14", dir)
 	state := NewRuntimeState(m2Spec("g14"), RuntimeStateStatusStarting)
 	if err := ClaimRuntimeState("g14", dir, state); err != nil {
 		t.Fatal(err)
 	}
-	// a mismatched identity must not remove someone else's claim
-	if err := removeRuntimeStateIfLaunch("g14", dir, NewFencingID()); err != ErrFencingViolation {
+	// a mismatched launch identity must not remove someone else's claim
+	other := state
+	other.LaunchID = NewFencingID()
+	if err := removeEvaluatedClaim(g, &other); err != ErrFencingViolation {
 		t.Fatalf("mismatched launch identity must be fenced: %v", err)
 	}
 	if claim, _ := LoadRuntimeState("g14", dir); claim == nil {
 		t.Fatalf("fenced removal must not delete the claim")
 	}
-	if err := removeRuntimeStateIfLaunch("g14", dir, state.LaunchID); err != nil {
+
+	// an operation admitted AFTER the evaluation fences the removal
+	evaluated := state // op-free snapshot as evaluated
+	if _, err := TransitionRuntimeState("g14", dir, time.Second, func(s *RuntimeState) error {
+		s.Operation = &RuntimeOperation{OperationID: NewFencingID(), Action: OperationActionStop, AttemptStartedAt: time.Now().UTC(), Deadline: time.Now().UTC().Add(time.Minute)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeEvaluatedClaim(g, &evaluated); err != ErrFencingViolation {
+		t.Fatalf("an operation admitted after evaluation must fence the removal: %v", err)
+	}
+	if _, err := TransitionRuntimeState("g14", dir, time.Second, func(s *RuntimeState) error {
+		s.Operation = nil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// a bridge attached after evaluation fences the removal too
+	pid, start := ownFingerprint(t)
+	if _, err := TransitionRuntimeState("g14", dir, time.Second, func(s *RuntimeState) error {
+		s.Attachment = &RuntimeAttachment{
+			ConnectionID: NewFencingID(), OwnerInstanceID: "other-server",
+			OwnerPID: pid, OwnerPIDStartTime: start,
+			ObservedAt: time.Now().UTC(), LeaseDeadline: time.Now().UTC().Add(time.Minute),
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeEvaluatedClaim(g, &evaluated); err != ErrFencingViolation {
+		t.Fatalf("a bridge attached after evaluation must fence the removal: %v", err)
+	}
+	if _, err := TransitionRuntimeState("g14", dir, time.Second, func(s *RuntimeState) error {
+		s.Attachment = nil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := removeEvaluatedClaim(g, &evaluated); err != nil {
 		t.Fatal(err)
 	}
 	if claim, _ := LoadRuntimeState("g14", dir); claim != nil {

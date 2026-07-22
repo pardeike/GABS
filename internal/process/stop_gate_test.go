@@ -510,6 +510,127 @@ func TestVerificationSeesAttachmentAppearingMidAction(t *testing.T) {
 	}
 }
 
+func TestVerificationSeesSelfAttachmentAppearingMidAction(t *testing.T) {
+	cases := []struct {
+		name     string
+		selfLive bool
+		want     string
+	}{
+		// The caller's own bridge attached mid-action and its socket is
+		// live at removal time: the claim must not be cleared.
+		{name: "self-live", selfLive: true, want: OutcomeTerminationUnverified},
+		// The record exists but the caller's socket is dead: a self-owned
+		// lease can never outvote the caller's own connection state.
+		{name: "self-dead", selfLive: false, want: OutcomeTerminated},
+	}
+	for _, c := range cases {
+		dir := t.TempDir()
+		action := func(*launch.ResolvedHook, string, string) (bool, HookResult) {
+			pid, start := ownFingerprint(t)
+			if _, err := TransitionRuntimeState("g1", dir, time.Second, func(s *RuntimeState) error {
+				s.Attachment = &RuntimeAttachment{
+					ConnectionID: NewFencingID(), OwnerInstanceID: "inst-stop", // == requester
+					OwnerPID: pid, OwnerPIDStartTime: start,
+					ObservedAt: time.Now().UTC(), LeaseDeadline: time.Now().UTC().Add(time.Minute),
+				}
+				return nil
+			}); err != nil {
+				t.Errorf("%s: mid-action attachment write failed: %v", c.name, err)
+			}
+			return true, HookResult{ExitCode: 0}
+		}
+		swapStopActionFuncs(t, action, nil, nil, nil)
+
+		st := activeStopClaim(t, "g1", dir, &launch.ResolvedLifecycle{Stop: stopHook()})
+		publishClaim(t, dir, st)
+
+		req := stopReq("g1", dir)
+		selfLive := c.selfLive
+		req.GABPLive = func() bool { return selfLive }
+		outcome, refusal, err := ExecuteStopAction(req)
+		if err != nil || refusal != nil {
+			t.Fatalf("%s: unexpected refusal: %+v %v", c.name, refusal, err)
+		}
+		if outcome.Code != c.want {
+			t.Fatalf("%s: got %s, want %s (%+v)", c.name, outcome.Code, c.want, outcome)
+		}
+	}
+}
+
+func TestRemovalGuardsRefuseUninspectableForeignOwner(t *testing.T) {
+	dir := t.TempDir()
+	pid, start := ownFingerprint(t)
+	swapLivenessProbes(t, nil, func(p int) (int64, error) {
+		if p == pid {
+			return 0, &scanError{} // the lease owner cannot be inspected
+		}
+		return start, nil
+	}, nil)
+
+	st := activeStopClaim(t, "g1", dir, nil)
+	st.Attachment = &RuntimeAttachment{
+		ConnectionID: NewFencingID(), OwnerInstanceID: "other-server",
+		OwnerPID: pid, OwnerPIDStartTime: start,
+		ObservedAt: time.Now().UTC(), LeaseDeadline: time.Now().UTC().Add(time.Minute),
+	}
+	publishClaim(t, dir, st)
+
+	// Inspection failure is uncertainty, never permission to delete.
+	if err := RemoveRuntimeStateIfCurrent("g1", dir, "inst", st.LaunchID, nil); !errors.Is(err, ErrFencingViolation) {
+		t.Fatalf("an uninspectable foreign owner must refuse the status removal, got %v", err)
+	}
+	if err := ReleaseStartClaim("g1", dir, "inst", st.LaunchID, NewFencingID(), nil); !errors.Is(err, ErrFencingViolation) {
+		t.Fatalf("release must fence on the different-op check first, got %v", err)
+	}
+	if claim, _ := LoadRuntimeState("g1", dir); claim == nil {
+		t.Fatal("the claim must survive")
+	}
+}
+
+func TestRecoveryLosingFenceToSuccessorIsSuperseded(t *testing.T) {
+	dir := t.TempDir()
+	var replacement RuntimeState
+	swapped := false
+	swapLivenessProbes(t, nil, nil, func(name string) ([]int, error) {
+		if !swapped {
+			swapped = true
+			// While the recovery evidence probe runs, a successor replaces
+			// the claim.
+			if err := RemoveRuntimeState("g1", dir); err != nil {
+				t.Errorf("mid-probe removal failed: %v", err)
+			}
+			replacement = NewRuntimeState(m2Spec("g1"), RuntimeStateStatusStarting)
+			replacement.SpawnState = SpawnStateSpawned
+			if err := ClaimRuntimeState("g1", dir, replacement); err != nil {
+				t.Errorf("mid-probe reclaim failed: %v", err)
+			}
+		}
+		return nil, nil // launch A's evidence: stopped
+	})
+
+	st := activeStopClaim(t, "g1", dir, nil)
+	st.Phase = PhaseStopping
+	st.StopProcessName = "swap-target"
+	st.Operation = deadExecutorOp(t, OperationActionStop, time.Now().UTC().Add(time.Minute))
+	publishClaim(t, dir, st)
+
+	claim := st
+	rec, err := RecoverInterruptedClaim("g1", dir, "inst-recover", &claim, false, func() bool { return false }, time.Now().UTC())
+	if err != nil || rec == nil {
+		t.Fatalf("recovery must complete: %+v %v", rec, err)
+	}
+	if !rec.Superseded || rec.Removed || rec.Applied {
+		t.Fatalf("a fence loss must report superseded, never the evaluated snapshot: %+v", rec)
+	}
+	cur, _ := LoadRuntimeState("g1", dir)
+	if cur == nil || cur.LaunchID != replacement.LaunchID {
+		t.Fatalf("the successor claim must survive untouched: %+v", cur)
+	}
+	if cur.LastActionResult != nil || cur.Phase != PhaseStarting {
+		t.Fatalf("the successor must carry no writes from the dead generation: %+v", cur)
+	}
+}
+
 func TestStopRemovalRefusedUnderFreshForeignAttachment(t *testing.T) {
 	dir := t.TempDir()
 	pid, start := ownFingerprint(t)
@@ -862,40 +983,55 @@ func TestReleaseStartClaimIsFenced(t *testing.T) {
 	publishClaim(t, dir, st)
 
 	// Wrong launch identity: the successor claim survives.
-	if err := ReleaseStartClaim("g1", dir, "inst", NewFencingID(), opID); !errors.Is(err, ErrFencingViolation) {
+	if err := ReleaseStartClaim("g1", dir, "inst", NewFencingID(), opID, nil); !errors.Is(err, ErrFencingViolation) {
 		t.Fatalf("a foreign launch must never be released, got %v", err)
 	}
 	// A different operation on our launch: someone admitted work — leave it.
-	if err := ReleaseStartClaim("g1", dir, "inst", st.LaunchID, NewFencingID()); !errors.Is(err, ErrFencingViolation) {
+	if err := ReleaseStartClaim("g1", dir, "inst", st.LaunchID, NewFencingID(), nil); !errors.Is(err, ErrFencingViolation) {
 		t.Fatalf("a different operation must fence the release, got %v", err)
 	}
-	// Our own operation: released.
-	if err := ReleaseStartClaim("g1", dir, "inst", st.LaunchID, opID); err != nil {
+	// An operation-free claim: a completion cleared our operation (status
+	// recovery promoted, Stage 4 finished) — generic failure cleanup must
+	// NOT delete the recovered state (design/06; review round 8).
+	if _, err := TransitionRuntimeState("g1", dir, time.Second, func(s *RuntimeState) error {
+		s.Operation = nil
+		s.Phase = PhaseActive
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReleaseStartClaim("g1", dir, "inst", st.LaunchID, opID, nil); !errors.Is(err, ErrFencingViolation) {
+		t.Fatalf("an operation-free claim must fence the generic release, got %v", err)
+	}
+	if claim, _ := LoadRuntimeState("g1", dir); claim == nil {
+		t.Fatal("the recovered claim must survive")
+	}
+	// Restore our operation: the release applies again.
+	if _, err := TransitionRuntimeState("g1", dir, time.Second, func(s *RuntimeState) error {
+		s.Operation = &RuntimeOperation{OperationID: opID, Action: OperationActionStart, AttemptStartedAt: time.Now().UTC(), Deadline: time.Now().UTC().Add(time.Minute)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReleaseStartClaim("g1", dir, "inst", st.LaunchID, opID, nil); err != nil {
 		t.Fatalf("our own claim must release: %v", err)
 	}
 	if claim, _ := LoadRuntimeState("g1", dir); claim != nil {
 		t.Fatalf("claim must be gone: %+v", claim)
 	}
 
-	// Operation-free shape (promote-to-active ran before the exit was
-	// discovered): still ours, still released.
-	st2 := NewRuntimeState(m2Spec("g1"), RuntimeStateStatusRunning)
-	st2.Phase = PhaseActive
-	publishClaim(t, dir, st2)
-	if err := ReleaseStartClaim("g1", dir, "inst", st2.LaunchID, NewFencingID()); err != nil {
-		t.Fatalf("an operation-free own claim must release: %v", err)
-	}
-
 	// A live foreign attachment forbids the release.
 	pid, start := ownFingerprint(t)
 	st3 := NewRuntimeState(m2Spec("g1"), RuntimeStateStatusRunning)
+	op3 := NewFencingID()
+	st3.Operation = &RuntimeOperation{OperationID: op3, Action: OperationActionStart, AttemptStartedAt: time.Now().UTC(), Deadline: time.Now().UTC().Add(time.Minute)}
 	st3.Attachment = &RuntimeAttachment{
 		ConnectionID: NewFencingID(), OwnerInstanceID: "other-server",
 		OwnerPID: pid, OwnerPIDStartTime: start,
 		ObservedAt: time.Now().UTC(), LeaseDeadline: time.Now().UTC().Add(time.Minute),
 	}
 	publishClaim(t, dir, st3)
-	if err := ReleaseStartClaim("g1", dir, "inst", st3.LaunchID, NewFencingID()); !errors.Is(err, ErrFencingViolation) {
+	if err := ReleaseStartClaim("g1", dir, "inst", st3.LaunchID, op3, nil); !errors.Is(err, errStopAttachmentLive) {
 		t.Fatalf("a claim under a live foreign bridge must not be released, got %v", err)
 	}
 }
@@ -908,7 +1044,7 @@ func TestRemoveRuntimeStateIfCurrentRefusesOperationsAndAttachments(t *testing.T
 	st := activeStopClaim(t, "g1", dir, nil)
 	st.Operation = &RuntimeOperation{OperationID: NewFencingID(), Action: OperationActionStop, AttemptStartedAt: time.Now().UTC().Add(-time.Hour), Deadline: time.Now().UTC().Add(-time.Minute)}
 	publishClaim(t, dir, st)
-	if err := RemoveRuntimeStateIfCurrent("g1", dir, "inst", st.LaunchID); !errors.Is(err, ErrFencingViolation) {
+	if err := RemoveRuntimeStateIfCurrent("g1", dir, "inst", st.LaunchID, nil); !errors.Is(err, ErrFencingViolation) {
 		t.Fatalf("an admitted operation must refuse the status removal even when expired, got %v", err)
 	}
 	if err := RemoveRuntimeState("g1", dir); err != nil {
@@ -923,7 +1059,7 @@ func TestRemoveRuntimeStateIfCurrentRefusesOperationsAndAttachments(t *testing.T
 		ObservedAt: time.Now().UTC(), LeaseDeadline: time.Now().UTC().Add(time.Minute),
 	}
 	publishClaim(t, dir, st2)
-	if err := RemoveRuntimeStateIfCurrent("g1", dir, "inst", st2.LaunchID); !errors.Is(err, ErrFencingViolation) {
+	if err := RemoveRuntimeStateIfCurrent("g1", dir, "inst", st2.LaunchID, nil); !errors.Is(err, ErrFencingViolation) {
 		t.Fatalf("a live foreign attachment must refuse the status removal, got %v", err)
 	}
 	if err := RemoveRuntimeState("g1", dir); err != nil {
@@ -933,7 +1069,7 @@ func TestRemoveRuntimeStateIfCurrentRefusesOperationsAndAttachments(t *testing.T
 	// Clean, operation-free, unattached: removed.
 	st3 := activeStopClaim(t, "g1", dir, nil)
 	publishClaim(t, dir, st3)
-	if err := RemoveRuntimeStateIfCurrent("g1", dir, "inst", st3.LaunchID); err != nil {
+	if err := RemoveRuntimeStateIfCurrent("g1", dir, "inst", st3.LaunchID, nil); err != nil {
 		t.Fatalf("a clean stopped claim must remove: %v", err)
 	}
 }

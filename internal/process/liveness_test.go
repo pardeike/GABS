@@ -82,12 +82,48 @@ func TestLivenessGABPHookContradictionWarning(t *testing.T) {
 func TestLivenessAttachmentLeaseFresh(t *testing.T) {
 	pid, start := ownFingerprint(t)
 	claim := &RuntimeState{Attachment: &RuntimeAttachment{
-		ConnectionID: "c1", OwnerPID: pid, OwnerPIDStartTime: start,
+		ConnectionID: "c1", OwnerInstanceID: "server-owner",
+		OwnerPID: pid, OwnerPIDStartTime: start,
 		LeaseDeadline: time.Now().Add(time.Minute),
 	}}
-	ev := EvaluateLiveness(LivenessInput{Claim: claim})
+	ev := EvaluateLiveness(LivenessInput{Claim: claim, CallerInstanceID: "cli-caller"})
 	if ev.Verdict != StatusRunning || ev.Source != LivenessSourceAttachment {
-		t.Fatalf("fresh lease + live fingerprint-matched owner = running: %+v", ev)
+		t.Fatalf("fresh FOREIGN lease + live fingerprint-matched owner = running: %+v", ev)
+	}
+}
+
+func TestLivenessSelfOwnedAttachmentDefersToOwnSocket(t *testing.T) {
+	pid, start := ownFingerprint(t)
+	swapLivenessProbes(t, hookReturning(StatusStopped, nil), nil, nil)
+	claim := &RuntimeState{Attachment: &RuntimeAttachment{
+		ConnectionID: "c1", OwnerInstanceID: "me",
+		OwnerPID: pid, OwnerPIDStartTime: start,
+		LeaseDeadline: time.Now().Add(time.Minute),
+	}}
+	// The caller OWNS this record and reports its socket dead (GABPLive
+	// false): the lease it wrote cannot outvote its own connection state.
+	ev := EvaluateLiveness(LivenessInput{Claim: claim, CallerInstanceID: "me", StatusHook: &launch.ResolvedHook{Command: "x"}})
+	if ev.Source != LivenessSourceStatusHook {
+		t.Fatalf("a self-owned lease is never evidence on its own: %+v", ev)
+	}
+}
+
+func TestLivenessUninspectableAttachmentOwnerTaintsStopped(t *testing.T) {
+	pid, start := ownFingerprint(t)
+	swapLivenessProbes(t, hookReturning(StatusStopped, nil), func(p int) (int64, error) {
+		if p == pid {
+			return 0, &scanError{} // owner cannot be inspected
+		}
+		return start, nil
+	}, nil)
+	claim := &RuntimeState{Attachment: &RuntimeAttachment{
+		ConnectionID: "c1", OwnerInstanceID: "server-owner",
+		OwnerPID: pid, OwnerPIDStartTime: start,
+		LeaseDeadline: time.Now().Add(time.Minute),
+	}}
+	ev := EvaluateLiveness(LivenessInput{Claim: claim, CallerInstanceID: "cli-caller", StatusHook: &launch.ResolvedHook{Command: "x"}})
+	if ev.Verdict != StatusUnknown {
+		t.Fatalf("an uninspectable lease owner must taint downstream stopped to unknown: %+v", ev)
 	}
 }
 
@@ -262,11 +298,13 @@ func TestLivenessAttachmentContradictionWarning(t *testing.T) {
 	pid, start := ownFingerprint(t)
 	swapLivenessProbes(t, hookReturning(StatusStopped, nil), nil, nil)
 	claim := &RuntimeState{Attachment: &RuntimeAttachment{
-		ConnectionID: "c1", OwnerPID: pid, OwnerPIDStartTime: start,
+		ConnectionID: "c1", OwnerInstanceID: "server-owner",
+		OwnerPID: pid, OwnerPIDStartTime: start,
 		LeaseDeadline: time.Now().Add(time.Minute),
 	}}
 	ev := EvaluateLiveness(LivenessInput{
-		Claim: claim, StatusHook: &launch.ResolvedHook{Command: "x"}, DiagnoseHook: true,
+		Claim: claim, CallerInstanceID: "cli-caller",
+		StatusHook: &launch.ResolvedHook{Command: "x"}, DiagnoseHook: true,
 	})
 	if ev.Verdict != StatusRunning || ev.Source != LivenessSourceAttachment {
 		t.Fatalf("fresh lease wins the contradiction: %+v", ev)
