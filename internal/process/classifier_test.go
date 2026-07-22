@@ -105,12 +105,25 @@ func TestClassifyActionSucceededRunning(t *testing.T) {
 	}
 }
 
-func TestClassifyExitedEvidenceBased(t *testing.T) {
+func TestClassifyExitedWrapperVsGame(t *testing.T) {
+	// A bare crash on start is game class (design/08 "crash on start → game").
 	if Classify("exited_during_start", ClassifyContext{}).Class != CauseGame {
 		t.Error("a bare crash on start is game class")
 	}
-	if Classify("exited_during_start", ClassifyContext{HookReportedStopped: true}).Class != CauseEnvironment {
-		t.Error("a wrapper/container surfaced by a status hook is environment class")
+	// A status hook merely reporting "stopped" is LIVENESS evidence, not
+	// cause evidence — a plain game with a status hook that crashes stays
+	// game-class (round 11 P2-5). Only a positive wrapper/container exit is
+	// environment.
+	if Classify("exited_during_start", ClassifyContext{WrapperExit: true}).Class != CauseEnvironment {
+		t.Error("a wrapper/container that exits (missing image, host failure) is environment class")
+	}
+}
+
+func TestClassifyTerminatedHasNoFailureCause(t *testing.T) {
+	// A verified clean stop must carry NO cause class (round 11 P2-6) — it is
+	// not a failure, and it must not fall through to the environment default.
+	if c := Classify("terminated", ClassifyContext{}).Class; c != "" {
+		t.Errorf("a verified stop has no failure cause, got %q", c)
 	}
 }
 

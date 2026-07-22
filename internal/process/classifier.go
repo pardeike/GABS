@@ -18,11 +18,15 @@ type ClassifyContext struct {
 	// combination has never been proven on an otherwise-proven context.
 	InputCombinationFresh bool
 	SuppliedInputs        []string
-	// HookReportedStopped is producer evidence for exited_during_start: the
-	// failure was surfaced by a status hook reporting stopped (a wrapper /
-	// container exiting immediately — a missing image or name conflict),
-	// which is environment-class, versus a bare child crash (game-class).
-	HookReportedStopped bool
+	// WrapperExit is CAUSE evidence for exited_during_start: the exit was
+	// produced by a wrapper/container in the launch chain (a missing image,
+	// name conflict, or host failure) rather than the game process itself —
+	// environment-class. A status hook merely reporting "stopped" is LIVENESS
+	// evidence, not cause evidence (round 11 P2-5), so it does NOT set this:
+	// a plain game with a status hook that crashes stays game-class. With no
+	// wrapper signal, exited_during_start defaults to game (design/08's
+	// "crash on start → game").
+	WrapperExit bool
 }
 
 // Classification is a cause class plus an optional secondary note (the
@@ -41,8 +45,8 @@ type Classification struct {
 func Classify(code string, ctx ClassifyContext) Classification {
 	switch code {
 	// call — the request was wrong; fix the call, not the config.
-	case "unknown_argument", "game_not_found", "ambiguous_game_reference",
-		"profiles_not_configured", "profile_not_found",
+	case "unknown_argument", "invalid_argument", "game_not_found",
+		"ambiguous_game_reference", "profiles_not_configured", "profile_not_found",
 		"launch_input_not_declared", "launch_input_invalid",
 		"timeout_out_of_range":
 		return Classification{Class: CauseCall}
@@ -55,11 +59,18 @@ func Classify(code string, ctx ClassifyContext) Classification {
 		"stop_unsupported", "kill_unsupported":
 		return Classification{Class: CauseConfig}
 
+	// Clean success — no failure cause (round 11 P2-6). A verified stop must
+	// never acquire a causeClass; without this it would hit the environment
+	// default. Callers attach causeClass only when Class is non-empty.
+	case "terminated":
+		return Classification{}
+
 	// state — GABS runtime state must be resolved first. A stop that
 	// succeeded while the workload is still running (action_succeeded_
-	// running) is likewise a state situation the caller resolves.
+	// running) or was interrupted is likewise a state situation to resolve.
 	case "already_running", "blocked_unknown_state", "external_instance_detected",
-		"operation_in_progress", "termination_unverified", "action_succeeded_running":
+		"operation_in_progress", "termination_unverified", "action_succeeded_running",
+		"interrupted", "action_execution_failed":
 		return Classification{Class: CauseState}
 
 	// environment — host/store/network state; config edits cannot fix it.
@@ -67,12 +78,13 @@ func Classify(code string, ctx ClassifyContext) Classification {
 		"action_failed", "action_timed_out":
 		return Classification{Class: CauseEnvironment}
 
-	// exited_during_start is game-class for a bare child crash, but
-	// environment-class when a status hook surfaced it — a wrapper /
-	// container exiting immediately (missing image, name conflict, host
-	// failure), per the design/05 bad-case map.
+	// exited_during_start defaults to game (design/08: "crash on start →
+	// game"). It is environment ONLY with positive wrapper/container CAUSE
+	// evidence — the wrapper itself exited (missing image, host failure). A
+	// status hook reporting "stopped" is liveness, not cause, so it never
+	// flips a plain game crash to environment (round 11 P2-5).
 	case "exited_during_start":
-		if ctx.HookReportedStopped {
+		if ctx.WrapperExit {
 			return withInputNote(Classification{Class: CauseEnvironment}, ctx)
 		}
 		return withInputNote(Classification{Class: CauseGame}, ctx)

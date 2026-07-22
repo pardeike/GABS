@@ -414,7 +414,7 @@ func persistStopCompletion(req StopRequest, launchID, operationID, phase, status
 		if lerr == nil {
 			if cur, cerr := LoadRuntimeState(req.GameID, req.ConfigDir); cerr == nil && cur != nil && cur.LaunchID == launchID {
 				class := Classify(result.Outcome, ClassifyContext{}).Class
-				applyActionFailure(req.GameID, req.ConfigDir, req.HistoryProfile, req.HistoryContextHash, result.Outcome, class, result.Timestamp)
+				ApplyActionFailureLocked(req.GameID, req.ConfigDir, req.HistoryProfile, req.HistoryContextHash, result.Outcome, class, result.Timestamp)
 			}
 			lock.Release()
 		}

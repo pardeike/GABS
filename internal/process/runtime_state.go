@@ -185,6 +185,13 @@ type RuntimeState struct {
 	// recomputed from hot-reloaded config (review round 10).
 	HistoryContextHash string `json:"historyContextHash,omitempty"`
 
+	// HistorySuccess pins the snapshot + input-bucket identity needed to
+	// record this launch's Stage 4 verified start from the claim alone, so a
+	// promotion that happens asynchronously (passive status, attachment,
+	// recovery) or after a crash-and-restart still credits the start with the
+	// right lastGood and bucket (round 11 P1-2). Pinned at publication.
+	HistorySuccess *HistorySuccessIdentity `json:"historySuccess,omitempty"`
+
 	Profile           string   `json:"profile,omitempty"`
 	AppliedInputNames []string `json:"appliedInputNames,omitempty"` // names only, never values
 	// AppliedInputsState distinguishes "known to have used no inputs"

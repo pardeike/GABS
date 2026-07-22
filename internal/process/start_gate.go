@@ -46,6 +46,12 @@ type StartGate struct {
 	Budget          time.Duration // process-start budget; pins ProcessStartDeadline
 	Probes          map[string]*launch.ResolvedLifecycle
 	StopProcessName string
+	// HistoryContextHash + HistorySuccess pin this launch's track-record
+	// identity in the claim at publication (round 11 P1-2), so every Stage 4
+	// promotion path records the verified start from the claim alone and a
+	// crash before endpoint allocation still leaves recovery an identity.
+	HistoryContextHash string
+	HistorySuccess     *HistorySuccessIdentity
 }
 
 // StartRefusal is a structured Stage 2 refusal with a stable code.
@@ -118,6 +124,9 @@ func GateStart(g StartGate) (*StartGateResult, error) {
 
 		state = NewRuntimeState(g.Spec, RuntimeStateStatusStarting)
 		state.OwnerInstanceID = g.InstanceID
+		// Pin the track-record identity at publication (round 11 P1-2).
+		state.HistoryContextHash = g.HistoryContextHash
+		state.HistorySuccess = g.HistorySuccess
 		execPID := os.Getpid()
 		execStart, _ := ProcessStartTime(execPID)
 		state.Operation = &RuntimeOperation{

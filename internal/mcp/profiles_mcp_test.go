@@ -261,6 +261,11 @@ func TestStartRefusedOnStaleConfig(t *testing.T) {
 	if structured["code"] != "config_invalid" {
 		t.Fatalf("start must refuse on stale config, got %s", raw)
 	}
+	// config_invalid carries a config cause class (round 11 P1-1 mandatory
+	// attribution), routing the agent to games_show, not a launch retry.
+	if structured["causeClass"] != process.CauseConfig {
+		t.Fatalf("config_invalid must be config-class, got %#v", structured["causeClass"])
+	}
 
 	// reads proceed on last-known-good and surface the error
 	_, listStructured := callTool(t, s, "games.list", nil)

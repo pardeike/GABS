@@ -233,11 +233,11 @@ func TestSaveConfigAlwaysPrivate(t *testing.T) {
 
 func TestBridgeEndpointTokenRotatesPerLaunch(t *testing.T) {
 	dir := t.TempDir()
-	port1, token1, _, _, err := PrepareBridgeEndpointForStart("g", dir, nil, false, BridgeDiagnostics{})
+	port1, token1, _, _, err := PrepareBridgeEndpointForStart("g", dir, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	port2, token2, _, reused, err := PrepareBridgeEndpointForStart("g", dir, nil, false, BridgeDiagnostics{})
+	port2, token2, _, reused, err := PrepareBridgeEndpointForStart("g", dir, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}

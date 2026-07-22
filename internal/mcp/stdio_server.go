@@ -373,6 +373,10 @@ func strictArgs(args map[string]interface{}, allowed ...string) *ToolResult {
 			"path":    "/" + unknown[0],
 			"unknown": unknown,
 			"allowed": sortedAllowed,
+			// A wrong request is call-class — fix the call, not the config
+			// (design/08; round 11 P1-1). No context exists to hash here, so
+			// there is no track-record line.
+			"causeClass": process.CauseCall,
 		},
 	}
 }
@@ -1041,18 +1045,22 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			// A hot edit that gave a URL-mode game context fields is the
 			// specific, stable outcome — not a generic stale-config refusal.
 			if issues := modeIncompatibleIssues(cfgErr, gameIdOrTarget); len(issues) > 0 {
+				structured := map[string]interface{}{"code": "launch_mode_incompatible", "issues": issues, "invalidRevision": cfgErr.Revision}
+				s.attachStructuredFailureAttribution(structured, config.GameConfig{ID: gameIdOrTarget}, "launch_mode_incompatible", historyContext{})
 				return &ToolResult{
 					Content:           []Content{{Type: "text", Text: fmt.Sprintf("The launch mode of %q cannot deliver launch context; remove the incompatible fields or switch modes:\n  %s", gameIdOrTarget, strings.Join(issues, "\n  "))}},
 					IsError:           true,
-					StructuredContent: map[string]interface{}{"code": "launch_mode_incompatible", "issues": issues, "invalidRevision": cfgErr.Revision},
+					StructuredContent: structured,
 				}, nil
 			}
 			// Starts are refused on stale config: launching from an outdated
 			// snapshot is worse than failing with the exact error (design/09).
+			structured := map[string]interface{}{"code": "config_invalid", "lastGoodRevision": snap.Revision, "invalidRevision": cfgErr.Revision}
+			s.attachStructuredFailureAttribution(structured, config.GameConfig{ID: gameIdOrTarget}, "config_invalid", historyContext{})
 			return &ToolResult{
 				Content:           []Content{{Type: "text", Text: fmt.Sprintf("Configuration on disk is invalid; refusing to start from a stale snapshot. Fix the config (it reloads automatically): %v", cfgErr.Err)}},
 				IsError:           true,
-				StructuredContent: map[string]interface{}{"code": "config_invalid", "lastGoodRevision": snap.Revision, "invalidRevision": cfgErr.Revision},
+				StructuredContent: structured,
 			}, nil
 		}
 		gamesConfig := snap.Config
@@ -1070,12 +1078,14 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				return invalidTimeout, nil
 			}
 			if !ok || seconds < 1 || seconds > 3600 {
+				structured := map[string]interface{}{
+					"code": "timeout_out_of_range", "minimum": 1, "maximum": 3600,
+				}
+				s.attachStructuredFailureAttribution(structured, *game, "timeout_out_of_range", historyContext{})
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: "Argument 'timeout' must be an integer between 1 and 3600 seconds"}},
-					IsError: true,
-					StructuredContent: map[string]interface{}{
-						"code": "timeout_out_of_range", "minimum": 1, "maximum": 3600,
-					},
+					Content:           []Content{{Type: "text", Text: "Argument 'timeout' must be an integer between 1 and 3600 seconds"}},
+					IsError:           true,
+					StructuredContent: structured,
 				}, nil
 			}
 			startupGABPTimeout = time.Duration(seconds) * time.Second
@@ -1089,9 +1099,12 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		if raw, exists := args["profile"]; exists && raw != nil {
 			str, ok := raw.(string)
 			if !ok {
+				structured := map[string]interface{}{"code": "invalid_argument", "path": "/profile"}
+				s.attachStructuredFailureAttribution(structured, *game, "invalid_argument", historyContext{})
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: "Argument 'profile' must be a string"}},
-					IsError: true,
+					Content:           []Content{{Type: "text", Text: "Argument 'profile' must be a string"}},
+					IsError:           true,
+					StructuredContent: structured,
 				}, nil
 			}
 			profileArg = str
@@ -1100,9 +1113,12 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		if raw, exists := args["launchInputs"]; exists && raw != nil {
 			m, ok := raw.(map[string]interface{})
 			if !ok {
+				structured := map[string]interface{}{"code": "invalid_argument", "path": "/launchInputs"}
+				s.attachStructuredFailureAttribution(structured, *game, "invalid_argument", historyContext{})
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: "Argument 'launchInputs' must be an object of declared input values"}},
-					IsError: true,
+					Content:           []Content{{Type: "text", Text: "Argument 'launchInputs' must be an object of declared input values"}},
+					IsError:           true,
+					StructuredContent: structured,
 				}, nil
 			}
 			inputsArg = m
@@ -1127,6 +1143,11 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				structured["documentation"] = "docs/CONFIGURATION.md#profiles"
 				structured["note"] = "Config edits apply automatically; no GABS or client restart is needed."
 			}
+			// Mandatory attribution (round 11 P1-1). Resolution failed, so
+			// there is no resolvable context: the class comes from the code
+			// alone (call/config) with no track-record line, and nothing is
+			// written to history.
+			s.attachStructuredFailureAttribution(structured, *game, rerr.Code, historyContext{})
 			return &ToolResult{
 				Content:           []Content{{Type: "text", Text: rerr.Message}},
 				IsError:           true,
@@ -1142,14 +1163,22 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 					"path": is.JSONPath, "fsPath": is.FSPath, "message": is.Message,
 				})
 			}
+			structured := map[string]interface{}{
+				"code":   "launch_spec_unresolvable",
+				"gameId": game.ID,
+				"issues": structuredIssues,
+			}
+			// Resolution SUCCEEDED (only the resolvability check failed), so
+			// the input-free context coordinates exist: classify proof-adjusted
+			// (round 11 P1-1) — a target that vanished after proven starts is
+			// environment ("it existed before"), a never-proven one is config
+			// ("probably a typo"). computeHistoryContext performs NO mutation.
+			unresolvedHC := s.computeHistoryContext(snap, *game, resolved, inputsArg)
+			s.attachStructuredFailureAttribution(structured, *game, "launch_spec_unresolvable", unresolvedHC)
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: "Launch spec is unresolvable:\n" + strings.Join(lines, "\n")}},
-				IsError: true,
-				StructuredContent: map[string]interface{}{
-					"code":   "launch_spec_unresolvable",
-					"gameId": game.ID,
-					"issues": structuredIssues,
-				},
+				Content:           []Content{{Type: "text", Text: "Launch spec is unresolvable:\n" + strings.Join(lines, "\n")}},
+				IsError:           true,
+				StructuredContent: structured,
 			}, nil
 		}
 
@@ -1197,7 +1226,11 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				if len(exitedErr.warnings) > 0 {
 					structured["startWarnings"] = exitedErr.warnings
 				}
-				s.finalizeStartFailure(structured, *game, hctx, "exited_during_start", exitedErr.hookReportedStopped)
+				// wrapperExit=false: a status hook reporting stopped is liveness
+				// evidence, not wrapper CAUSE evidence, so a crash stays game-
+				// class (round 11 P2-5). The hook evidence still enriches the
+				// hint above, just not the class.
+				s.finalizeStartFailure(structured, *game, hctx, "exited_during_start", false)
 				addValidationWarnings(structured, validationWarnings)
 				addResolvedContext(structured, resolved)
 				return &ToolResult{
@@ -4269,6 +4302,10 @@ func (s *Server) evaluateClaimStatusOnce(gameID string, claim *process.RuntimeSt
 					}
 					st.Phase = process.PhaseActive
 					st.Status = process.RuntimeStateStatusRunning
+					// Stage 4 verification by status observation: credit the
+					// start from the pinned identity inside this flip fence
+					// (round 11 P1-2).
+					s.applyPinnedWorkloadStart(gameID, st)
 					return nil
 				}); err == nil {
 					return process.RuntimeStateStatusRunning, &ev, false
@@ -4946,15 +4983,17 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	// stopProcessName as the lost-claim backstop.
 	startBudget := s.startBudgetFor(game.LaunchMode)
 	gateRes, err := process.GateStart(process.StartGate{
-		GameID:           game.ID,
-		ConfigDir:        s.configDir,
-		InstanceID:       s.instanceID,
-		RequestedProfile: launchSpec.Profile,
-		BridgeBound:      s.bridgeBound(game.ID),
-		Spec:             launchSpec,
-		Budget:           startBudget,
-		Probes:           launch.ResolveProfileLifecycles(&game),
-		StopProcessName:  game.StopProcessName,
+		GameID:             game.ID,
+		ConfigDir:          s.configDir,
+		InstanceID:         s.instanceID,
+		RequestedProfile:   launchSpec.Profile,
+		BridgeBound:        s.bridgeBound(game.ID),
+		Spec:               launchSpec,
+		Budget:             startBudget,
+		Probes:             launch.ResolveProfileLifecycles(&game),
+		StopProcessName:    game.StopProcessName,
+		HistoryContextHash: hc.contextHash,
+		HistorySuccess:     &process.HistorySuccessIdentity{Snapshot: hc.snapshot, Bucket: hc.bucket},
 	})
 	if err != nil {
 		return nil, err
@@ -4976,19 +5015,19 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	// cleanup-path codes record here, immediately before the release.
 	failureRecorded := false
 	var pendingFailCode string
-	var pendingFailHookStopped bool
-	recordFail := func(code string, hookStopped bool) {
+	var pendingFailWrapperExit bool
+	recordFail := func(code string, wrapperExit bool) {
 		if failureRecorded || code == "" {
 			return
 		}
 		failureRecorded = true
-		s.recordTerminalStartFailure(game, hc, code, hookStopped)
+		s.recordTerminalStartFailure(game, hc, code, wrapperExit)
 	}
 	defer func() {
 		if !cleanupRuntimeState {
 			return
 		}
-		recordFail(pendingFailCode, pendingFailHookStopped)
+		recordFail(pendingFailCode, pendingFailWrapperExit)
 		// Release only OUR claim: fenced by the launch + operation identity
 		// this start created — a cleanup that lost a race (its transition
 		// fenced out, its claim superseded) must never delete a successor
@@ -5012,15 +5051,10 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	// portRanges is startup-only (design/09): endpoint allocation uses the
 	// configuration pinned at process start, never the hot-reload snapshot.
 	// Failure is structured and the claim is released (deferred cleanup).
-	// The diagnostic-only fields (profile, config revision, start time) are
-	// stamped into bridge.json for doctor output; the live handoff stays
-	// env-only (design/03), so these never re-enter a liveness/attach path.
-	startDiag := config.BridgeDiagnostics{
-		Profile:        launchSpec.Profile,
-		ConfigRevision: launchSpec.ConfigRevision,
-		StartTime:      time.Now().UTC().Format(time.RFC3339),
-	}
-	port, token, bridgePath, reusedBridge, err := config.PrepareBridgeEndpointForStart(game.ID, s.configDir, s.gamesConfig, resetEndpoint, startDiag)
+	// This writes only the endpoint (port/token); the diagnostic fields are
+	// stamped at the spawn boundary (design/20), so a pre-spawn failure never
+	// leaves a profile/revision/startedAt for a process never spawned.
+	port, token, bridgePath, reusedBridge, err := config.PrepareBridgeEndpointForStart(game.ID, s.configDir, s.gamesConfig, resetEndpoint)
 	if err != nil {
 		pendingFailCode = "endpoint_unavailable"
 		return nil, &endpointUnavailableError{gameID: game.ID, err: err}
@@ -5045,9 +5079,9 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	if _, err := process.FencedTransition(game.ID, s.configDir, launchID, opID, func(st *process.RuntimeState) error {
 		st.Endpoint = &process.RuntimeEndpoint{Port: port, Token: token}
 		st.ContextDigests = spawnDigests
-		// Pin the track-record context hash so delivery/stop/recovery
-		// credit THIS launch, never a value recomputed from hot config.
-		st.HistoryContextHash = hc.contextHash
+		// HistoryContextHash + HistorySuccess were pinned at claim publication
+		// (GateStart), so a crash before this transition still leaves recovery
+		// a track-record identity (round 11 P1-2).
 		return nil
 	}); err != nil {
 		return nil, fmt.Errorf("failed to persist endpoint into runtime claim for '%s': %w", game.ID, err)
@@ -5092,6 +5126,21 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 				st.GamePID = pid
 				st.PIDStartTime = startTime
 			})
+			// Stamp the diagnostic-only bridge.json fields at the spawn
+			// boundary (design/20: "written at spawn"), and ONLY on a
+			// successful spawn — a spec_too_large, fencing, or process-creation
+			// failure must never publish a startedAt/profile for a workload
+			// that was never created (round 11 P2-8). Diagnostics are for
+			// doctor output; the live handoff stays env-only.
+			if spawnErr == nil {
+				if err := config.StampBridgeDiagnostics(game.ID, s.configDir, config.BridgeDiagnostics{
+					Profile:        launchSpec.Profile,
+					ConfigRevision: launchSpec.ConfigRevision,
+					StartedAt:      time.Now().UTC().Format(time.RFC3339),
+				}); err != nil {
+					s.log.Warnw("failed to stamp bridge diagnostics", "gameId", game.ID, "error", err)
+				}
+			}
 		})
 
 	result := s.starter.StartWithVerificationWithTimeouts(controller, nil, game.ID, port, token, startBudget, 0)
@@ -5125,8 +5174,20 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	// status pass (design/05).
 	keepClaimUnobserved := func() (*process.ProcessStartResult, error) {
 		cleanupRuntimeState = false
+		// The unobserved attempt is a terminal failure of an accepted attempt
+		// (design/20:206): proof-adjusted class (proven→environment, never-
+		// proven→config). Computed before the transition to avoid nesting a
+		// history read inside the history write.
+		unobservedClass := process.Classify("unobserved", process.ClassifyContext{Proven: s.contextProven(game.ID, hc)}).Class
 		if _, ferr := process.FencedTransition(game.ID, s.configDir, launchID, opID, func(st *process.RuntimeState) error {
 			st.Operation = nil // the attempt is over; the deadline governs reclaim
+			// Record the unobserved failure fenced to this still-present claim
+			// (round 11 P2-3): repeated unobserved launches accumulate
+			// consecutiveFailures; a later passive Stage 4 promotion resets them
+			// through the pinned success update.
+			if st.HistoryContextHash != "" {
+				process.ApplyActionFailureLocked(game.ID, s.configDir, process.EffectiveClaimProfile(st), st.HistoryContextHash, "unobserved", unobservedClass, time.Now().UTC())
+			}
 			return nil
 		}); ferr != nil {
 			// A stable Stage 4 outcome is emitted only after its transition
@@ -5143,11 +5204,11 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	exitedFailure := func(ev *process.LivenessEvidence) (*process.ProcessStartResult, error) {
 		// Record while the claim is still ours (round 10): some exited paths
 		// remove the claim right after this returns, so the fenced write must
-		// land here, not in the handler's post-release renderer. The closure
-		// carries the producer evidence — a status-hook-surfaced exit
-		// (wrapper / container) is environment-class, a bare crash game-class.
+		// land here, not in the handler's post-release renderer. wrapperExit is
+		// false: a status hook reporting stopped is liveness evidence, not
+		// wrapper cause evidence, so a crash stays game-class (round 11 P2-5).
 		hookStopped := ev != nil && ev.Source == process.LivenessSourceStatusHook
-		recordFail("exited_during_start", hookStopped)
+		recordFail("exited_during_start", false)
 		e := &exitedDuringStartError{
 			exitCode:            controller.ExitCode(),
 			tail:                controller.LaunchLogTail(16 * 1024),
@@ -5220,6 +5281,7 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	}
 	newPID := resolveRuntimeGamePID(game, controller)
 	promoted, err := process.FencedTransition(game.ID, s.configDir, launchID, opID, func(st *process.RuntimeState) error {
+		wasStarting := st.Phase == process.PhaseStarting
 		st.Status = process.RuntimeStateStatusRunning
 		st.Phase = process.PhaseActive
 		st.GamePID = newPID
@@ -5230,6 +5292,12 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 		st.Operation = nil
 		st.ProcessStartDeadline = time.Time{}
 		*st = process.RefreshRuntimeOwnerLease(*st, os.Getpid(), s.instanceID, s.runtimeOwnerLeaseForOperation(totalGABPTimeout), time.Now().UTC())
+		// Stage 4 verified: credit workloadStarts++ INSIDE the flip fence
+		// (round 11 P1-2), only when this transition actually promotes a
+		// starting claim, so the four promotion paths record exactly once.
+		if wasStarting {
+			s.applyPinnedWorkloadStart(game.ID, st)
+		}
 		return nil
 	})
 	if err != nil {
@@ -5247,11 +5315,9 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	}
 	cleanupRuntimeState = false
 
-	// Stage 4 verified (design/20): workloadStarts++, consecutiveFailures
-	// reset, lastGood refreshed, the supplied-input bucket recorded. An
-	// edit-visibility notice is armed here if the reload changed a proven
-	// context whose last failure was non-config.
-	s.recordVerifiedStart(game, hc)
+	// Stage 4 verified was recorded INSIDE the promote fence above (round 11
+	// P1-2), so the passive promotion paths (status, attachment, recovery)
+	// never double-count and a crash between promote and record cannot lose it.
 
 	s.mu.Lock()
 	s.games[game.ID] = controller

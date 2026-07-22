@@ -43,6 +43,11 @@ func TestGamesStopTerminatesManagedGame(t *testing.T) {
 	if structured["code"] != "terminated" {
 		t.Fatalf("expected terminated, got %s", raw)
 	}
+	// A verified clean stop is a success, not a failure — it must not acquire
+	// a failure cause class (round 11 P2-6).
+	if _, ok := structured["causeClass"]; ok {
+		t.Fatalf("a verified clean stop must not carry a failure causeClass: %s", raw)
+	}
 	if claim, _ := process.LoadRuntimeState("adventure", s.configDir); claim != nil {
 		t.Fatalf("terminated must clear the claim: %+v", claim)
 	}

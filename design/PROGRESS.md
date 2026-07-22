@@ -551,7 +551,7 @@ contract, not a scratchpad.
       operation_in_progress/blocked_unknown_state; occupied persistence
       failure is blocked_unknown_state), and the detach s.mu/
       transition-lock inversion is removed)
-- [x] M2.10 History store + classifier + input-combination buckets +
+- [~] M2.10 History store + classifier + input-combination buckets +
       edit notice + causeClass/track-record rendering — spec: 08; tests:
       T-TRACK
       (internal/process/history.go + classifier.go: a per-game 0600
@@ -610,20 +610,38 @@ contract, not a scratchpad.
       declaration-edit invalidation wired into every start, and per-profile
       proof + counters in games_show (an edited context reads never-proven).
       Only the doctor --show-last-good surface and the CLI track-record
-      DISPLAY remain M3.2's doctor work)
-- [x] M2.11 bridge.json diagnostic fields; env-only live contract
+      DISPLAY remain M3.2's doctor work. Round 11 completed the coverage the
+      round-10 tests missed: EVERY structured failure now carries causeClass +
+      (with a resolved context) a track-record line via one mandatory read-only
+      attribution path — including the proof-adjusted launch_spec_unresolvable
+      (a target that vanished after proven starts reads environment, computed
+      from input-free coordinates with NO history mutation), the pre-resolution
+      call-class errors (no context, no track line, no mutation), config_invalid
+      / launch_mode_incompatible, and the internal stop/kill execution error;
+      Stage 4 verified now credits workloadStarts++ at EVERY promotion path —
+      synchronous, passive status observation, bridge attachment, and restart
+      recovery — inside the same fence that flips starting→active, from an
+      identity (hash + snapshot + bucket) PINNED in the claim at publication so
+      an unobserved-then-connected launch is no longer "bridge connected 1× but
+      no successful starts"; an unobserved accepted attempt is now recorded as a
+      proof-adjusted failure (P2-3) that a later promotion resets; removing an
+      input declaration invalidates its buckets (not only editing one); a clean
+      terminated stop carries no failure cause; buildHistoryContext is split
+      into a pure compute and the accepted-start mutation)
+- [~] M2.11 bridge.json diagnostic fields; env-only live contract
       preserved — spec: 03; tests: T-DELIV
       (config.BridgeJSON gained three diagnostic-ONLY fields — profile,
-      configRevision, startTime (RFC3339) — stamped at start by
-      PrepareBridgeEndpointForStart via a BridgeDiagnostics value threaded
-      from the single production caller (startGame passes launchSpec.Profile
-      / launchSpec.ConfigRevision / now). Both write paths stamp: a fresh
-      allocation and the reuse branch, which RESTAMPS the current launch's
-      diagnostics with the rotated per-launch token so a reused endpoint
-      never leaves the previous launch's profile/revision behind. The fields
-      are omitempty and the non-start writers (Ensure/WriteBridgeJSON, all
-      test-only) pass a zero BridgeDiagnostics, so no production path writes
-      blank diagnostics. The live contract stays env-only: the diagnostics
+      configRevision, startedAt (the binding key name, design/20:235; RFC3339)
+      — stamped AT SPAWN (design/20 "written at spawn"; round 11 P2-7/P2-8) by
+      config.StampBridgeDiagnostics from the spawn observer, ONLY on a
+      successful spawn. Endpoint preparation writes only port/token; a
+      pre-spawn failure (spec_too_large, fencing, process-creation) therefore
+      publishes NO diagnostics for a workload that was never created (tested).
+      A reused endpoint's preparation clears the previous launch's stale
+      diagnostics until the spawn boundary restamps this launch's values. The
+      fields are omitempty and the non-start writers (Ensure/WriteBridgeJSON,
+      all test-only) stamp nothing, so no production path writes blank
+      diagnostics. The live contract stays env-only: the diagnostics
       never enter the endpoint-reuse decision (validBridgeEndpoint checks
       port/token/gameId alone — tested) and never reach a live path — the
       env-only regression lock seeds a claim with one profile/revision, hand-
@@ -729,6 +747,18 @@ contract, not a scratchpad.
   (exited_during_start, spawn_failed, endpoint_unavailable, spec_too_large);
   the record side is gated to the exact ProcessError types the renderer
   labels spawn_failed so write-coverage never exceeds render-coverage.
+- 2026-07-22, M2.10, review round 11 P2-5 (reversal of round 10 finding 8):
+  round 10 directed exited_during_start to classify environment when a status
+  hook surfaced the stop and game otherwise. Round 11 corrected this: a status
+  hook is LIVENESS evidence, not CAUSE evidence (a plain game with a status
+  hook that crashes is still design/08 "crash on start → game"; a container
+  wrapper that exits without a hook is still environment). exited_during_start
+  now defaults to game and is environment ONLY with positive wrapper/container
+  CAUSE evidence (ClassifyContext.WrapperExit). Production wires WrapperExit
+  false — no robust wrapper-exit signal exists yet — so production
+  exited_during_start is game; the wrapper→environment path is classifier-
+  ready and unit-tested for when a producer fact is wired. Recorded because
+  this is a directed reversal of a prior accepted finding, not an oversight.
   Test coverage of the record sites: the inline exitedFailure recorder
   (T-TRACK exited-during-start) and the deferred pendingFailCode recorder
   (T-TRACK spec_too_large) are both exercised through the real handler with

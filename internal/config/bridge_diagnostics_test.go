@@ -1,16 +1,33 @@
 package config
 
-import "testing"
+import (
+	"encoding/json"
+	"os"
+	"testing"
+	"time"
+)
 
-// M2.11 (design/03 §"Files are diagnostic, never live handoff"): bridge.json
-// additionally records the selected profile, config revision, and start time
-// for diagnostics/doctor only. These are WRITE-only fields — the live bridge
-// contract stays env-only (proven separately in the mcp env-only lock test).
+func readRawBridgeJSON(cfgPath string) (map[string]interface{}, error) {
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
 
-func TestPrepareBridgeEndpointStampsDiagnostics(t *testing.T) {
+// M2.11 (design/03 §"Files are diagnostic, never live handoff"; design/20:235):
+// bridge.json records profile, configRevision, and startedAt (RFC3339) for
+// diagnostics/doctor only, STAMPED AT SPAWN (round 11 P2-8) — the endpoint
+// preparation writes only port/token. These are write-only fields; the live
+// bridge contract stays env-only (proven in the mcp env-only lock test).
+
+func TestPrepareBridgeEndpointWritesNoDiagnostics(t *testing.T) {
 	dir := t.TempDir()
-	diag := BridgeDiagnostics{Profile: "combat", ConfigRevision: "rev-1", StartTime: "2026-07-22T10:00:00Z"}
-	_, _, path, _, err := PrepareBridgeEndpointForStart("g", dir, nil, false, diag)
+	_, _, path, _, err := PrepareBridgeEndpointForStart("g", dir, nil, false)
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -18,25 +35,68 @@ func TestPrepareBridgeEndpointStampsDiagnostics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	if b.Profile != "combat" || b.ConfigRevision != "rev-1" || b.StartTime != "2026-07-22T10:00:00Z" {
-		t.Fatalf("diagnostics not stamped: %+v", b)
+	// Endpoint preparation is pre-spawn: no diagnostics may be present yet.
+	if b.Profile != "" || b.ConfigRevision != "" || b.StartedAt != "" {
+		t.Fatalf("endpoint prep must not stamp diagnostics (they belong at spawn): %+v", b)
 	}
 }
 
-func TestBridgeReuseRestampsFreshDiagnostics(t *testing.T) {
+func TestStampBridgeDiagnosticsUsesBindingKeyName(t *testing.T) {
 	dir := t.TempDir()
-	first := BridgeDiagnostics{Profile: "vanilla", ConfigRevision: "rev-1", StartTime: "t1"}
-	p1, tok1, _, _, err := PrepareBridgeEndpointForStart("g", dir, nil, false, first)
+	if _, _, _, _, err := PrepareBridgeEndpointForStart("g", dir, nil, false); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	started := "2026-07-22T10:00:00Z"
+	if err := StampBridgeDiagnostics("g", dir, BridgeDiagnostics{
+		Profile: "combat", ConfigRevision: "rev-1", StartedAt: started,
+	}); err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+
+	cp, _ := NewConfigPaths(dir)
+	b, err := readBridgeJSONFile(cp.GetBridgeConfigPath("g"))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if b.Profile != "combat" || b.ConfigRevision != "rev-1" || b.StartedAt != started {
+		t.Fatalf("stamp must record the diagnostics: %+v", b)
+	}
+	// The endpoint survives the stamp.
+	if b.Port == 0 || b.Token == "" {
+		t.Fatalf("stamp must preserve the endpoint: %+v", b)
+	}
+	// The value must parse as RFC3339, and the obsolete key spelling must not
+	// appear in the raw JSON.
+	if _, perr := time.Parse(time.RFC3339, b.StartedAt); perr != nil {
+		t.Fatalf("startedAt must be RFC3339: %v", perr)
+	}
+	raw, err := readRawBridgeJSON(cp.GetBridgeConfigPath("g"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["startedAt"]; !ok {
+		t.Fatalf("the binding key must be 'startedAt': %v", raw)
+	}
+	if _, ok := raw["startTime"]; ok {
+		t.Fatalf("the obsolete 'startTime' key must not be written: %v", raw)
+	}
+}
+
+func TestReuseClearsStaleDiagnosticsUntilRestamped(t *testing.T) {
+	dir := t.TempDir()
+	// First launch: prepare + stamp.
+	p1, tok1, _, _, err := PrepareBridgeEndpointForStart("g", dir, nil, false)
 	if err != nil {
 		t.Fatalf("first prepare: %v", err)
 	}
+	if err := StampBridgeDiagnostics("g", dir, BridgeDiagnostics{Profile: "vanilla", ConfigRevision: "rev-1", StartedAt: "2026-07-22T10:00:00Z"}); err != nil {
+		t.Fatalf("first stamp: %v", err)
+	}
 
-	// A second start of the same game reuses the port with a rotated token —
-	// and must restamp the CURRENT launch's diagnostics, never leave the
-	// previous launch's profile/revision behind (the misleading-diagnostic
-	// the fields exist to prevent).
-	second := BridgeDiagnostics{Profile: "combat", ConfigRevision: "rev-2", StartTime: "t2"}
-	p2, tok2, path, reused, err := PrepareBridgeEndpointForStart("g", dir, nil, false, second)
+	// Second launch reuses the port with a rotated token — and preparation
+	// CLEARS the previous launch's diagnostics, so a pre-spawn failure now
+	// would not leave stale attribution behind (round 11 P2-8).
+	p2, tok2, path, reused, err := PrepareBridgeEndpointForStart("g", dir, nil, false)
 	if err != nil {
 		t.Fatalf("second prepare: %v", err)
 	}
@@ -47,27 +107,33 @@ func TestBridgeReuseRestampsFreshDiagnostics(t *testing.T) {
 		t.Fatalf("reuse must keep the port: %d != %d", p2, p1)
 	}
 	if tok2 == tok1 {
-		t.Fatalf("reuse must rotate the token (per-launch credential)")
+		t.Fatalf("reuse must rotate the token")
 	}
-	b, err := readBridgeJSONFile(path)
-	if err != nil {
-		t.Fatalf("read: %v", err)
+	b, _ := readBridgeJSONFile(path)
+	if b.Profile != "" || b.ConfigRevision != "" || b.StartedAt != "" {
+		t.Fatalf("reuse preparation must clear stale diagnostics: %+v", b)
 	}
-	if b.Profile != "combat" || b.ConfigRevision != "rev-2" || b.StartTime != "t2" {
-		t.Fatalf("reuse must restamp FRESH diagnostics, not the stale ones: %+v", b)
+
+	// Restamping the reused endpoint records the CURRENT launch's values.
+	if err := StampBridgeDiagnostics("g", dir, BridgeDiagnostics{Profile: "combat", ConfigRevision: "rev-2", StartedAt: "2026-07-22T11:00:00Z"}); err != nil {
+		t.Fatalf("second stamp: %v", err)
+	}
+	b, _ = readBridgeJSONFile(path)
+	if b.Profile != "combat" || b.ConfigRevision != "rev-2" {
+		t.Fatalf("restamp must record fresh diagnostics: %+v", b)
 	}
 }
 
-// Diagnostics must never enter the endpoint-reuse decision: a bridge.json is
-// reusable on port/token/gameId alone, whatever its diagnostic fields say.
+// Diagnostics must never enter the endpoint-reuse decision.
 func TestBridgeDiagnosticsDoNotAffectEndpointReuse(t *testing.T) {
 	dir := t.TempDir()
-	// A bridge with rich diagnostics and one with none must both be reused.
-	if _, _, _, _, err := PrepareBridgeEndpointForStart("rich", dir, nil, false,
-		BridgeDiagnostics{Profile: "p", ConfigRevision: "r", StartTime: "t"}); err != nil {
-		t.Fatalf("rich prepare: %v", err)
+	if _, _, _, _, err := PrepareBridgeEndpointForStart("rich", dir, nil, false); err != nil {
+		t.Fatalf("prepare: %v", err)
 	}
-	if _, _, _, reused, err := PrepareBridgeEndpointForStart("rich", dir, nil, false, BridgeDiagnostics{}); err != nil || !reused {
+	if err := StampBridgeDiagnostics("rich", dir, BridgeDiagnostics{Profile: "p", ConfigRevision: "r", StartedAt: "2026-07-22T10:00:00Z"}); err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+	if _, _, _, reused, err := PrepareBridgeEndpointForStart("rich", dir, nil, false); err != nil || !reused {
 		t.Fatalf("a bridge with diagnostics must still be reusable: reused=%v err=%v", reused, err)
 	}
 }

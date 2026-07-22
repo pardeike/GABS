@@ -115,6 +115,12 @@ func RecoverInterruptedClaim(gameID, configDir, instanceID string, claim *Runtim
 
 	normalize := func() error {
 		updated, err := FencedTransition(gameID, configDir, claim.LaunchID, op.OperationID, func(s *RuntimeState) error {
+			// A recovered START that was still in phase=starting is the Stage 4
+			// verification for that launch — credit workloadStarts++ from the
+			// pinned identity, inside this flip fence (round 11 P1-2). An
+			// interrupted stop/kill recovery must NOT: its workload started
+			// earlier and was already counted.
+			creditStart := s.Phase == PhaseStarting && op.Action == OperationActionStart
 			if interrupted != nil {
 				s.LastActionResult = interrupted
 			}
@@ -122,6 +128,9 @@ func RecoverInterruptedClaim(gameID, configDir, instanceID string, claim *Runtim
 			s.Phase = PhaseActive
 			if ev.Verdict == StatusRunning {
 				s.Status = RuntimeStateStatusRunning
+			}
+			if creditStart {
+				ApplyPinnedWorkloadStartLocked(gameID, configDir, s, now)
 			}
 			return nil
 		})

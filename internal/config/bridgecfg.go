@@ -23,16 +23,18 @@ type BridgeJSON struct {
 	// liveness, attach, or attribution decision.
 	Profile        string `json:"profile,omitempty"`
 	ConfigRevision string `json:"configRevision,omitempty"`
-	StartTime      string `json:"startTime,omitempty"`
+	// StartedAt is the binding key name (design/20-implementation-map.md:235),
+	// RFC3339. Diagnostic-only.
+	StartedAt string `json:"startedAt,omitempty"`
 }
 
 // BridgeDiagnostics carries the diagnostic-only fields stamped into
-// bridge.json at start (design/03). A zero value stamps nothing — the
-// non-start writers (Ensure/WriteBridgeJSON, all test-only) pass it.
+// bridge.json at spawn (design/03, design/20). A zero value stamps nothing —
+// the non-start writers (Ensure/WriteBridgeJSON, all test-only) pass it.
 type BridgeDiagnostics struct {
 	Profile        string
 	ConfigRevision string
-	StartTime      string
+	StartedAt      string
 }
 
 type BridgeEndpointInUseError struct {
@@ -57,10 +59,6 @@ func WriteBridgeJSON(gameID, configDir string) (int, string, string, error) {
 // Each game gets its own directory, ensuring concurrent launches of different games are properly isolated.
 // If gamesConfig is provided, uses custom port ranges from config; otherwise uses defaults.
 func WriteBridgeJSONWithConfig(gameID, configDir string, gamesConfig *GamesConfig) (int, string, string, error) {
-	return writeBridgeJSONWithConfigDiag(gameID, configDir, gamesConfig, BridgeDiagnostics{})
-}
-
-func writeBridgeJSONWithConfigDiag(gameID, configDir string, gamesConfig *GamesConfig, diag BridgeDiagnostics) (int, string, string, error) {
 	// Assign an available local port using config or fallback ranges.
 	port, err := assignPortWithConfig(gamesConfig)
 	if err != nil {
@@ -73,7 +71,7 @@ func writeBridgeJSONWithConfigDiag(gameID, configDir string, gamesConfig *GamesC
 		return 0, "", "", fmt.Errorf("failed to generate token: %w", err)
 	}
 
-	cfgPath, err := writeBridgeJSONWithEndpointDiag(gameID, configDir, port, token, diag)
+	cfgPath, err := WriteBridgeJSONWithEndpoint(gameID, configDir, port, token)
 	if err != nil {
 		return 0, "", "", err
 	}
@@ -105,9 +103,16 @@ func EnsureBridgeJSONWithConfig(gameID, configDir string, gamesConfig *GamesConf
 	return port, token, path, false, nil
 }
 
-func PrepareBridgeEndpointForStart(gameID, configDir string, gamesConfig *GamesConfig, resetEndpoint bool, diag BridgeDiagnostics) (int, string, string, bool, error) {
+// PrepareBridgeEndpointForStart allocates or reuses the endpoint (port +
+// per-launch token) at endpoint-preparation time. It writes NO diagnostic
+// fields — those are stamped later, at the spawn boundary, by
+// StampBridgeDiagnostics (design/20: "written at spawn"). Rewriting with an
+// empty BridgeDiagnostics also CLEARS any stale diagnostics a reused file
+// carried, so a pre-spawn failure never leaves a profile/revision/startedAt
+// for a process that was never spawned (round 11 P2-8).
+func PrepareBridgeEndpointForStart(gameID, configDir string, gamesConfig *GamesConfig, resetEndpoint bool) (int, string, string, bool, error) {
 	if resetEndpoint {
-		port, token, path, err := writeBridgeJSONWithConfigDiag(gameID, configDir, gamesConfig, diag)
+		port, token, path, err := WriteBridgeJSONWithConfig(gameID, configDir, gamesConfig)
 		return port, token, path, false, err
 	}
 
@@ -131,36 +136,52 @@ func PrepareBridgeEndpointForStart(gameID, configDir string, gamesConfig *GamesC
 		}
 		// The port may be reused; the token is per-launch and always
 		// rotates, so a superseded process's credentials can never attach
-		// to a newer claim (design/03). The diagnostics are RESTAMPED with
-		// this launch's values so a reused endpoint never leaves the previous
-		// launch's profile/revision behind.
+		// to a newer claim (design/03). Writing with no diagnostics clears
+		// the previous launch's stale profile/revision until the spawn
+		// boundary restamps this launch's values.
 		token, err := generateToken()
 		if err != nil {
 			return 0, "", "", false, fmt.Errorf("failed to generate token: %w", err)
 		}
-		if _, err := writeBridgeJSONWithEndpointDiag(gameID, configDir, bridge.Port, token, diag); err != nil {
+		if _, err := WriteBridgeJSONWithEndpoint(gameID, configDir, bridge.Port, token); err != nil {
 			return 0, "", "", false, err
 		}
 		return bridge.Port, token, cfgPath, true, nil
 	}
 
-	port, token, path, err := writeBridgeJSONWithConfigDiag(gameID, configDir, gamesConfig, diag)
+	port, token, path, err := WriteBridgeJSONWithConfig(gameID, configDir, gamesConfig)
 	if err != nil {
 		return 0, "", "", false, err
 	}
 	return port, token, path, false, nil
 }
 
-// WriteBridgeJSONWithEndpoint writes a specific bridge endpoint atomically,
-// with no diagnostic fields (the env-only live contract needs none).
-func WriteBridgeJSONWithEndpoint(gameID, configDir string, port int, token string) (string, error) {
-	return writeBridgeJSONWithEndpointDiag(gameID, configDir, port, token, BridgeDiagnostics{})
+// StampBridgeDiagnostics rewrites bridge.json with the diagnostic-only fields
+// (profile, configRevision, startedAt) at the spawn boundary (design/20),
+// preserving the endpoint (port/token) written at preparation time. It is a
+// no-op when the file is missing — a workload that was never spawned has no
+// diagnostics to stamp. Diagnostics never influence a read decision.
+func StampBridgeDiagnostics(gameID, configDir string, diag BridgeDiagnostics) error {
+	cp, err := NewConfigPaths(configDir)
+	if err != nil {
+		return fmt.Errorf("failed to create config paths: %w", err)
+	}
+	cfgPath := cp.GetBridgeConfigPath(gameID)
+	bridge, err := readBridgeJSONFile(cfgPath)
+	if err != nil {
+		return err
+	}
+	bridge.Profile = diag.Profile
+	bridge.ConfigRevision = diag.ConfigRevision
+	bridge.StartedAt = diag.StartedAt
+	return writeBridgeJSONFile(cfgPath, bridge)
 }
 
-// writeBridgeJSONWithEndpointDiag writes the endpoint plus the diagnostic-only
-// fields (design/03). The diagnostics never influence a read decision — they
-// exist solely for doctor output.
-func writeBridgeJSONWithEndpointDiag(gameID, configDir string, port int, token string, diag BridgeDiagnostics) (string, error) {
+// WriteBridgeJSONWithEndpoint writes a specific bridge endpoint atomically,
+// with NO diagnostic fields — the endpoint (port/token) is the only thing the
+// env-only live contract needs. Diagnostics are stamped separately at spawn
+// (StampBridgeDiagnostics).
+func WriteBridgeJSONWithEndpoint(gameID, configDir string, port int, token string) (string, error) {
 	if port <= 0 || port > 65535 {
 		return "", fmt.Errorf("invalid bridge port %d", port)
 	}
@@ -177,12 +198,9 @@ func writeBridgeJSONWithEndpointDiag(gameID, configDir string, port int, token s
 	}
 
 	bridge := BridgeJSON{
-		Port:           port,
-		Token:          token,
-		GameId:         gameID,
-		Profile:        diag.Profile,
-		ConfigRevision: diag.ConfigRevision,
-		StartTime:      diag.StartTime,
+		Port:   port,
+		Token:  token,
+		GameId: gameID,
 	}
 
 	cfgPath := cp.GetBridgeConfigPath(gameID)

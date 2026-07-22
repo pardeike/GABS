@@ -224,6 +224,79 @@ func TestHistoryEditResetsOnlyChangedBucketDeclaration(t *testing.T) {
 	}
 }
 
+func TestInvalidateDropsBucketWhenDeclarationRemoved(t *testing.T) {
+	dir := t.TempDir()
+	lid := seedHistoryClaim(t, "adv", dir)
+	hash := ContextHash(combatBC(nil))
+	now := time.Now().UTC()
+	snap := ContextSnapshot{Target: "/opt/game", Mode: "DirectPath"}
+
+	// A two-input bucket proven under declarations for scenario + note.
+	_ = RecordWorkloadStart("adv", dir, lid, "combat", hash, snap,
+		SuccessBucket{InputNames: []string{"note", "scenario"},
+			PerInputDecl: map[string]string{"scenario": "decl-s1", "note": "decl-n1"},
+			DeclHash:     "combo-sn", ValueDigest: "digest-x"}, now)
+
+	// Removing ONE member (note deleted from config) must drop the whole
+	// bucket — it can no longer be proof for a set that includes a name the
+	// config no longer declares.
+	if err := InvalidateChangedInputDeclarations("adv", dir, "combat", map[string]string{"scenario": "decl-s1"}); err != nil {
+		t.Fatal(err)
+	}
+	h, _ := LoadHistory("adv", dir)
+	if h.Profiles["combat"].hasBucket("combo-sn", "digest-x") {
+		t.Fatal("a bucket naming a removed declaration must be dropped")
+	}
+}
+
+func TestInvalidateDropsBucketWhenAllDeclarationsRemoved(t *testing.T) {
+	dir := t.TempDir()
+	lid := seedHistoryClaim(t, "adv", dir)
+	hash := ContextHash(combatBC(nil))
+	now := time.Now().UTC()
+	snap := ContextSnapshot{Target: "/opt/game", Mode: "DirectPath"}
+
+	_ = RecordWorkloadStart("adv", dir, lid, "combat", hash, snap,
+		SuccessBucket{InputNames: []string{"scenario"}, PerInputDecl: map[string]string{"scenario": "decl-s1"},
+			DeclHash: "combo-s", ValueDigest: "digest-x"}, now)
+
+	// Removing the LAST input leaves an empty current-declaration map; the
+	// invalidation must still run and drop the orphaned bucket.
+	if err := InvalidateChangedInputDeclarations("adv", dir, "combat", map[string]string{}); err != nil {
+		t.Fatal(err)
+	}
+	h, _ := LoadHistory("adv", dir)
+	if h.Profiles["combat"].hasBucket("combo-s", "digest-x") {
+		t.Fatal("removing the final declaration must drop its buckets")
+	}
+}
+
+func TestInvalidateRemoveThenReaddDoesNotResurrectProof(t *testing.T) {
+	dir := t.TempDir()
+	lid := seedHistoryClaim(t, "adv", dir)
+	hash := ContextHash(combatBC(nil))
+	now := time.Now().UTC()
+	snap := ContextSnapshot{Target: "/opt/game", Mode: "DirectPath"}
+
+	_ = RecordWorkloadStart("adv", dir, lid, "combat", hash, snap,
+		SuccessBucket{InputNames: []string{"scenario"}, PerInputDecl: map[string]string{"scenario": "decl-s1"},
+			DeclHash: "combo-s", ValueDigest: "digest-x"}, now)
+
+	// Remove the declaration (drops the bucket)...
+	if err := InvalidateChangedInputDeclarations("adv", dir, "combat", map[string]string{}); err != nil {
+		t.Fatal(err)
+	}
+	// ...then re-add it with the SAME hash. The earlier-generation bucket must
+	// not come back — it was already gone.
+	if err := InvalidateChangedInputDeclarations("adv", dir, "combat", map[string]string{"scenario": "decl-s1"}); err != nil {
+		t.Fatal(err)
+	}
+	h, _ := LoadHistory("adv", dir)
+	if h.Profiles["combat"].hasBucket("combo-s", "digest-x") {
+		t.Fatal("a removed bucket must not be resurrected by re-adding the declaration")
+	}
+}
+
 func TestHistorySurvivesAndDegrades(t *testing.T) {
 	dir := t.TempDir()
 	// A missing history file degrades to an empty record, never an error.

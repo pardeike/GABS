@@ -389,6 +389,16 @@ type SuccessBucket struct {
 	ValueDigest  string            // per-game-keyed digest of supplied values
 }
 
+// HistorySuccessIdentity is the non-secret information (plus the 0600-protected
+// lastGood snapshot) pinned in the runtime claim at publication so ANY Stage 4
+// promotion path — synchronous start, passive status observation, bridge
+// attachment, restart recovery — can record this launch's verified start from
+// the claim alone, never a hot-config recompute (round 11 P1-2).
+type HistorySuccessIdentity struct {
+	Snapshot ContextSnapshot `json:"snapshot"`
+	Bucket   SuccessBucket   `json:"bucket"`
+}
+
 // RecordWorkloadStart is the Stage 4 verified point: workloadStarts++,
 // consecutiveFailures reset, lastGood refreshed, and the supplied-input
 // bucket recorded (design/20). Fenced to launchID: a promote whose claim
@@ -459,10 +469,55 @@ func ApplyBridgeConnectLocked(gameID, configDir, profile, contextHash string) {
 	})
 }
 
-// applyActionFailure records a terminal stop/kill action failure using an
-// already held transition lock, fenced by the completion's own launch +
-// operation identity (round 10).
-func applyActionFailure(gameID, configDir, profile, contextHash, outcome, class string, at time.Time) {
+// ApplyWorkloadStartLocked records a Stage 4 verified start (workloadStarts++,
+// consecutiveFailures=0, lastGood refresh, input bucket) using an already held
+// transition lock — called INSIDE the fenced transition that flips a completed
+// starting claim to active, so EVERY Stage 4 promotion (synchronous start,
+// passive status observation, bridge attachment, restart recovery) credits the
+// start exactly once (round 11 P1-2). The identity is the one pinned in the
+// claim at publication, never recomputed from hot config.
+func ApplyWorkloadStartLocked(gameID, configDir, profile, contextHash string, snap ContextSnapshot, bucket SuccessBucket, at time.Time) {
+	if contextHash == "" {
+		return
+	}
+	_ = applyHistoryLocked(gameID, configDir, func(h *GameHistory) {
+		e := h.entryForContext(profile, contextHash)
+		e.WorkloadStarts++
+		e.ConsecutiveFailures = 0
+		e.LastSuccessAt = at
+		e.recordBucket(HistoryBucket{
+			InputNames:   append([]string(nil), bucket.InputNames...),
+			PerInputDecl: bucket.PerInputDecl,
+			DeclHash:     bucket.DeclHash,
+			ValueDigest:  bucket.ValueDigest,
+			Count:        1,
+			LastAt:       at,
+		})
+		if h.LastGood == nil {
+			h.LastGood = map[string]*HistoryLastGood{}
+		}
+		h.LastGood[profile] = &HistoryLastGood{ContextHash: contextHash, EntrySnapshot: snap, At: at}
+	})
+}
+
+// ApplyPinnedWorkloadStartLocked records a Stage 4 verified start from the
+// identity pinned in the claim, using an already-held runtime-state transition
+// lock (round 11 P1-2). No-op for a claim without a pinned identity. The caller
+// MUST invoke this only when the transition actually flips starting→active for
+// a start (never for a recovered stop/kill, whose workload started earlier).
+func ApplyPinnedWorkloadStartLocked(gameID, configDir string, st *RuntimeState, at time.Time) {
+	if st == nil || st.HistorySuccess == nil || st.HistoryContextHash == "" {
+		return
+	}
+	ApplyWorkloadStartLocked(gameID, configDir, EffectiveClaimProfile(st),
+		st.HistoryContextHash, st.HistorySuccess.Snapshot, st.HistorySuccess.Bucket, at)
+}
+
+// ApplyActionFailureLocked records a terminal failure of an accepted attempt
+// (a stop/kill action failure, or an unobserved start) using an already held
+// transition lock, fenced by the caller's own launch/operation identity — so
+// a stale completion can never bump a successor's history (rounds 10-11).
+func ApplyActionFailureLocked(gameID, configDir, profile, contextHash, outcome, class string, at time.Time) {
 	_ = applyHistoryLocked(gameID, configDir, func(h *GameHistory) {
 		e := h.entryForContext(profile, contextHash)
 		e.ConsecutiveFailures++
@@ -497,7 +552,13 @@ func InvalidateChangedInputDeclarations(gameID, configDir, profile string, curre
 		for _, b := range e.Buckets {
 			changed := false
 			for name, recordedDecl := range b.PerInputDecl {
-				if cur, ok := currentDecls[name]; ok && cur != recordedDecl {
+				// A declaration that was REMOVED (absent from the current map)
+				// invalidates its bucket exactly like a changed hash — else a
+				// deleted-then-readded declaration would resurrect proof for
+				// values that belonged to the earlier generation (round 11
+				// P2-4).
+				cur, ok := currentDecls[name]
+				if !ok || cur != recordedDecl {
 					changed = true
 					break
 				}
