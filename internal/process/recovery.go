@@ -73,7 +73,7 @@ func RecoverInterruptedClaim(gameID, configDir, instanceID string, claim *Runtim
 			// claim is the start gate's supersession business.
 			return &ClaimRecovery{Claim: claim}, nil
 		}
-		if err := removeRuntimeStateGuarded(gameID, configDir, instanceID, claim.LaunchID, op.OperationID, selfLive); err != nil {
+		if err := removeRuntimeStateGuarded(gameID, configDir, instanceID, claim.LaunchID, op.OperationID, selfLive, nil); err != nil {
 			if errors.Is(err, errStopAttachmentLive) {
 				// A bridge holds the claim: not removable, leave occupied.
 				return &ClaimRecovery{Claim: claim}, nil
@@ -156,7 +156,7 @@ func RecoverInterruptedClaim(gameID, configDir, instanceID string, claim *Runtim
 		}
 		return rec, nil
 	default: // stopped
-		err := removeRuntimeStateGuarded(gameID, configDir, instanceID, claim.LaunchID, op.OperationID, selfLive)
+		err := removeRuntimeStateGuarded(gameID, configDir, instanceID, claim.LaunchID, op.OperationID, selfLive, nil)
 		switch {
 		case err == nil:
 			rec.Removed = true

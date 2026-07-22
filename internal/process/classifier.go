@@ -18,6 +18,11 @@ type ClassifyContext struct {
 	// combination has never been proven on an otherwise-proven context.
 	InputCombinationFresh bool
 	SuppliedInputs        []string
+	// HookReportedStopped is producer evidence for exited_during_start: the
+	// failure was surfaced by a status hook reporting stopped (a wrapper /
+	// container exiting immediately — a missing image or name conflict),
+	// which is environment-class, versus a bare child crash (game-class).
+	HookReportedStopped bool
 }
 
 // Classification is a cause class plus an optional secondary note (the
@@ -50,9 +55,11 @@ func Classify(code string, ctx ClassifyContext) Classification {
 		"stop_unsupported", "kill_unsupported":
 		return Classification{Class: CauseConfig}
 
-	// state — GABS runtime state must be resolved first.
+	// state — GABS runtime state must be resolved first. A stop that
+	// succeeded while the workload is still running (action_succeeded_
+	// running) is likewise a state situation the caller resolves.
 	case "already_running", "blocked_unknown_state", "external_instance_detected",
-		"operation_in_progress", "termination_unverified":
+		"operation_in_progress", "termination_unverified", "action_succeeded_running":
 		return Classification{Class: CauseState}
 
 	// environment — host/store/network state; config edits cannot fix it.
@@ -60,8 +67,14 @@ func Classify(code string, ctx ClassifyContext) Classification {
 		"action_failed", "action_timed_out":
 		return Classification{Class: CauseEnvironment}
 
-	// game — the workload itself.
+	// exited_during_start is game-class for a bare child crash, but
+	// environment-class when a status hook surfaced it — a wrapper /
+	// container exiting immediately (missing image, name conflict, host
+	// failure), per the design/05 bad-case map.
 	case "exited_during_start":
+		if ctx.HookReportedStopped {
+			return withInputNote(Classification{Class: CauseEnvironment}, ctx)
+		}
 		return withInputNote(Classification{Class: CauseGame}, ctx)
 
 	// Proof-adjusted (design/05 dual-class rows): proven → environment
@@ -94,7 +107,13 @@ func withInputNote(c Classification, ctx ClassifyContext) Classification {
 // connected.
 func TrackRecordLine(e *HistoryEntry) string {
 	if e == nil || e.WorkloadStarts == 0 {
-		return ""
+		// "Never proven" is itself the relevant evidence (design/08): a
+		// never-proven context is where a config edit is legitimate, and
+		// the line says so rather than being omitted.
+		if e != nil && e.ConsecutiveFailures > 0 {
+			return fmt.Sprintf("no successful starts recorded for this context (%d consecutive failures)", e.ConsecutiveFailures)
+		}
+		return "no successful starts recorded for this context"
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "started %d×", e.WorkloadStarts)

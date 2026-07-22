@@ -930,6 +930,12 @@ func (e *ProcessError) Error() string {
 	}
 }
 
+// Unwrap exposes the wrapped cause so the start pipeline can see a
+// pre-spawn fencing loss (ErrFencingViolation / ErrNoRuntimeClaim) that the
+// controller's beforeSpawn abort surfaces, rather than misreporting a
+// deliberately-never-attempted spawn as spawn_failed (review round 10).
+func (e *ProcessError) Unwrap() error { return e.Err }
+
 // Helper functions for cross-platform process management
 func getTerminationSignal() os.Signal {
 	switch runtime.GOOS {

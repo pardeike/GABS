@@ -73,6 +73,13 @@ type StopRequest struct {
 	// process started — called before a stopped verdict clears the claim
 	// (design/04); nil when the caller tracks no child.
 	ReapLauncher func()
+
+	// HistoryProfile and HistoryContextHash are the pinned track-record
+	// coordinates (from the claim, never recomputed from hot config): a
+	// verified stop records cleanStops++ and a failed action records its
+	// failure under the same removal/completion lock (design/20; round 10).
+	HistoryProfile     string
+	HistoryContextHash string
 }
 
 // StopRefusal is a structured refusal: nothing was executed and nothing
@@ -397,6 +404,21 @@ func persistStopCompletion(req StopRequest, launchID, operationID, phase, status
 	}
 	outcome.Result = result
 	outcome.FinalPhase = final.Phase
+
+	// A terminal action failure of an accepted attempt updates the active
+	// context's failure record (design/20; round 10) — under the same lock,
+	// so a superseded successor is never touched (the fenced transition
+	// above already proved this launch is still current).
+	if req.HistoryContextHash != "" && (result.Outcome == OutcomeActionFailed || result.Outcome == OutcomeActionTimedOut) {
+		lock, lerr := AcquireTransitionLock(req.GameID, req.ConfigDir, transitionLockGateTimeout)
+		if lerr == nil {
+			if cur, cerr := LoadRuntimeState(req.GameID, req.ConfigDir); cerr == nil && cur != nil && cur.LaunchID == launchID {
+				class := Classify(result.Outcome, ClassifyContext{}).Class
+				applyActionFailure(req.GameID, req.ConfigDir, req.HistoryProfile, req.HistoryContextHash, result.Outcome, class, result.Timestamp)
+			}
+			lock.Release()
+		}
+	}
 }
 
 // errStopAttachmentLive refuses a terminated-removal because the current
@@ -407,12 +429,19 @@ var errStopAttachmentLive = errors.New("live foreign bridge attachment")
 // removeRuntimeStateForStopCompletion removes the claim only while it still
 // carries the completing attempt's launch and operation identity, and only
 // when no fresh fingerprint-matched foreign attachment lease exists — the
-// last-instant re-check behind the per-round evidence reads.
+// last-instant re-check behind the per-round evidence reads. A verified
+// stop records cleanStops++ inside the SAME lock, before removal, so it can
+// never race a successor claim (design/20; round 10).
 func removeRuntimeStateForStopCompletion(req StopRequest, launchID, operationID string) error {
-	return removeRuntimeStateGuarded(req.GameID, req.ConfigDir, req.InstanceID, launchID, operationID, req.SelfConnection)
+	return removeRuntimeStateGuarded(req.GameID, req.ConfigDir, req.InstanceID, launchID, operationID, req.SelfConnection,
+		func() {
+			if req.HistoryContextHash != "" {
+				applyCleanStop(req.GameID, req.ConfigDir, req.HistoryProfile, req.HistoryContextHash, time.Now().UTC())
+			}
+		})
 }
 
-func removeRuntimeStateGuarded(gameID, configDir, instanceID, launchID, operationID string, selfLive func(connectionID string) bool) error {
+func removeRuntimeStateGuarded(gameID, configDir, instanceID, launchID, operationID string, selfLive func(connectionID string) bool, onRemove func()) error {
 	lock, err := AcquireTransitionLock(gameID, configDir, transitionLockGateTimeout)
 	if err != nil {
 		return err
@@ -433,6 +462,9 @@ func removeRuntimeStateGuarded(gameID, configDir, instanceID, launchID, operatio
 	}
 	if attachmentBlocksRemoval(cur.Attachment, instanceID, selfLive) {
 		return errStopAttachmentLive
+	}
+	if onRemove != nil {
+		onRemove() // record cleanStop under this same lock before removal
 	}
 	return RemoveRuntimeState(gameID, configDir)
 }
@@ -477,7 +509,7 @@ func attachmentBlocksRemoval(a *RuntimeAttachment, instanceID string, selfLive f
 // cleared the operation make their own fully fenced decisions instead of
 // passing through this generic failure cleanup.
 func ReleaseStartClaim(gameID, configDir, instanceID, launchID, operationID string, selfLive func(connectionID string) bool) error {
-	return removeRuntimeStateGuarded(gameID, configDir, instanceID, launchID, operationID, selfLive)
+	return removeRuntimeStateGuarded(gameID, configDir, instanceID, launchID, operationID, selfLive, nil)
 }
 
 // RemoveRuntimeStateIfCurrent removes the claim only while it still carries

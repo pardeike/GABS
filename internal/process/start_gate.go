@@ -158,7 +158,7 @@ func GateStart(g StartGate) (*StartGateResult, error) {
 	probeWarnings, refusal, err := runPreStartProbes(g, &state, now)
 	warnings = append(warnings, probeWarnings...)
 	if err != nil {
-		_ = removeRuntimeStateGuarded(g.GameID, g.ConfigDir, g.InstanceID, state.LaunchID, state.Operation.OperationID, gateSelfLive(g, state.LaunchID))
+		_ = removeRuntimeStateGuarded(g.GameID, g.ConfigDir, g.InstanceID, state.LaunchID, state.Operation.OperationID, gateSelfLive(g, state.LaunchID), nil)
 		return nil, err
 	}
 	if refusal != nil {
@@ -409,7 +409,7 @@ func runPreStartProbes(g StartGate, state *RuntimeState, now time.Time) ([]strin
 	}
 	if len(running) > 1 {
 		// GABS never guesses among candidates: report all, persist nothing.
-		if err := removeRuntimeStateGuarded(g.GameID, g.ConfigDir, g.InstanceID, state.LaunchID, state.Operation.OperationID, gateSelfLive(g, state.LaunchID)); err != nil && !errors.Is(err, ErrFencingViolation) {
+		if err := removeRuntimeStateGuarded(g.GameID, g.ConfigDir, g.InstanceID, state.LaunchID, state.Operation.OperationID, gateSelfLive(g, state.LaunchID), nil); err != nil && !errors.Is(err, ErrFencingViolation) {
 			return warnings, nil, err
 		}
 		return warnings, &StartRefusal{
@@ -445,7 +445,7 @@ func runPreStartProbes(g StartGate, state *RuntimeState, now time.Time) ([]strin
 				SnapshotPersisted: true,
 			}, nil
 		case len(pids) > 1:
-			if err := removeRuntimeStateGuarded(g.GameID, g.ConfigDir, g.InstanceID, state.LaunchID, state.Operation.OperationID, gateSelfLive(g, state.LaunchID)); err != nil && !errors.Is(err, ErrFencingViolation) {
+			if err := removeRuntimeStateGuarded(g.GameID, g.ConfigDir, g.InstanceID, state.LaunchID, state.Operation.OperationID, gateSelfLive(g, state.LaunchID), nil); err != nil && !errors.Is(err, ErrFencingViolation) {
 				return warnings, nil, err
 			}
 			candidates := make([]string, 0, len(pids))

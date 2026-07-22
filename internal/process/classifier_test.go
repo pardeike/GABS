@@ -91,6 +91,27 @@ func TestClassifyTrackRecordLine(t *testing.T) {
 	if !containsAll(line, "14") {
 		t.Fatalf("the line must report the counts: %q", line)
 	}
+	// A never-proven context still renders an explicit line — the absence
+	// of proof is itself the evidence (design/08).
+	np := TrackRecordLine(&HistoryEntry{ConsecutiveFailures: 1})
+	if np == "" || !containsAll(np, "no successful starts") {
+		t.Fatalf("never-proven must render an explicit line: %q", np)
+	}
+}
+
+func TestClassifyActionSucceededRunning(t *testing.T) {
+	if Classify("action_succeeded_running", ClassifyContext{}).Class != CauseState {
+		t.Error("action_succeeded_running is a state situation the caller resolves")
+	}
+}
+
+func TestClassifyExitedEvidenceBased(t *testing.T) {
+	if Classify("exited_during_start", ClassifyContext{}).Class != CauseGame {
+		t.Error("a bare crash on start is game class")
+	}
+	if Classify("exited_during_start", ClassifyContext{HookReportedStopped: true}).Class != CauseEnvironment {
+		t.Error("a wrapper/container surfaced by a status hook is environment class")
+	}
 }
 
 func containsAll(s string, subs ...string) bool {

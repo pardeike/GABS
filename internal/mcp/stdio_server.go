@@ -849,6 +849,14 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		if len(game.LaunchInputs) > 0 {
 			structured["launchInputs"] = launchInputsStructured(game.LaunchInputs)
 		}
+		// Per-profile track record (design/08; round 10 P2-12): proof and
+		// counters for each launchable context, with an edited context read
+		// as never-proven for the settings the next start would use.
+		if snap, snapErr := s.currentSnapshot(); snapErr == nil {
+			if tr := s.buildTrackRecordSummary(snap, *game); len(tr) > 0 {
+				structured["trackRecord"] = tr
+			}
+		}
 		if warns := gameConfigWarnings(gamesConfig, game.ID); len(warns) > 0 {
 			structured["configWarnings"] = warns
 		}
@@ -1146,12 +1154,12 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}
 
 		validationWarnings := gameValidationWarnings(*game)
-		hctx := s.buildHistoryContext(*game, resolved, inputsArg)
+		hctx := s.buildHistoryContext(snap, *game, resolved, inputsArg)
 		startResult, err := s.startGame(*game, gamesConfig, backoffMin, backoffMax, startupGABPTimeout, resetEndpoint, resolved, hctx)
 		if err != nil {
 			var refusalErr *startRefusalError
 			if errors.As(err, &refusalErr) {
-				return s.startRefusalResult(*game, refusalErr, validationWarnings), nil
+				return s.startRefusalResult(*game, refusalErr, hctx, validationWarnings), nil
 			}
 			var unobsErr *unobservedStartError
 			if errors.As(err, &unobsErr) {
@@ -1165,6 +1173,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				if len(unobsErr.warnings) > 0 {
 					structured["startWarnings"] = unobsErr.warnings
 				}
+				s.finalizeStartFailure(structured, *game, hctx, "unobserved", false)
 				addValidationWarnings(structured, validationWarnings)
 				addResolvedContext(structured, resolved)
 				return &ToolResult{
@@ -1188,7 +1197,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				if len(exitedErr.warnings) > 0 {
 					structured["startWarnings"] = exitedErr.warnings
 				}
-				s.attachFailureAttribution(structured, *game, hctx, exitedErr.causeClass, exitedErr.secondaryNote)
+				s.finalizeStartFailure(structured, *game, hctx, "exited_during_start", exitedErr.hookReportedStopped)
 				addValidationWarnings(structured, validationWarnings)
 				addResolvedContext(structured, resolved)
 				return &ToolResult{
@@ -1225,34 +1234,49 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}
 			var epErr *endpointUnavailableError
 			if errors.As(err, &epErr) {
+				structured := map[string]interface{}{
+					"code": "endpoint_unavailable", "gameId": game.ID, "detail": epErr.err.Error(),
+				}
+				s.finalizeStartFailure(structured, *game, hctx, "endpoint_unavailable", false)
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("Cannot start %s: %v", game.ID, epErr)}},
-					IsError: true,
-					StructuredContent: map[string]interface{}{
-						"code": "endpoint_unavailable", "gameId": game.ID, "detail": epErr.err.Error(),
-					},
+					Content:           []Content{{Type: "text", Text: fmt.Sprintf("Cannot start %s: %v", game.ID, epErr)}},
+					IsError:           true,
+					StructuredContent: structured,
 				}, nil
 			}
 			var sizeIssue *launch.SpecSizeIssue
 			if errors.As(err, &sizeIssue) {
+				structured := map[string]interface{}{
+					"code": "spec_too_large", "part": sizeIssue.Part, "gameId": game.ID,
+				}
+				s.finalizeStartFailure(structured, *game, hctx, "spec_too_large", false)
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("Refusing to start %s: %s", game.ID, sizeIssue.Message)}},
-					IsError: true,
-					StructuredContent: map[string]interface{}{
-						"code": "spec_too_large", "part": sizeIssue.Part, "gameId": game.ID,
-					},
+					Content:           []Content{{Type: "text", Text: fmt.Sprintf("Refusing to start %s: %s", game.ID, sizeIssue.Message)}},
+					IsError:           true,
+					StructuredContent: structured,
 				}, nil
+			}
+			// A pre-spawn fencing loss aborts process creation deliberately;
+			// the controller surfaces it through ProcessError, which now
+			// Unwraps — map it to the stable supersession outcome, never
+			// spawn_failed (round 10).
+			if errors.Is(err, process.ErrFencingViolation) || errors.Is(err, process.ErrNoRuntimeClaim) {
+				if refErr, ok := s.supersededStartRefusal(game.ID).(*startRefusalError); ok {
+					return s.startRefusalResult(*game, refErr, hctx, validationWarnings), nil
+				}
 			}
 			var procErr *process.ProcessError
 			if errors.As(err, &procErr) && (procErr.Type == process.ProcessErrorTypeStart || procErr.Type == process.ProcessErrorTypeConfiguration) {
 				// OS process creation failed on a valid resolved spec:
 				// spawn_failed with the OS evidence (incl. elevation hint).
+				structured := map[string]interface{}{
+					"code": "spawn_failed", "gameId": game.ID, "osError": procErr.Err.Error(),
+				}
+				s.finalizeStartFailure(structured, *game, hctx, "spawn_failed", false)
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to start %s: %v", game.ID, err)}},
-					IsError: true,
-					StructuredContent: map[string]interface{}{
-						"code": "spawn_failed", "gameId": game.ID, "osError": procErr.Err.Error(),
-					},
+					Content:           []Content{{Type: "text", Text: fmt.Sprintf("Failed to start %s: %v", game.ID, err)}},
+					IsError:           true,
+					StructuredContent: structured,
 				}, nil
 			}
 
@@ -4361,16 +4385,30 @@ func addStartAdoption(structured map[string]interface{}, message *string, r *pro
 
 // startRefusalResult renders a Stage 2 refusal with its stable code and
 // per-code next actions.
-func (s *Server) startRefusalResult(game config.GameConfig, e *startRefusalError, validationWarnings []string) *ToolResult {
+func (s *Server) startRefusalResult(game config.GameConfig, e *startRefusalError, hc historyContext, validationWarnings []string) *ToolResult {
 	ref := e.refusal
 	structured := map[string]interface{}{
 		"code":   ref.Code,
 		"gameId": game.ID,
 	}
-	// Every failure result carries a causeClass (design/08). Refusals are
-	// pre-accept (no history WRITE), but they still classify — the gating
-	// refusals are all state class.
-	structured["causeClass"] = process.Classify(ref.Code, process.ClassifyContext{}).Class
+	// Every failure result carries a causeClass + track record (design/08).
+	// Refusals are pre-accept (no history WRITE) — render only. The
+	// gating-refusal next actions below stay (all state-class, no config
+	// edit); attribution adds the class, track line, and edit notice.
+	cls := process.Classify(ref.Code, process.ClassifyContext{})
+	structured["causeClass"] = cls.Class
+	var entry *process.HistoryEntry
+	if h, herr := process.LoadHistory(game.ID, s.configDir); herr == nil {
+		if en := h.Profiles[hc.profile]; en != nil && en.ContextHash == hc.contextHash && hc.contextHash != "" {
+			entry = en
+		}
+	}
+	structured["trackRecord"] = process.TrackRecordLine(entry)
+	if hc.contextHash != "" {
+		if notice := s.editNoticeFor(game.ID, hc); notice != "" {
+			structured["editNotice"] = notice
+		}
+	}
 	if ref.ActiveProfile != "" || ref.Code == process.RefusalAlreadyRunning {
 		structured["activeProfile"] = ref.ActiveProfile
 	}
@@ -4450,12 +4488,11 @@ func (e *unobservedStartError) Error() string {
 
 // exitedDuringStartError carries the Stage 4 exit evidence.
 type exitedDuringStartError struct {
-	exitCode      int
-	tail          string
-	hookEvidence  string
-	warnings      []string
-	causeClass    string
-	secondaryNote string
+	exitCode            int
+	tail                string
+	hookEvidence        string
+	warnings            []string
+	hookReportedStopped bool
 }
 
 func (e *exitedDuringStartError) Error() string {
@@ -4929,12 +4966,29 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	launchID := runtimeState.LaunchID
 	opID := runtimeState.Operation.OperationID
 	startWarnings := gateRes.Warnings
+	hc.launchID = launchID
 
 	cleanupRuntimeState := true
+	// Terminal accepted-attempt failures must be written to history while the
+	// claim is still alive and fenced to THIS launch (round 10): the handler's
+	// renderer runs after the deferred release, so the write cannot live there.
+	// exitedFailure records inline (its claim is torn down mid-flow); the other
+	// cleanup-path codes record here, immediately before the release.
+	failureRecorded := false
+	var pendingFailCode string
+	var pendingFailHookStopped bool
+	recordFail := func(code string, hookStopped bool) {
+		if failureRecorded || code == "" {
+			return
+		}
+		failureRecorded = true
+		s.recordTerminalStartFailure(game, hc, code, hookStopped)
+	}
 	defer func() {
 		if !cleanupRuntimeState {
 			return
 		}
+		recordFail(pendingFailCode, pendingFailHookStopped)
 		// Release only OUR claim: fenced by the launch + operation identity
 		// this start created — a cleanup that lost a race (its transition
 		// fenced out, its claim superseded) must never delete a successor
@@ -4960,6 +5014,7 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	// Failure is structured and the claim is released (deferred cleanup).
 	port, token, bridgePath, reusedBridge, err := config.PrepareBridgeEndpointForStart(game.ID, s.configDir, s.gamesConfig, resetEndpoint)
 	if err != nil {
+		pendingFailCode = "endpoint_unavailable"
 		return nil, &endpointUnavailableError{gameID: game.ID, err: err}
 	}
 
@@ -4982,6 +5037,9 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	if _, err := process.FencedTransition(game.ID, s.configDir, launchID, opID, func(st *process.RuntimeState) error {
 		st.Endpoint = &process.RuntimeEndpoint{Port: port, Token: token}
 		st.ContextDigests = spawnDigests
+		// Pin the track-record context hash so delivery/stop/recovery
+		// credit THIS launch, never a value recomputed from hot config.
+		st.HistoryContextHash = hc.contextHash
 		return nil
 	}); err != nil {
 		return nil, fmt.Errorf("failed to persist endpoint into runtime claim for '%s': %w", game.ID, err)
@@ -4999,6 +5057,7 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 		}
 		finalArgv := append([]string{launchSpec.PathOrId}, launchSpec.Args...)
 		if iss := launch.CheckProcessSize(finalArgv, finalEnv); iss != nil {
+			pendingFailCode = "spec_too_large"
 			return nil, iss
 		}
 	}
@@ -5074,19 +5133,20 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 		return result, &unobservedStartError{warnings: startWarnings}
 	}
 	exitedFailure := func(ev *process.LivenessEvidence) (*process.ProcessStartResult, error) {
-		// A terminal failure of an accepted attempt with a resolved context:
-		// record it and classify (design/08). exited_during_start is
-		// outcome-implied game class; an unproven input combination adds a
-		// secondary note without changing the class.
-		cls := s.recordStartFailure(game, hc, "exited_during_start")
+		// Record while the claim is still ours (round 10): some exited paths
+		// remove the claim right after this returns, so the fenced write must
+		// land here, not in the handler's post-release renderer. The closure
+		// carries the producer evidence — a status-hook-surfaced exit
+		// (wrapper / container) is environment-class, a bare crash game-class.
+		hookStopped := ev != nil && ev.Source == process.LivenessSourceStatusHook
+		recordFail("exited_during_start", hookStopped)
 		e := &exitedDuringStartError{
-			exitCode:      controller.ExitCode(),
-			tail:          controller.LaunchLogTail(16 * 1024),
-			warnings:      startWarnings,
-			causeClass:    cls.Class,
-			secondaryNote: cls.SecondaryNote,
+			exitCode:            controller.ExitCode(),
+			tail:                controller.LaunchLogTail(16 * 1024),
+			warnings:            startWarnings,
+			hookReportedStopped: hookStopped,
 		}
-		if ev != nil && ev.Source == process.LivenessSourceStatusHook {
+		if hookStopped {
 			e.hookEvidence = ev.Detail
 		}
 		return result, e
@@ -5115,6 +5175,14 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 			cleanupRuntimeState = false
 			return result, s.supersededStartRefusal(game.ID)
 		} else {
+			// Record spawn_failed ONLY when the handler will also render it as
+			// spawn_failed (round 10): a Start/Configuration ProcessError. Any
+			// other error type falls through to the handler's generic branch
+			// with no causeClass — writing spawn_failed for it would credit a
+			// history failure the caller never sees classified.
+			if procErr != nil && (procErr.Type == process.ProcessErrorTypeStart || procErr.Type == process.ProcessErrorTypeConfiguration) {
+				pendingFailCode = "spawn_failed"
+			}
 			return result, fmt.Errorf("failed to start game '%s' (mode: %s, target: %s): %w",
 				game.ID, game.LaunchMode, game.Target, result.Error)
 		}
@@ -5210,12 +5278,9 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	result.GABPConnectWait = connectResult.Wait
 	result.GameStillRunning = connectResult.GameStillRunning
 	result.ProcessExitedDuringGABP = connectResult.ProcessExitedDuringGABP
-	if connectResult.Connected {
-		// Stage 5 connected (design/20): bridgeConnects++.
-		if err := process.RecordBridgeConnect(game.ID, s.configDir, hc.profile, hc.contextHash, time.Now().UTC()); err != nil {
-			s.log.Warnw("failed to record bridge connect in history", "gameId", game.ID, "error", err)
-		}
-	}
+	// bridgeConnects++ is recorded at credential-bound attachment
+	// publication (recordBridgeAttachment), covering the synchronous,
+	// background, reconnect, and migration paths exactly once — not here.
 
 	if !result.GameStillRunning {
 		// Stage 5: the workload looks dead while waiting for the bridge —
@@ -5228,6 +5293,9 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 			result.GameStillRunning = true
 			result.Adopted = result.Adopted || controller.DirectChildExited()
 		case process.StatusStopped:
+			// Record the terminal failure while the claim is still ours, THEN
+			// remove it (round 10): the fenced write must see our launchID.
+			res, ferr := exitedFailure(&ev)
 			// The promote transition already cleared our operation, so this
 			// completion makes its own fully fenced decision (design/06):
 			// same launch, still no operation, no removal-blocking
@@ -5238,7 +5306,7 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 				}
 				result.StartWarnings = append(result.StartWarnings, "the exited launch's claim was superseded or held and was left in place")
 			}
-			return exitedFailure(&ev)
+			return res, ferr
 		default:
 			// unknown never cleans state; status/connect will resolve it
 		}

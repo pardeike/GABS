@@ -179,6 +179,12 @@ type RuntimeState struct {
 	// for which the legacy bridge.json endpoint may still be migrated.
 	NormalizedFromLegacy bool `json:"normalizedFromLegacy,omitempty"`
 
+	// HistoryContextHash pins the input-free track-record context hash at
+	// claim creation (design/08): delivery, reconnect, stop, recovery, and
+	// delayed completions credit THIS launch's context, never a value
+	// recomputed from hot-reloaded config (review round 10).
+	HistoryContextHash string `json:"historyContextHash,omitempty"`
+
 	Profile           string   `json:"profile,omitempty"`
 	AppliedInputNames []string `json:"appliedInputNames,omitempty"` // names only, never values
 	// AppliedInputsState distinguishes "known to have used no inputs"

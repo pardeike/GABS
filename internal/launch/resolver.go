@@ -344,6 +344,53 @@ func validateInputValue(name string, decl *config.LaunchInputConfig, val any) (s
 	return "", false, invalidInput(name, "unknown declared type "+decl.Type)
 }
 
+// BaseContext is the input-FREE effective launch context for one profile,
+// used to key the track record (design/08). It reuses the resolver's env
+// merge (folding, unset-then-restore) so the hash matches real launch
+// semantics — never a second merge implementation. ConfigEnv holds only
+// the config-declared keys' effective folded values; AbsentEnvNames the
+// effective absences; managed variables and launch inputs are excluded.
+type BaseContext struct {
+	Target         string
+	Mode           string
+	Args           []string
+	ConfigEnv      map[string]string
+	AbsentEnvNames []string
+	WorkingDir     string
+	Lifecycle      *ResolvedLifecycle
+}
+
+// ResolveBaseContext resolves a profile with NO launch inputs and extracts
+// the effective config context. It is the single source of the track
+// record's input-free context (design/08): caller-chosen inputs and their
+// env/arg contributions are excluded, so identical launches hash
+// identically regardless of supplied inputs, and a no-op unset restored by
+// a later layer produces no spurious absence.
+func ResolveBaseContext(snap *config.Snapshot, gameID, profile string, opts Options) (*BaseContext, *ResolveError) {
+	r, rerr := Resolve(snap, Request{GameID: gameID, Profile: profile}, opts)
+	if rerr != nil {
+		return nil, rerr
+	}
+	game := snap.Config.Games[gameID]
+	configEnv := map[string]string{}
+	for _, k := range r.ContextEnvKeys {
+		if v, ok := r.Env[k]; ok {
+			configEnv[k] = v
+		}
+	}
+	absent := append([]string(nil), r.AbsentEnvNames...)
+	sort.Strings(absent)
+	return &BaseContext{
+		Target:         game.Target,
+		Mode:           game.LaunchMode,
+		Args:           r.Args,
+		ConfigEnv:      configEnv,
+		AbsentEnvNames: absent,
+		WorkingDir:     r.WorkingDir,
+		Lifecycle:      r.Lifecycle,
+	}, nil
+}
+
 // ResolveProfileLifecycles resolves every configured profile's lifecycle
 // hooks (key "" for an unprofiled game) — the pre-start probe set. Probing
 // every profile's status hook, each invoked exactly as normal hook

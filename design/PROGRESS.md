@@ -551,7 +551,7 @@ contract, not a scratchpad.
       operation_in_progress/blocked_unknown_state; occupied persistence
       failure is blocked_unknown_state), and the detach s.mu/
       transition-lock inversion is removed)
-- [x] M2.10 History store + classifier + input-combination buckets +
+- [~] M2.10 History store + classifier + input-combination buckets +
       edit notice + causeClass/track-record rendering — spec: 08; tests:
       T-TRACK
       (internal/process/history.go + classifier.go: a per-game 0600
@@ -559,9 +559,12 @@ contract, not a scratchpad.
       under the per-game transition lock so a server delivery callback
       and a CLI stop lose no increments (proven by a 40×2 concurrent
       -race test). The context hash is INPUT-FREE by construction —
-      composed from config directly (target, mode, base argv = game +
-      profile args with no input groups, the config-declared env layer,
-      cwd, resolved lifecycle), never from the post-input Resolved
+      composed from the resolver's own effective base context (a shared
+      launch.ResolveBaseContext reusing the real env merge — target, mode,
+      base argv, the config-declared env layer with platform folding,
+      effective absences, cwd, resolved lifecycle — NOT a second
+      config-direct env implementation; round 10 P2-10), never from the
+      post-input Resolved
       (inputs bind both args AND env via LaunchInputConfig, so hashing
       Resolved would split arena/tutorial into two contexts instead of
       one context + two buckets). Granularity is the reset mechanism:
@@ -596,10 +599,18 @@ contract, not a scratchpad.
       may hold env values but lives only in the 0600 file — rendering
       consumes counters + the computed line, never the raw record, so
       it cannot leak (tested). Corrupt/missing history degrades to "no
-      track record" without failing any lifecycle op. The
-      doctor --show-last-good surface and the history-reset-on-config-
-      edit trigger from a live reload are M3.2's doctor work; the store,
-      classifier, and start/stop/delivery wiring land here)
+      track record" without failing any lifecycle op. Round 10 landed the
+      full behavioural surface here — not deferred: the record/render split
+      (a terminal failure is WRITTEN while the claim is alive and fenced to
+      the launch, inside startGame, then RENDERED after release), every
+      history event fenced to the launch identity, the pinned
+      HistoryContextHash (delivery/stop/recovery credit the launch, never a
+      hot-config recompute), bridgeConnects++ at every credential-bound
+      attachment, evidence-based exited_during_start, the reload-driven
+      declaration-edit invalidation wired into every start, and per-profile
+      proof + counters in games_show (an edited context reads never-proven).
+      Only the doctor --show-last-good surface and the CLI track-record
+      DISPLAY remain M3.2's doctor work)
 - [ ] M2.11 bridge.json diagnostic fields; env-only live contract
       preserved — spec: 03; tests: T-DELIV
 - [ ] M2.12 Remaining conformance cells (env-dropping, filtering,
@@ -683,6 +694,31 @@ contract, not a scratchpad.
   `state` (per design/08's state definition). Recorded here because
   design/08's five definitions cover these by category but the specific
   code→class mapping is a judgment made in this milestone.
+- 2026-07-22, M2.10, review round 10 P1-2 (single terminal finalizer):
+  the finding asked for ONE mandatory finalizer that both classifies-and-
+  records every start failure. It is implemented as a RECORD/RENDER SPLIT,
+  not one call: `recordTerminalStartFailure` writes the fenced history
+  mutation from inside `startGame` while the claim is still alive, and
+  `finalizeStartFailure` renders causeClass + track record + class-keyed
+  actions + edit notice in the handler after the claim has been released.
+  The split is forced by the claim lifetime — the deferred claim release
+  (and, on the exited-during-GABP path, an explicit RemoveRuntimeStateIf-
+  Current) runs BEFORE the handler, so a fenced RecordFailure in the
+  renderer would find no claim and silently drop the failure (this was the
+  observed bug: TestExitedDuringStartCarriesGameCauseAndActions recorded
+  `<nil>`). Both halves are mandatory and cover the identical code set
+  (exited_during_start, spawn_failed, endpoint_unavailable, spec_too_large);
+  the record side is gated to the exact ProcessError types the renderer
+  labels spawn_failed so write-coverage never exceeds render-coverage.
+  Test coverage of the record sites: the inline exitedFailure recorder
+  (T-TRACK exited-during-start) and the deferred pendingFailCode recorder
+  (T-TRACK spec_too_large) are both exercised through the real handler with
+  a history-write assertion. The one ordering NOT deterministically covered
+  is the promote-then-die-during-GABP branch (exitedFailure moved above
+  RemoveRuntimeStateIfCurrent so the fenced write still sees our launchID):
+  a brief-lived helper reaches it only nondeterministically (most runs exit
+  before promotion), so it is verified by reasoning + the shared recorder,
+  not a dedicated test — flagged here rather than implied as covered.
 - 2026-07-22, M2.9, design/07 §"full field contract" (adjudicated
   clarification): the RuntimeContextDigests schema gained two fields
   beyond design/07's enumerated list — `absentEnvNames` (the
