@@ -448,7 +448,7 @@ func (c *Controller) IsRunning() bool {
 	// For Steam/Epic launchers, check for the actual game process by name if configured
 	if c.spec.Mode == "SteamAppId" || c.spec.Mode == "EpicAppId" {
 		if c.spec.StopProcessName != "" {
-			pids, err := findProcessesByNameFunc(c.spec.StopProcessName)
+			pids, err := callFindProcessesByName(c.spec.StopProcessName)
 			if err != nil {
 				return false
 			}
@@ -491,7 +491,7 @@ func (c *Controller) isRunningByName() bool {
 	if c.spec.StopProcessName == "" {
 		return false
 	}
-	pids, err := findProcessesByNameFunc(c.spec.StopProcessName)
+	pids, err := callFindProcessesByName(c.spec.StopProcessName)
 	if err != nil {
 		return false
 	}
@@ -856,7 +856,7 @@ func (c *Controller) getBridgePath() string {
 }
 
 func (c *Controller) stopByProcessName(processName string, force bool, grace time.Duration) error {
-	pids, err := findProcessesByNameFunc(processName)
+	pids, err := callFindProcessesByName(processName)
 	if err != nil {
 		return fmt.Errorf("failed to find processes named '%s': %w", processName, err)
 	}

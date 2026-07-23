@@ -1034,3 +1034,18 @@ contract, not a scratchpad.
   treated as a pre-existing latent race, not a regression. M2.4 kept [x] (the
   fix restores the invariant it claimed); flagged for REVIEWER to decide whether
   M2.4 warrants reopening.
+- 2026-07-23, M2.16, round-16 -count=2 insurance side-discovery (test-seam race
+  — FIXED in this commit), internal/process/diagnostics.go: a -count=2 mcp -race
+  pass flagged a data race on the test-injectable findProcessesByNameFunc — the
+  startup GABP-connect monitor's background liveness poll (Controller.IsRunning)
+  reads it in the window between a test's deferred SetFindProcessesByNameForTesting
+  restore and t.Cleanup(Shutdown) joining that goroutine. VERIFIED pre-existing
+  (reproduces on the pre-F5 base at -count=120; unrelated to the round-16 F5
+  changes) and test-only (production sets the seam once at init, never writes it;
+  the monitor goroutine is joined, not leaked). Fixed by guarding the seam with
+  an RWMutex getter/setter and routing every reader through it — race-free
+  regardless of a test's cleanup ordering, and robust for any future test rather
+  than a per-test defer→Cleanup patch. The background monitor reads only this
+  seam; the other Set*ForTesting globals (launch factories, status hook,
+  processStartTime) are foreground-only. Confirmed with the reliable -count=120
+  repro (was failing, now green). M2.16 kept [x].

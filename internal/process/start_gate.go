@@ -447,7 +447,7 @@ func runPreStartProbes(g StartGate, state *RuntimeState, now time.Time) ([]strin
 	}
 
 	if g.StopProcessName != "" {
-		pids, err := findProcessesByNameFunc(g.StopProcessName)
+		pids, err := callFindProcessesByName(g.StopProcessName)
 		switch {
 		case err != nil:
 			warnings = append(warnings, fmt.Sprintf("process scan for %q failed before starting: %v", g.StopProcessName, err))

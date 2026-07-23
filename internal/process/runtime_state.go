@@ -540,7 +540,7 @@ func ResolveRuntimeStateStatus(state *RuntimeState) string {
 	}
 
 	if state.StopProcessName != "" {
-		pids, err := findProcessesByNameFunc(state.StopProcessName)
+		pids, err := callFindProcessesByName(state.StopProcessName)
 		if err == nil && len(pids) > 0 {
 			return RuntimeStateStatusRunning
 		}

@@ -150,7 +150,7 @@ func evaluateLiveness(in LivenessInput) (LivenessEvidence, string) {
 		// instance is detected (the lost-claim backstop) instead of being
 		// reported stopped.
 		if in.StopProcessName != "" {
-			pids, err := findProcessesByNameFunc(in.StopProcessName)
+			pids, err := callFindProcessesByName(in.StopProcessName)
 			if err != nil {
 				return LivenessEvidence{Verdict: StatusUnknown, Source: LivenessSourceProcessName,
 					Detail: fmt.Sprintf("no runtime claim; process scan for %q failed: %v", in.StopProcessName, err)}, attachmentTaint
@@ -183,7 +183,7 @@ func evaluateLiveness(in LivenessInput) (LivenessEvidence, string) {
 		name = in.Claim.StopProcessName
 	}
 	if name != "" {
-		pids, err := findProcessesByNameFunc(name)
+		pids, err := callFindProcessesByName(name)
 		if err != nil {
 			return LivenessEvidence{Verdict: StatusUnknown, Source: LivenessSourceProcessName,
 				Detail: fmt.Sprintf("process scan for %q failed: %v", name, err)}, attachmentTaint

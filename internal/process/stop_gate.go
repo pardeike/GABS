@@ -627,7 +627,7 @@ func runBuiltinAction(claim *RuntimeState, action string) ([]string, error) {
 	if claim.StopProcessName == "" {
 		return warnings, nil // nothing left to act on; verification decides
 	}
-	pids, err := findProcessesByNameFunc(claim.StopProcessName)
+	pids, err := callFindProcessesByName(claim.StopProcessName)
 	if err != nil {
 		return warnings, fmt.Errorf("process scan for %q failed: %w", claim.StopProcessName, err)
 	}
@@ -817,7 +817,7 @@ func evaluateStopEvidence(req StopRequest, claim *RuntimeState, statusHook *laun
 
 	if claim.StopProcessName != "" {
 		r.sources++
-		pids, err := findProcessesByNameFunc(claim.StopProcessName)
+		pids, err := callFindProcessesByName(claim.StopProcessName)
 		switch {
 		case err != nil:
 			r.anyUnknown = true
