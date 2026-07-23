@@ -351,6 +351,17 @@ func removeEvaluatedClaim(g StartGate, evaluated *RuntimeState) error {
 	}) {
 		return ErrFencingViolation
 	}
+	// A superseding start clears a stale claim: reconcile EVERY pending history
+	// event (clean stops, verified deliveries) it still carries before removal,
+	// each by its own self-contained identity, so no verified event is lost with
+	// the claim (round 16 F5). A credit-write failure persists the pending lists
+	// and aborts, leaving the claim for a later retry.
+	if rerr := reconcilePendingBeforeRemoval(g.GameID, g.ConfigDir, cur); rerr != nil {
+		if serr := SaveRuntimeState(g.GameID, g.ConfigDir, *cur); serr != nil {
+			return fmt.Errorf("pending credit failed (%v) and could not be persisted: %w", rerr, serr)
+		}
+		return rerr
+	}
 	return RemoveRuntimeState(g.GameID, g.ConfigDir)
 }
 

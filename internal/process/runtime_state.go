@@ -219,6 +219,29 @@ type RuntimeState struct {
 	ContextDelivery      *RuntimeContextDelivery `json:"contextDelivery,omitempty"`
 	ProcessStartDeadline time.Time               `json:"processStartDeadline,omitempty"`
 	ObservedProfile      string                  `json:"observedProfile,omitempty"` // external snapshots only
+	// PendingCleanStops and PendingDeliveries are verified history events whose
+	// cleanStops/deliveriesVerified credit has not yet landed (round 16 F5).
+	// Each entry is SELF-CONTAINED — it carries the event's own immutable
+	// identity and history coordinates — so reconciliation credits the exact
+	// event as a pure function of the entry, independent of the claim's current
+	// Operation or Attachment (both of which are replaced/cleared by ordinary
+	// lifecycle). Every claim deleter reconciles BOTH lists before removal and
+	// aborts if any credit write fails, so no verified event is ever lost with
+	// the claim or misassociated with a successor's operation/connection.
+	PendingCleanStops []PendingCredit `json:"pendingCleanStops,omitempty"`
+	PendingDeliveries []PendingCredit `json:"pendingDeliveries,omitempty"`
+}
+
+// PendingCredit is a self-contained record of a verified history event awaiting
+// its idempotent credit (round 16 F5). ID is the operationID (clean stop) or
+// connectionID (verified delivery); Profile and ContextHash pin which history
+// entry it credits, captured when the event was observed — never re-read from
+// the mutable claim at reconciliation time.
+type PendingCredit struct {
+	ID          string    `json:"id"`
+	Profile     string    `json:"profile"`
+	ContextHash string    `json:"contextHash"`
+	At          time.Time `json:"at,omitempty"`
 }
 
 // NewRuntimeState creates a shared runtime record for the given launch spec:

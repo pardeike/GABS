@@ -1160,31 +1160,24 @@ func (s *Server) recordContextDelivery(gameID string, ref bridgeAttachmentRef, o
 	if obs != nil {
 		pobs = &process.ObservedContext{Argv: obs.Argv, Cwd: obs.Cwd, EnvValues: obs.EnvValues, EnvAbsent: obs.EnvAbsent}
 	}
-	// deliveriesVerified++ only on a fully verified delivery (design/20),
-	// recorded INSIDE the same fenced transition (launchID + connectionID)
-	// that persists the verdict — a stale callback can never bump a
-	// successor's history (round 10). The history coordinates come from the
-	// claim's PINNED hash, never recomputed from hot config.
-	verified := false
-	if _, err := process.FencedTransitionWithCredit(gameID, s.configDir, ref.launchID, "", func(st *process.RuntimeState) error {
-		if st.Attachment == nil || st.Attachment.ConnectionID != ref.connectionID {
-			return process.ErrFencingViolation
+	// The observed report is consumed by TakeObservedContext and cannot be
+	// replayed, so the derived VERDICT is persisted as a self-contained pending
+	// event bound to THIS connectionID (round 16 F5) — not to the live
+	// Attachment, which a successor connection replaces. The deliveriesVerified++
+	// credit is reconciled from that pending event, immediately here and by any
+	// later games_status or claim removal, idempotent by connectionID. Only the
+	// derived verdict + identity persist; raw env values never do.
+	if err := process.AppendPendingDelivery(gameID, s.configDir, ref.launchID, ref.connectionID, pobs, time.Now().UTC()); err != nil {
+		if !errors.Is(err, process.ErrFencingViolation) && !errors.Is(err, process.ErrNoRuntimeClaim) {
+			s.log.Warnw("failed to persist context delivery verdict", "gameId", gameID, "error", err)
 		}
-		delivery := process.EvaluateContextDelivery(st.ContextDigests, pobs)
-		st.ContextDelivery = delivery
-		verified = delivery.Overall == process.DeliveryVerified
-		return nil
-	}, func(st *process.RuntimeState) error {
-		// deliveriesVerified++ recorded BEFORE the verdict commits to
-		// runtime.json (round 14 F5), idempotent by this attachment's
-		// connectionID, so a history-write failure aborts the verdict persist
-		// and a retry credits exactly once — the delivery event is never lost.
-		if verified && st.HistoryContextHash != "" {
-			return process.ApplyDeliveryVerifiedLocked(gameID, s.configDir, process.EffectiveClaimProfile(st), st.HistoryContextHash, ref.connectionID)
-		}
-		return nil
-	}); err != nil && !errors.Is(err, process.ErrFencingViolation) && !errors.Is(err, process.ErrNoRuntimeClaim) {
-		s.log.Warnw("failed to persist context delivery verdict", "gameId", gameID, "error", err)
+		return
+	}
+	// Best-effort immediate credit; a failure here (e.g. a history-write error)
+	// is reconciled by the next games_status or claim removal from the pending
+	// event — independent of whether the attachment is still live.
+	if err := process.ReconcilePendingCredits(gameID, s.configDir, ref.launchID); err != nil {
+		s.log.Warnw("delivery credit deferred to status reconciliation", "gameId", gameID, "error", err)
 	}
 }
 

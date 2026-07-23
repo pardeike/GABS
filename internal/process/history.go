@@ -527,11 +527,11 @@ func applyCleanStop(gameID, configDir, profile, contextHash, operationID string,
 }
 
 // ApplyDeliveryVerifiedLocked records deliveriesVerified++ using an already
-// held transition lock, idempotent by connectionID — called INSIDE the
-// delivery callback's fenced transition (launchID + connectionID already
-// validated), so a stale callback can never bump a successor's history (round
-// 10) and a retry/crash-replay counts at most once (round 14 F5). Returns the
-// write error so the runtime commit is gated on the credit.
+// held transition lock, idempotent by connectionID — applied when a pending
+// delivery event is reconciled (round 16 F5): each verified welcome report is a
+// self-contained pending credit keyed by its OWN connectionID, so this credits
+// exactly that connection's delivery, never a successor's, and a
+// retry/crash-replay counts at most once. Returns the write error.
 func ApplyDeliveryVerifiedLocked(gameID, configDir, profile, contextHash, connectionID string) error {
 	return applyHistoryLocked(gameID, configDir, func(h *GameHistory) {
 		e := h.entryForContext(profile, contextHash)

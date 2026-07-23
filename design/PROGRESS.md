@@ -583,12 +583,14 @@ contract, not a scratchpad.
       games_start with a status hook
       reporting stopped exercises the production hook-stopped exitedFailure
       branch and asserts game class + preserved hookEvidence + recorded game
-      failure. F9/F5 (history-credit loss/double-count) RESOLVED in round 14 by
-      record-first credits idempotent by event ID across both write directions
-      (see the F5 Deviations entry). Both round-14 M2.10 blockers — F2
-      attribution provenance and F5 crash-safe history credit — are now
-      addressed; M2.10 stays [!] pending reviewer re-verification (protocol §18:
-      a deviation stays [!] until the adjudicator signs off, not when the
+      failure. F2 (attribution provenance) accepted round 15. F9/F5
+      (history-credit loss/double-count) fixed round 14 by record-first credits;
+      rounds 15-16 additionally bind each deferred credit to its own immutable
+      event identity — self-contained pending clean-stop/delivery events
+      reconciled by every deleter and by games_status, independent of the
+      claim's current Operation/Attachment — see the F5 Deviations entry. M2.10
+      stays [!] pending reviewer sign-off of the round-16 F5 correction (protocol
+      §18: a deviation stays [!] until the adjudicator signs off, not when the
       implementer believes it resolved))
       (F6 RESOLVED by reviewer adjudication: exited_during_start is `game` by
       the evidence-based default — a post-spawn exit is attributed to the
@@ -678,7 +680,7 @@ contract, not a scratchpad.
       input declaration invalidates its buckets (not only editing one); a clean
       terminated stop carries no failure cause; buildHistoryContext is split
       into a pure compute and the accepted-start mutation)
-- [~] M2.11 bridge.json diagnostic fields; env-only live contract
+- [x] M2.11 bridge.json diagnostic fields; env-only live contract
       preserved — spec: 03; tests: T-DELIV
       (round-12 F10: the spawn-boundary diagnostics stamp is fenced to the
       launch's endpoint — StampBridgeDiagnostics requires the expected
@@ -702,8 +704,10 @@ contract, not a scratchpad.
       invariant (final token is always the successor's) and after-read barrier
       are kept, PLUS a new SUBPROCESS barrier test (a re-exec'd process holds the
       lock paused inside the stamp while this process's rotation must block until
-      it releases) — verified to FAIL without the cross-process lock. Stays [~]
-      pending reviewer re-verification of the cross-process fence.)
+      it releases) — verified to FAIL without the cross-process lock. Round 15:
+      the reviewer accepted the dedicated cross-process bridge.lock (complete
+      read/compare/write in both prepare and stamp, Unix + Windows primitives,
+      subprocess barrier test) → [x].)
       (config.BridgeJSON gained three diagnostic-ONLY fields — profile,
       configRevision, startedAt (the binding key name, design/20:235; RFC3339)
       — stamped AT SPAWN (design/20 "written at spawn"; round 11 P2-7/P2-8) by
@@ -827,9 +831,61 @@ contract, not a scratchpad.
   corrupt/unreadable history still degrades inside LoadHistory (repair-and-
   credit), so the degradation rule never blocks the lifecycle. Proven by
   history_credit_replay_test.go: BOTH write directions (history-write and
-  runtime-write, the latter = crash-between-writes) for ALL FOUR counters. F5 is
-  resolved; M2.10 stays [!] pending the still-open F2 (attribution provenance).
-  Per protocol §18 a deviation stays [!] until the adjudicator signs off.
+  runtime-write, the latter = crash-between-writes) for ALL FOUR counters.
+  ROUND 15 (F5 reopened again): record-first makes a retry SAFE but two
+  production paths never RETRY, because the retry trigger is destroyed —
+  (1) interrupted recovery deleted a definitively-stopped claim via a nil
+  beforeRemove, losing the clean-stop credit; (2) TakeObservedContext consumed
+  the delivery report before the verdict+credit converged, so a failed delivery
+  history write lost the event with no source to retry. Fixed by the same shape
+  as the accepted counters — persist the durable DOMAIN FACT, reconcile the
+  credit from it, idempotent by event ID — scoped to exactly these two paths
+  (workloadStart/bridgeConnect record-first is untouched): (1) a verified stop
+  whose credit/removal fails marks the claim CleanStopVerified, and EVERY claim
+  deleter that can encounter it replays the clean-stop credit (stop:operationID,
+  idempotent) before removal — interrupted recovery, the direct stop retry, and
+  a superseding games_start's stale-claim clear (via a shared
+  creditCleanStopIfMarked); other deleters are fenced out (they require a
+  claim with no Operation, or an empty status, which a marked stopping claim
+  never has). An interrupted stop is unmarked and NOT credited. (2) delivery
+  FLIPS to
+  verdict-first: the derived (non-env) verdict is persisted, then
+  deliveriesVerified++ is reconciled from it (connect-time best-effort AND by
+  any later games_status, idempotent by connectionID, read-only when already
+  credited). Both fixed with PRODUCTION-PATH tests (real ExecuteStopAction ->
+  RecoverInterruptedClaim; real games_connect -> failed delivery write ->
+  games_status), asserting exactly-once. ROUND 16 (F5 reopened again): the
+  round-15 direction was right but both durable facts still read their event
+  IDENTITY from the CURRENT claim state, which ordinary lifecycle replaces — the
+  reviewer disproved the self-audit through production paths. (1) CleanStopVerified
+  was a bool; reconciliation took the operationID from cur.Operation, which stop
+  admission replaces and non-terminated completion clears, so the original
+  verified stop was lost; the marker was also published in a separate post-lock
+  transition with a discarded error (a race gap). (2) the delivery verdict stored
+  no connectionID, so a successor attachment could be credited from a predecessor's
+  verdict, and a disconnect stranded the pending credit. FIX: each pending fact is
+  a SELF-CONTAINED PendingCredit{id, profile, contextHash, at} — operationID for a
+  clean stop, connectionID for a verified delivery — in bounded per-claim lists
+  (PendingCleanStops/PendingDeliveries). Reconciliation is a pure function of the
+  entry (never re-reading Operation/Attachment); EVERY deleter reconciles BOTH
+  lists before removal and aborts on any credit failure (no event lost with the
+  claim), and games_status additionally reconciles both lists on the live claim
+  independent of Operation/Attachment (the disconnect-before-status case). The
+  removal surface is BOUNDED and enumerated: all six RemoveRuntimeState callers
+  are {process deleter (removeRuntimeStateGuarded, removeEvaluatedClaim), status
+  funnel (RemoveRuntimeStateIfCurrent) — all three reconcile-before-remove |
+  legacy-schema-only (restore-after-failed-connect, stale-legacy-status) —
+  pending events are current-schema | legacy controller cleanup
+  (cleanupRuntimeStateInternal) — read-only-guarded to never remove a
+  pending-bearing claim}. The pending event is published under the SAME lock that
+  observes the failure — no post-release gap, the save error is surfaced. The
+  bounded cap is a LOUD error, never a silent evict. Raw env values never persist
+  — only the derived verdict + identity.
+  Production-path, teeth-checked tests cover the reviewer's clean-stop set
+  (operation replacement, both-counted, concurrent deleter) and delivery set
+  (detach, successor-never-credited-from-predecessor, partial-preserves-pending,
+  restart, reconcile-at-removal). M2.10 stays [!] pending reviewer sign-off. Per
+  protocol §18 a deviation stays [!] until the adjudicator signs off.
 - 2026-07-22, M2.10, round 12 F3, design/10:37 (authorized codes): two codes
   invented in round 11 were removed. Malformed profile/launchInputs CONTAINER
   arguments (wrong JSON type) now return a plain protocol-level invalid-params

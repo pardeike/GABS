@@ -4370,6 +4370,17 @@ func (s *Server) evaluateClaimStatusOnce(gameID string, claim *process.RuntimeSt
 	})
 	switch ev.Verdict {
 	case process.StatusRunning:
+		// A live claim: reconcile any pending history credits (verified
+		// deliveries AND clean stops) whose history write failed, each by its own
+		// self-contained identity, INDEPENDENT of the current Attachment/Operation
+		// (round 16 F5) — the disconnect-before-status case. Gated on a non-empty
+		// pending list so a steady-state status stays read-only. The removal
+		// funnel (RemoveRuntimeStateIfCurrent) reconciles the dead-claim case.
+		if len(claim.PendingDeliveries) > 0 || len(claim.PendingCleanStops) > 0 {
+			if err := process.ReconcilePendingCredits(gameID, s.configDir, claim.LaunchID); err != nil {
+				s.log.Warnw("pending credit reconciliation failed", "gameId", gameID, "error", err)
+			}
+		}
 		switch claim.Phase {
 		case process.PhaseStarting:
 			if claim.Operation == nil {
@@ -4634,6 +4645,17 @@ func (e *endpointUnavailableError) Error() string {
 func (e *endpointUnavailableError) Unwrap() error { return e.err }
 
 func (s *Server) cleanupRuntimeStateInternal(gameId string) {
+	// Never remove a claim that still carries pending history credits (round 16
+	// F5): those are reconciled under the transition lock by the status funnel
+	// (RemoveRuntimeStateIfCurrent) and the process deleters, which must not be
+	// acquired here — this runs under s.mu (review round 9). This legacy/
+	// controller cleanup path does not reach a current-schema pending-event
+	// claim, so the read-only guard is normally a no-op; it makes the removal
+	// surface provably closed rather than argued.
+	if cur, err := process.LoadRuntimeState(gameId, s.configDir); err == nil && cur != nil &&
+		(len(cur.PendingCleanStops) > 0 || len(cur.PendingDeliveries) > 0) {
+		return
+	}
 	if err := process.RemoveRuntimeState(gameId, s.configDir); err != nil {
 		s.log.Warnw("failed to cleanup runtime state", "gameId", gameId, "error", err)
 	}

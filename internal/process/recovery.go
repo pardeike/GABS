@@ -170,6 +170,11 @@ func RecoverInterruptedClaim(gameID, configDir, instanceID string, claim *Runtim
 		}
 		return rec, nil
 	default: // stopped
+		// removeRuntimeStateGuarded reconciles every pending history event
+		// (clean stops, verified deliveries) by its own self-contained identity
+		// before removal (round 16 F5), so recovery need not special-case it; a
+		// genuinely interrupted stop left no pending clean-stop and is NOT
+		// credited.
 		err := removeRuntimeStateGuarded(gameID, configDir, instanceID, claim.LaunchID, op.OperationID, selfLive, nil)
 		switch {
 		case err == nil:

@@ -140,40 +140,10 @@ func TestRecordFirstBridgeConnect(t *testing.T) {
 	assertRuntimeWriteFailureNoDouble(t, SetSaveRuntimeStateFailHookForTesting, d2, r2)
 }
 
-func TestRecordFirstDeliveryVerified(t *testing.T) {
-	const connID = "conn-del"
-	mk := func(gameID string) (func() error, func() uint64) {
-		dir := t.TempDir()
-		spec := LaunchSpec{GameId: gameID, Mode: "DirectPath", PathOrId: "/opt/game"}
-		st := NewRuntimeState(spec, RuntimeStateStatusRunning)
-		st.Phase = PhaseActive
-		st.SpawnState = SpawnStateSpawned
-		st.HistoryContextHash = replayCtxHash
-		st.Attachment = &RuntimeAttachment{ConnectionID: connID, OwnerPID: 1, OwnerPIDStartTime: 1}
-		if err := ClaimRuntimeState(gameID, dir, st); err != nil {
-			t.Fatal(err)
-		}
-		launchID := st.LaunchID
-		doCredit := func() error {
-			_, err := FencedTransitionWithCredit(gameID, dir, launchID, "",
-				func(s *RuntimeState) error {
-					if s.Attachment == nil || s.Attachment.ConnectionID != connID {
-						return ErrFencingViolation
-					}
-					return nil
-				},
-				func(s *RuntimeState) error {
-					return ApplyDeliveryVerifiedLocked(gameID, dir, EffectiveClaimProfile(s), s.HistoryContextHash, connID)
-				})
-			return err
-		}
-		return doCredit, readCounter(dir, gameID, func(e *HistoryEntry) uint64 { return e.DeliveriesVerified })
-	}
-	d1, r1 := mk("dvA")
-	assertHistoryWriteFailureNoLoss(t, d1, r1)
-	d2, r2 := mk("dvB")
-	assertRuntimeWriteFailureNoDouble(t, SetSaveRuntimeStateFailHookForTesting, d2, r2)
-}
+// Delivery is no longer credited by a record-first FencedTransitionWithCredit
+// (round 16 F5): a verified welcome is a self-contained pending event
+// reconciled by its own connectionID. Its write-direction coverage lives in the
+// delivery_reconcile tests (identity-bound, attachment-independent).
 
 func TestRecordFirstCleanStop(t *testing.T) {
 	const opID = "op-stop"
