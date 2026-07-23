@@ -47,7 +47,7 @@ func TestCurrentGameCommandBehavior(t *testing.T) {
 	}
 
 	logger := util.NewLogger("info")
-	server := NewServerForTesting(logger)
+	server := NewServerForTesting(t, logger)
 	server.RegisterGameManagementTools(loadedConfig, 0, 0)
 
 	// Test games.list - simplified output for AI
@@ -264,7 +264,7 @@ func TestGameIdResolution(t *testing.T) {
 	}
 
 	logger := util.NewLogger("info")
-	server := NewServerForTesting(logger)
+	server := NewServerForTesting(t, logger)
 	server.RegisterGameManagementTools(loadedConfig, 0, 0)
 
 	testCases := []struct {

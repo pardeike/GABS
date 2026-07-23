@@ -40,11 +40,11 @@ func TestGamesStartShortCircuitsAcrossServers(t *testing.T) {
 	}
 
 	logger := util.NewLogger("error")
-	serverA := NewServerForTesting(logger)
+	serverA := NewServerForTesting(t, logger)
 	serverA.SetConfigDir(tempDir)
 	serverA.RegisterGameManagementTools(gamesConfig, 0, 0)
 
-	serverB := NewServerForTesting(logger)
+	serverB := NewServerForTesting(t, logger)
 	serverB.SetConfigDir(tempDir)
 	serverB.RegisterGameManagementTools(gamesConfig, 0, 0)
 
@@ -127,7 +127,7 @@ func TestGamesStartRemovesStaleSharedRuntimeState(t *testing.T) {
 	}
 
 	logger := util.NewLogger("error")
-	server := NewServerForTesting(logger)
+	server := NewServerForTesting(t, logger)
 	server.SetConfigDir(tempDir)
 	server.RegisterGameManagementTools(gamesConfig, 0, 0)
 

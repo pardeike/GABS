@@ -13,7 +13,7 @@ import (
 // values must arrive at tool handlers as json.Number, never float64, through
 // both the stdio framing and the tools/call params re-decode.
 func TestIntegerArgumentsSurviveStdioTransport(t *testing.T) {
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 
 	captured := make(chan map[string]interface{}, 1)
 	s.RegisterTool(Tool{

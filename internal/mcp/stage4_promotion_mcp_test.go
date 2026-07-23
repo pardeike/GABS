@@ -153,7 +153,7 @@ func TestAttachmentPromotionCreditsWorkloadStartAndBridgeConnect(t *testing.T) {
 func steamishUnobservedServer(t *testing.T) *Server {
 	t.Helper()
 	dir := t.TempDir()
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(dir)
 	s.RegisterGameManagementTools(&config.GamesConfig{
 		Version: "1.0",

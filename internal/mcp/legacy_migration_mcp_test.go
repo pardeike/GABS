@@ -31,7 +31,7 @@ func writeLegacyClaim(t *testing.T, gameID, dir string, gamePID int, stopName st
 
 func newLegacyServer(t *testing.T, mode string) *Server {
 	t.Helper()
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(t.TempDir())
 	s.RegisterGameManagementTools(&config.GamesConfig{
 		Version: "1.0",

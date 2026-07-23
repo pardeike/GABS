@@ -59,9 +59,6 @@ type Server struct {
 	disconnectWG sync.WaitGroup // in-flight peer-close handlers (joined by Shutdown)
 	shutdownCh   chan struct{}
 	shutdownOnce sync.Once
-	// ownedTempDir is a config directory this constructor created (test-only);
-	// Shutdown removes it after the joins so it is not leaked (round 13 F6).
-	ownedTempDir string
 
 	// newController builds the process controller for a start. Injectable so a
 	// test can supply a controller with DETERMINISTIC liveness (exit before
@@ -155,13 +152,8 @@ func (s *Server) Shutdown() {
 	}
 	s.disconnectWG.Wait()
 	s.bgWG.Wait()
-
-	// Only after every background task has joined is the constructor-owned temp
-	// directory safe to remove — a lingering write would otherwise recreate it
-	// (round 13 F6). A caller-provided SetConfigDir directory is never touched.
-	if s.ownedTempDir != "" {
-		_ = os.RemoveAll(s.ownedTempDir)
-	}
+	// The test config dir is a caller-owned t.TempDir(); the framework removes
+	// it (round 13 F6). Shutdown owns only the JOIN, never a directory.
 }
 
 // admitBackgroundTask registers a background task with the shutdown join,
@@ -204,40 +196,10 @@ func NewServer(log util.Logger) *Server {
 	}
 }
 
-// NewServerForTesting creates a server with shorter timeouts for testing.
-// configDir defaults to a FRESH isolated temp directory, never the empty
-// string — an empty configDir resolves to the real ~/.gabs (config.NewConfigPaths),
-// so a test that forgot SetConfigDir, or any code path that runs before it,
-// would read and write the user's actual GABS state (round 12 F4). Tests that
-// call SetConfigDir override this harmless default.
-func NewServerForTesting(log util.Logger) *Server {
-	isolated, err := os.MkdirTemp("", "gabs-test-isolated-")
-	if err != nil {
-		// A test host without a writable temp dir cannot run these tests
-		// safely; failing loud beats silently falling back to ~/.gabs.
-		panic(fmt.Sprintf("NewServerForTesting: cannot create isolated config dir: %v", err))
-	}
-	return &Server{
-		log:             log,
-		tools:           make(map[string]*ToolHandler),
-		resources:       make(map[string]*ResourceHandler),
-		games:           make(map[string]process.ControllerInterface),
-		configDir:       isolated,
-		ownedTempDir:    isolated,
-		writers:         make([]util.FrameWriter, 0),
-		gameTools:       make(map[string][]string),
-		gameToolAliases: make(map[string]gameToolAlias),
-		gameResources:   make(map[string][]string),
-		gabpClients:     make(map[string]*gabp.Client),
-		gabpAttention:   make(map[string]*gameAttentionState),
-		gabpDisconnects: make(map[string]gabpDisconnectRecord),
-		starter:         process.NewSerializedStarterForTesting(), // Use testing timeouts
-		instanceID:      newServerInstanceID(),
-		ownerLease:      (&config.GamesConfig{}).GetSessionOwnerLease(),
-		shutdownCh:      make(chan struct{}),
-		newController:   func() process.ControllerInterface { return process.NewController() },
-	}
-}
+// NewServerForTesting lives in server_testing_test.go (round 13 F6): it takes a
+// testing.TB so its config dir is a caller-owned t.TempDir() that the framework
+// removes, and Shutdown is registered via t.Cleanup — no leaked isolated dirs,
+// universal background-task join.
 
 func newServerInstanceID() string {
 	seq := atomic.AddUint64(&serverInstanceCounter, 1)

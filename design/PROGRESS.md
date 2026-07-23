@@ -698,24 +698,32 @@ contract, not a scratchpad.
       while the bogus markers appear nowhere (it passes because nothing reads
       them — the lock fails the moment a future change wires a diagnostic
       field into attribution). doctor DISPLAY of these fields is M3.2)
-- [~] M2.16 (added) Test-server isolation + background-task join — spec: 30
+- [x] M2.16 (added) Test-server isolation + background-task join — spec: 30
       §race gate; tests: T-TRACK/T-DELIV race lanes
       (round 12 F4 discovered work. NewServerForTesting defaulted configDir to
       "" → the real ~/.gabs, so a test that skipped SetConfigDir read/wrote the
-      user's live GABS state; it now creates an isolated os.MkdirTemp dir, and
-      the config-package write tests (concurrency/env-isolation) and the
-      bridge-cleanup test were moved off ~/.gabs. Server.Shutdown() cancels
-      (shutdownCh) and JOINS every detached task before TempDir teardown.
-      Round 13 corrections: (F3) EVERY background bgWG.Add — async mirroring,
-      the nested attention spawn, the lease refresher, and the background GABP
-      connect — now routes through admitBackgroundTask, which does the shutdown
-      check AND the Add together under s.mu (the same lock Shutdown holds to
-      close admission), so no positive Add can race bgWG.Wait; (F6) the
-      constructor-created isolated dir is tracked as ownedTempDir and removed by
-      Shutdown AFTER the joins, and the caller's SetConfigDir dir is never
-      touched. Race tests cover concurrent admission-vs-shutdown, concurrent
-      attachment-vs-shutdown, and the construct→SetConfigDir→Shutdown cleanup.
-      Reopened to [~] pending reviewer re-verification of the join safety)
+      user's live GABS state; the constructor now REQUIRES a testing.TB and sets
+      configDir to a caller-owned tb.TempDir(), so it can never resolve to
+      ~/.gabs. The config-package write tests (concurrency/env-isolation) and
+      the bridge-cleanup test were moved off ~/.gabs. Server.Shutdown() cancels
+      (shutdownCh) and JOINS every detached task; the constructor registers it
+      via tb.Cleanup, so EVERY test server's background tasks join before
+      teardown. Round 13 corrections: (F3) EVERY background bgWG.Add — async
+      mirroring, the nested attention spawn, the lease refresher, and the
+      background GABP connect — now routes through admitBackgroundTask, which
+      does the shutdown check AND the Add together under s.mu (the same lock
+      Shutdown holds to close admission), so no positive Add can race
+      bgWG.Wait; (F6) the earlier constructor-owned isolated dir + Shutdown-time
+      RemoveAll leaked at the ~90 call sites that never call Shutdown, so it is
+      REPLACED by the tb.TempDir() the framework removes universally — Shutdown
+      owns only the join, never a directory, and no gabs-test-isolated dir is
+      ever created. A subtest observes the framework actually removing the
+      constructor's dir after the NewServerForTesting→SetConfigDir→Shutdown
+      sequence. Race tests cover concurrent admission-vs-shutdown and concurrent
+      attachment-vs-shutdown. Round 14: the reviewer verified the testing.TB
+      constructor, framework-owned temp dirs, tb.Cleanup shutdown registration,
+      and synchronized task admission close both the leak and the
+      WaitGroup.Add/Wait race → [x])
 - [ ] M2.12 Remaining conformance cells (env-dropping, filtering,
       absent-env reintroduction, detached) — spec: 03; tests: T-DELIV
 - [ ] M2.13 repair --forget-runtime + no-arg games_status union of

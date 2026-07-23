@@ -72,7 +72,7 @@ func TestGamesConnectCanReattachUsingBridgeConfigWithoutTrackedProcess(t *testin
 	}
 
 	log := util.NewLogger("error")
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, 1*time.Second)
 
@@ -199,7 +199,7 @@ func TestGamesConnectCorroboratesProcessEnvironmentWithClaim(t *testing.T) {
 		},
 	}
 
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
@@ -273,7 +273,7 @@ func TestGamesConnectRejectsStaleProcessEnvironment(t *testing.T) {
 		},
 	}
 
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
@@ -346,7 +346,7 @@ func TestGamesConnectDiagnosesMissingBridgeEnvironmentWithoutDialing(t *testing.
 		},
 	}
 
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
@@ -422,7 +422,7 @@ func TestGamesCallToolFailsFastAndStatusTurnsDisconnectedAfterBridgeDrop(t *test
 	}
 
 	log := util.NewLogger("error")
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, 1*time.Second)
 
@@ -541,7 +541,7 @@ func TestGamesCallToolCanInferGameFromQualifiedName(t *testing.T) {
 	}
 
 	log := util.NewLogger("error")
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, 1*time.Second)
 
@@ -638,11 +638,11 @@ func TestGamesConnectForceTakeoverCanOverrideSharedOwner(t *testing.T) {
 	}
 
 	log := util.NewLogger("error")
-	ownerServer := NewServerForTesting(log)
+	ownerServer := NewServerForTesting(t, log)
 	ownerServer.SetConfigDir(tmpDir)
 	ownerServer.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, 1*time.Second)
 
-	joinerServer := NewServerForTesting(log)
+	joinerServer := NewServerForTesting(t, log)
 	joinerServer.SetConfigDir(tmpDir)
 	joinerServer.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, 1*time.Second)
 
@@ -768,7 +768,7 @@ func TestGamesCallToolBlocksUntilAttentionIsAcknowledged(t *testing.T) {
 	}
 
 	log := util.NewLogger("error")
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 	defer server.CleanupGABPConnection("adventure")
@@ -912,7 +912,7 @@ func TestMirroredToolCallBlocksWhileAttentionIsOpen(t *testing.T) {
 	}
 
 	log := util.NewLogger("error")
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 	defer server.CleanupGABPConnection("adventure")
@@ -1002,7 +1002,7 @@ func TestDiagnosticsToolCanBypassAttentionGate(t *testing.T) {
 	}
 
 	log := util.NewLogger("error")
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 	defer server.CleanupGABPConnection("adventure")

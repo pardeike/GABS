@@ -13,7 +13,7 @@ import (
 
 func TestServeUsesLSPFramingForLSPClients(t *testing.T) {
 	log := util.NewLogger("error")
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 
 	request := Message{
 		JSONRPC: "2.0",
@@ -61,7 +61,7 @@ func TestServeUsesLSPFramingForLSPClients(t *testing.T) {
 
 func TestInitializeIncludesServerInstructions(t *testing.T) {
 	log := util.NewLogger("error")
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 
 	response := server.HandleMessage(&Message{
 		JSONRPC: "2.0",
@@ -106,7 +106,7 @@ func TestInitializeIncludesServerInstructions(t *testing.T) {
 
 func TestServeKeepsNewlineCompatibility(t *testing.T) {
 	log := util.NewLogger("error")
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 
 	request := Message{
 		JSONRPC: "2.0",
@@ -147,7 +147,7 @@ func TestServeKeepsNewlineCompatibility(t *testing.T) {
 
 func TestServeIgnoresInitializedNotification(t *testing.T) {
 	log := util.NewLogger("error")
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 
 	initialize := Message{
 		JSONRPC: "2.0",

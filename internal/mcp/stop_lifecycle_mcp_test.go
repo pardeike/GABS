@@ -59,7 +59,7 @@ func TestGamesStopUnsupportedForKillOnlyClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(dir)
 	s.RegisterGameManagementTools(&config.GamesConfig{
 		Version: "1.0",
@@ -553,7 +553,7 @@ func TestMultiGameStatusProbesRunConcurrently(t *testing.T) {
 		t.Skip("uses a unix sleep binary as a slow status hook")
 	}
 	dir := t.TempDir()
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(dir)
 	games := map[string]config.GameConfig{}
 	for _, id := range []string{"slow-a", "slow-b", "slow-c"} {

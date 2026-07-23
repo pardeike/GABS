@@ -168,7 +168,7 @@ func newGamesCallToolTimeoutTestServer(t *testing.T, toolDelay time.Duration) (*
 	}
 
 	log := util.NewLogger("error")
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, 1*time.Second)
 	return server, serverDone

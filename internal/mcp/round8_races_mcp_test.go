@@ -136,7 +136,7 @@ func TestStartUnobservedSupersededDuringStage4(t *testing.T) {
 		t.Skip("uses a unix sleep binary as the launcher stand-in")
 	}
 	dir := t.TempDir()
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(dir)
 	s.RegisterGameManagementTools(&config.GamesConfig{
 		Version: "1.0",
@@ -342,7 +342,7 @@ func TestStartSupersededDuringStage4EmitsStableCode(t *testing.T) {
 		t.Skip("uses a unix sleep binary")
 	}
 	dir := t.TempDir()
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(dir)
 	s.RegisterGameManagementTools(&config.GamesConfig{
 		Version: "1.0",

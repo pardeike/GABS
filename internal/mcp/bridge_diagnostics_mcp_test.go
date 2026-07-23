@@ -56,7 +56,7 @@ func TestPreSpawnFailurePublishesNoDiagnostics(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(dir)
 	game := config.GameConfig{
 		ID: "big", Name: "Big", LaunchMode: "DirectPath", Target: exe,

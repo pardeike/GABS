@@ -33,7 +33,7 @@ func TestGamesStartCapsSynchronousGABPWaitForLargeTimeout(t *testing.T) {
 		Games: map[string]config.GameConfig{game.ID: game},
 	}
 
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 10*time.Millisecond, 20*time.Millisecond)
 
@@ -149,7 +149,7 @@ wait
 	})
 	defer restoreFinder()
 
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 10*time.Millisecond, 20*time.Millisecond)
 
@@ -224,7 +224,7 @@ func TestGamesStartRejectsOccupiedEndpointCache(t *testing.T) {
 		t.Fatalf("failed to seed endpoint cache: %v", err)
 	}
 
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 10*time.Millisecond, 20*time.Millisecond)
 

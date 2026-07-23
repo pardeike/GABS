@@ -9,7 +9,7 @@ import (
 )
 
 func TestRegisterGameManagementToolsAppliesConfiguredStartupTimeouts(t *testing.T) {
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	gamesConfig := &config.GamesConfig{
 		Games: make(map[string]config.GameConfig),
 		Timeouts: &config.TimeoutsConfig{
@@ -32,7 +32,7 @@ func TestRegisterGameManagementToolsAppliesConfiguredStartupTimeouts(t *testing.
 }
 
 func TestRegisterGameManagementToolsPreservesTestingTimeoutsWithoutExplicitConfig(t *testing.T) {
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	gamesConfig := &config.GamesConfig{
 		Games: make(map[string]config.GameConfig),
 	}

@@ -35,7 +35,7 @@ func TestGamesStatusStopsReportingRunningAfterProcessExits(t *testing.T) {
 		},
 	}
 
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
@@ -102,7 +102,7 @@ func TestGamesStatusReportsAndCleansStaleSharedRuntimeState(t *testing.T) {
 	}
 	bridgePath := writeBridgeFileForStatusTest(t, tmpDir, game.ID, 49152, "stale-runtime-token")
 
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
@@ -148,7 +148,7 @@ func TestGamesStatusTreatsClosedBridgeFileAsIdleDurableEndpoint(t *testing.T) {
 		return bridgeListenerDiagnostic{Checked: true, Open: false, Method: "test"}
 	})
 
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
@@ -190,7 +190,7 @@ func TestGamesStatusDoesNotConsumeAcceptOnceBridgeBeforeConnect(t *testing.T) {
 	serverDone := make(chan error, 1)
 	go serveTestGabpSession(listener, bridgeToken, serverDone)
 
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
@@ -251,7 +251,7 @@ func TestGamesStatusTreatsUnverifiedStoppedBridgeFileAsIdleDurableEndpoint(t *te
 		return bridgeListenerDiagnostic{Error: "passive listener inspection unavailable"}
 	})
 
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
@@ -317,7 +317,7 @@ func TestGamesStatusIgnoresBridgeFileMismatchWhenProcessEnvironmentIsReadable(t 
 		t.Fatalf("failed to seed runtime state: %v", err)
 	}
 
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
@@ -379,7 +379,7 @@ func TestGamesStatusWarnsWhenReadableProcessEnvironmentLacksEndpoint(t *testing.
 		t.Fatalf("failed to seed runtime state: %v", err)
 	}
 
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 

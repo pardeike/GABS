@@ -29,7 +29,7 @@ func flashExitServer(t *testing.T) (*Server, config.GameConfig) {
 		ID: "flash", Name: "Flash", LaunchMode: "DirectPath", Target: exe,
 		Args: []string{"-test.run=TestSharedRuntimeStateHelperProcess"},
 	}
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(t.TempDir())
 	t.Cleanup(s.Shutdown)
 	s.SetControllerFactoryForTesting(newExitBeforeStage4Controller)
@@ -68,7 +68,7 @@ func TestVerifiedThenStage5DeathRecordsStartAndFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(t.TempDir())
 	t.Cleanup(s.Shutdown)
 	s.SetControllerFactoryForTesting(newVerifiedThenDeathController)
@@ -162,7 +162,7 @@ func TestEditNoticeFiresOncePerEdit(t *testing.T) {
 	_ = process.RecordWorkloadStart("adv", dir, lid, "", hash, process.ContextSnapshot{}, process.SuccessBucket{}, timeNow())
 	_ = process.RecordFailure("adv", dir, lid, "", hash, "spawn_failed", process.CauseEnvironment, nil, timeNow())
 
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(dir)
 
 	// The config changed (new args → new hash): the notice fires once.
@@ -186,7 +186,7 @@ func TestEditNoticeDoesNotFireForAdditiveEdit(t *testing.T) {
 	_ = process.RecordWorkloadStart("adv", dir, lid, "a", hashA, process.ContextSnapshot{}, process.SuccessBucket{}, timeNow())
 	_ = process.RecordFailure("adv", dir, lid, "a", hashA, "spawn_failed", process.CauseEnvironment, nil, timeNow())
 
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(dir)
 	// Adding profile B leaves A's hash unchanged: no notice for A.
 	hc := historyContext{profile: "a", contextHash: hashA}
@@ -299,7 +299,7 @@ func TestSpecTooLargeRecordsViaDeferPathAndRenders(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(dir)
 	// A resolvable target with a single argument past the per-string exec
 	// limit: the start is accepted, claims, then fails the pre-spawn size
@@ -339,7 +339,7 @@ func TestStopRefusalCarriesCauseClassAndTrackRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(dir)
 	s.RegisterGameManagementTools(&config.GamesConfig{
 		Version: "1.0",

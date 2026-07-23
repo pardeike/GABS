@@ -18,7 +18,7 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 	// "How will AI agents handle dynamic tool expansion in GABS?"
 
 	logger := util.NewLogger("info")
-	server := NewServerForTesting(logger)
+	server := NewServerForTesting(t, logger)
 
 	// Create shared games config for all phases
 	gamesConfig := &config.GamesConfig{}
@@ -473,7 +473,7 @@ func TestDynamicToolDiscoveryWorkflow(t *testing.T) {
 // effective tool management for GABS's dynamic tool system
 func TestAIToolManagementStrategies(t *testing.T) {
 	logger := util.NewLogger("info")
-	server := NewServerForTesting(logger)
+	server := NewServerForTesting(t, logger)
 
 	// Set up test environment with game config
 	gamesConfig := &config.GamesConfig{}
@@ -584,7 +584,7 @@ func TestAIToolManagementStrategies(t *testing.T) {
 // in realistic AI-user interaction scenarios
 func TestRealWorldScenarios(t *testing.T) {
 	logger := util.NewLogger("info")
-	server := NewServerForTesting(logger)
+	server := NewServerForTesting(t, logger)
 
 	// Set up realistic game environment
 	gamesConfig := &config.GamesConfig{}

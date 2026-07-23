@@ -46,7 +46,7 @@ func profiledTestConfig(t *testing.T) *config.GamesConfig {
 
 func newProfiledServer(t *testing.T) *Server {
 	t.Helper()
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(t.TempDir())
 	// Join any background attachment/lease/mirroring task before TempDir
 	// teardown so none writes runtime.json during RemoveAll (round 12 F4).
@@ -152,7 +152,7 @@ func TestStartProfileErrors(t *testing.T) {
 }
 
 func TestStartUnresolvableTarget(t *testing.T) {
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(t.TempDir())
 	cfg := profiledTestConfig(t)
 	g := cfg.Games["adventure"]
@@ -246,7 +246,7 @@ func TestStartRefusedOnStaleConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(dir)
 	initial, err := config.LoadGamesConfigFromPath(cfgPath)
 	if err != nil {
@@ -303,7 +303,7 @@ func TestTimeoutRangeEnforced(t *testing.T) {
 }
 
 func TestAmbiguousGameReference(t *testing.T) {
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(t.TempDir())
 	cfg := profiledTestConfig(t)
 	// two games sharing one target
@@ -335,7 +335,7 @@ func TestSpawnFailedClassification(t *testing.T) {
 	if err := os.WriteFile(nonExec, []byte("data"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(t.TempDir())
 	cfg := profiledTestConfig(t)
 	g := cfg.Games["plain"]
@@ -362,7 +362,7 @@ func TestDiscoveryUsesPerCallConfig(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(cfgA), 0600); err != nil {
 		t.Fatal(err)
 	}
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(dir)
 	initial, err := config.LoadGamesConfigFromPath(cfgPath)
 	if err != nil {
@@ -394,7 +394,7 @@ func TestStartLaunchModeIncompatible(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(valid), 0600); err != nil {
 		t.Fatal(err)
 	}
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(dir)
 	initial, err := config.LoadGamesConfigFromPath(cfgPath)
 	if err != nil {
@@ -431,7 +431,7 @@ func TestActiveConfigRevisionSurfaced(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(valid), 0600); err != nil {
 		t.Fatal(err)
 	}
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(dir)
 	initial, err := config.LoadGamesConfigFromPath(cfgPath)
 	if err != nil {
@@ -542,7 +542,7 @@ func TestStartPipelineExitedDuringStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(dir)
 	s.RegisterGameManagementTools(&config.GamesConfig{
 		Version: "1.0",

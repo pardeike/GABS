@@ -30,11 +30,11 @@ func TestGamesConnectTakesOverIdleRuntimeOwner(t *testing.T) {
 	gamesConfig := roamingGamesConfig()
 	log := util.NewLogger("error")
 
-	ownerServer := NewServerForTesting(log)
+	ownerServer := NewServerForTesting(t, log)
 	ownerServer.SetConfigDir(tmpDir)
 	ownerServer.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
-	joinerServer := NewServerForTesting(log)
+	joinerServer := NewServerForTesting(t, log)
 	joinerServer.SetConfigDir(tmpDir)
 	joinerServer.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
@@ -110,7 +110,7 @@ func TestGameBoundCallBlocksOldOwnerAfterRoamingTakeover(t *testing.T) {
 	gamesConfig := roamingGamesConfig()
 	log := util.NewLogger("error")
 
-	ownerServer := NewServerForTesting(log)
+	ownerServer := NewServerForTesting(t, log)
 	ownerServer.SetConfigDir(tmpDir)
 	ownerServer.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
@@ -183,7 +183,7 @@ func TestGamesConnectClearsRuntimeOwnerAfterFailedDial(t *testing.T) {
 	gamesConfig := roamingGamesConfig()
 	log := util.NewLogger("error")
 
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 

@@ -61,7 +61,7 @@ func TestExitedDuringStartIsGameAcrossLaunchModes(t *testing.T) {
 			target, restore := tc.setup(t)
 			defer restore()
 
-			s := NewServerForTesting(util.NewLogger("error"))
+			s := NewServerForTesting(t, util.NewLogger("error"))
 			s.SetConfigDir(t.TempDir())
 			t.Cleanup(s.Shutdown)
 			s.SetControllerFactoryForTesting(newExitBeforeStage4ControllerMode(tc.mode))
@@ -100,7 +100,7 @@ func TestStatusHookStoppedExitIsGameEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(dir)
 	t.Cleanup(s.Shutdown)
 	// The fake controller stamps a dead PID; the status hook (authoritative in

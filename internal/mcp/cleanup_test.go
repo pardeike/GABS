@@ -10,7 +10,7 @@ import (
 
 func TestGameResourceCleanup(t *testing.T) {
 	log := util.NewLogger("error")
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 
 	gameId := "test-game"
 
@@ -90,7 +90,7 @@ func TestGameResourceCleanup(t *testing.T) {
 
 func TestBridgeConfigCleanup(t *testing.T) {
 	log := util.NewLogger("error")
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 	// Write to the server's ISOLATED config dir (never ~/.gabs), so cleanup
 	// operates on the same isolated directory (round 12 F4).
 	dir := t.TempDir()
@@ -123,7 +123,7 @@ func TestBridgeConfigCleanup(t *testing.T) {
 
 func TestMixedGameCleanup(t *testing.T) {
 	log := util.NewLogger("error")
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 
 	game1 := "game1"
 	game2 := "game2"
@@ -184,7 +184,7 @@ func TestMixedGameCleanup(t *testing.T) {
 
 func TestRegisterGameToolCleanupWithNormalization(t *testing.T) {
 	log := util.NewLogger("error")
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 
 	gameID := "factory"
 	tool := Tool{

@@ -28,7 +28,7 @@ func missingTargetServer(t *testing.T) (*Server, config.GameConfig, string, stri
 		t.Fatal(err)
 	}
 	game := config.GameConfig{ID: "vanish", Name: "Vanish", LaunchMode: "DirectPath", Target: target}
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(cfgDir)
 	s.RegisterGameManagementTools(&config.GamesConfig{
 		Version: "1.0", Games: map[string]config.GameConfig{game.ID: game},
@@ -190,7 +190,7 @@ func TestProvenInputComboOnMissingTargetIsNotFirstRun(t *testing.T) {
 			"scenario": {Description: "pick", Type: "string", Enum: []string{"arena", "tutorial"}, Args: []string{"-scenario=${value}"}},
 		},
 	}
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(cfgDir)
 	t.Cleanup(s.Shutdown)
 	s.RegisterGameManagementTools(&config.GamesConfig{

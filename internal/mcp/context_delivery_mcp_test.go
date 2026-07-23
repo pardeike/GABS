@@ -166,7 +166,7 @@ func TestDeliveryVerdictSurvivesConfigEditAndRestart(t *testing.T) {
 
 	// A fresh server over the same config dir (restart): the verdict comes
 	// from the claim, not from any in-memory state or current config.
-	s2 := NewServerForTesting(s.log)
+	s2 := NewServerForTesting(t, s.log)
 	s2.SetConfigDir(s.configDir)
 	s2.RegisterGameManagementTools(profiledTestConfig(t), 0, 0)
 	restore := process.SetFindProcessesByNameForTesting(func(string) ([]int, error) { return nil, nil })

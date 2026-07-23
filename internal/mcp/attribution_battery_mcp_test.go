@@ -55,7 +55,7 @@ func TestStopKillUnreadableClaimCarriesAttribution(t *testing.T) {
 				t.Fatal(err)
 			}
 			dir := t.TempDir()
-			s := NewServerForTesting(util.NewLogger("error"))
+			s := NewServerForTesting(t, util.NewLogger("error"))
 			s.SetConfigDir(dir)
 			t.Cleanup(s.Shutdown)
 			s.RegisterGameManagementTools(&config.GamesConfig{
@@ -86,7 +86,7 @@ func TestStopKillUnreadableClaimCarriesAttribution(t *testing.T) {
 // proves it now carries an authorized code + attribution.
 func TestConnectFailureCarriesAttribution(t *testing.T) {
 	dir := t.TempDir()
-	s := NewServerForTesting(util.NewLogger("error"))
+	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(dir)
 	t.Cleanup(s.Shutdown)
 	s.RegisterGameManagementTools(&config.GamesConfig{
