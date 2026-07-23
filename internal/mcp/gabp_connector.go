@@ -199,7 +199,9 @@ func (c *ServerGABPConnector) MirrorConnectedClient(ctx context.Context, gameID 
 }
 
 func (c *ServerGABPConnector) startAsyncToolMirroring(gameID string, client *gabp.Client, ref bridgeAttachmentRef) {
-	c.server.bgWG.Add(1)
+	if !c.server.admitBackgroundTask() {
+		return // shutting down: do not start a task that could outlive the join
+	}
 	go func() {
 		defer c.server.bgWG.Done()
 		if c.asyncMirrorDelay > 0 {
@@ -249,7 +251,12 @@ func (c *ServerGABPConnector) setupToolMirroring(ctx context.Context, gameID str
 	if attentionTimeout > attentionRefreshTimeout {
 		attentionTimeout = attentionRefreshTimeout
 	}
-	c.server.bgWG.Add(1)
+	// Nested spawn (round 13 F3): the attention goroutine is started from
+	// inside the mirroring goroutine, so it too must go through admission so a
+	// shutdown that began after mirroring started cannot race the join.
+	if !c.server.admitBackgroundTask() {
+		return nil
+	}
 	go func() {
 		defer c.server.bgWG.Done()
 		c.server.setupGABPAttention(gameID, client, attentionTimeout)

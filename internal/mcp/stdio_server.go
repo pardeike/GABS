@@ -59,6 +59,9 @@ type Server struct {
 	disconnectWG sync.WaitGroup // in-flight peer-close handlers (joined by Shutdown)
 	shutdownCh   chan struct{}
 	shutdownOnce sync.Once
+	// ownedTempDir is a config directory this constructor created (test-only);
+	// Shutdown removes it after the joins so it is not leaked (round 13 F6).
+	ownedTempDir string
 
 	// newController builds the process controller for a start. Injectable so a
 	// test can supply a controller with DETERMINISTIC liveness (exit before
@@ -152,6 +155,31 @@ func (s *Server) Shutdown() {
 	}
 	s.disconnectWG.Wait()
 	s.bgWG.Wait()
+
+	// Only after every background task has joined is the constructor-owned temp
+	// directory safe to remove — a lingering write would otherwise recreate it
+	// (round 13 F6). A caller-provided SetConfigDir directory is never touched.
+	if s.ownedTempDir != "" {
+		_ = os.RemoveAll(s.ownedTempDir)
+	}
+}
+
+// admitBackgroundTask registers a background task with the shutdown join,
+// atomic with Shutdown closing admission (round 13 F3). The shutdownCh check
+// and bgWG.Add happen together under s.mu — the SAME lock Shutdown holds when
+// it closes shutdownCh — so no positive Add can race bgWG.Wait(). Returns
+// false (registering nothing) once shutdown has begun; the caller must then
+// NOT start the goroutine. On true, the caller owns exactly one bgWG.Done().
+func (s *Server) admitBackgroundTask() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	select {
+	case <-s.shutdownCh:
+		return false
+	default:
+	}
+	s.bgWG.Add(1)
+	return true
 }
 
 func NewServer(log util.Logger) *Server {
@@ -195,6 +223,7 @@ func NewServerForTesting(log util.Logger) *Server {
 		resources:       make(map[string]*ResourceHandler),
 		games:           make(map[string]process.ControllerInterface),
 		configDir:       isolated,
+		ownedTempDir:    isolated,
 		writers:         make([]util.FrameWriter, 0),
 		gameTools:       make(map[string][]string),
 		gameToolAliases: make(map[string]gameToolAlias),
@@ -4815,16 +4844,11 @@ func (s *Server) continueStartupGABPConnection(
 		return
 	}
 
-	s.bgWG.Add(1)
+	if !s.admitBackgroundTask() {
+		return // shutting down
+	}
 	go func() {
 		defer s.bgWG.Done()
-		// A shutdown before/at dispatch abandons the background connect so the
-		// goroutine joins without opening a new attachment (round 12 F4).
-		select {
-		case <-s.shutdownCh:
-			return
-		default:
-		}
 		if client, _ := s.claimBoundClient(game.ID); client != nil {
 			return
 		}

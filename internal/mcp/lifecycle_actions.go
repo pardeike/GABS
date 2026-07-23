@@ -222,11 +222,12 @@ func (s *Server) recordBridgeAttachment(gameID string, client *gabp.Client, endp
 		s.clearBridgeAttachment(gameID, launchID, connID)
 		return bridgeAttachmentRef{}, errAttachmentSuperseded
 	}
-	s.bgWG.Add(1)
-	go func() {
-		defer s.bgWG.Done()
-		s.refreshBridgeAttachmentLease(gameID, launchID, connID, stillCurrent, lease)
-	}()
+	if s.admitBackgroundTask() {
+		go func() {
+			defer s.bgWG.Done()
+			s.refreshBridgeAttachmentLease(gameID, launchID, connID, stillCurrent, lease)
+		}()
+	}
 	return ref, nil
 }
 

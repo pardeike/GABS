@@ -671,19 +671,24 @@ contract, not a scratchpad.
       while the bogus markers appear nowhere (it passes because nothing reads
       them — the lock fails the moment a future change wires a diagnostic
       field into attribution). doctor DISPLAY of these fields is M3.2)
-- [x] M2.16 (added) Test-server isolation + background-task join — spec: 30
+- [~] M2.16 (added) Test-server isolation + background-task join — spec: 30
       §race gate; tests: T-TRACK/T-DELIV race lanes
       (round 12 F4 discovered work. NewServerForTesting defaulted configDir to
       "" → the real ~/.gabs, so a test that skipped SetConfigDir read/wrote the
       user's live GABS state; it now creates an isolated os.MkdirTemp dir, and
       the config-package write tests (concurrency/env-isolation) and the
-      bridge-cleanup test were moved off ~/.gabs. Separately, Server.Shutdown()
-      cancels (shutdownCh) and JOINS every detached task — async mirroring,
-      attention setup, the attachment lease refresher, background GABP connect,
-      AND the in-flight peer-close handler (a disconnectWG guarded under s.mu so
-      no Add races Wait) — before t.TempDir teardown, closing the TempDir-clean
-      up race that was 5/10 under -race. Registered via t.Cleanup in the server
-      helpers. Full internal/mcp -race lane is now green)
+      bridge-cleanup test were moved off ~/.gabs. Server.Shutdown() cancels
+      (shutdownCh) and JOINS every detached task before TempDir teardown.
+      Round 13 corrections: (F3) EVERY background bgWG.Add — async mirroring,
+      the nested attention spawn, the lease refresher, and the background GABP
+      connect — now routes through admitBackgroundTask, which does the shutdown
+      check AND the Add together under s.mu (the same lock Shutdown holds to
+      close admission), so no positive Add can race bgWG.Wait; (F6) the
+      constructor-created isolated dir is tracked as ownedTempDir and removed by
+      Shutdown AFTER the joins, and the caller's SetConfigDir dir is never
+      touched. Race tests cover concurrent admission-vs-shutdown, concurrent
+      attachment-vs-shutdown, and the construct→SetConfigDir→Shutdown cleanup.
+      Reopened to [~] pending reviewer re-verification of the join safety)
 - [ ] M2.12 Remaining conformance cells (env-dropping, filtering,
       absent-env reintroduction, detached) — spec: 03; tests: T-DELIV
 - [ ] M2.13 repair --forget-runtime + no-arg games_status union of
