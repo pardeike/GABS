@@ -566,13 +566,30 @@ contract, not a scratchpad.
       so an untaught code fails visibly in the exhaustiveness test and as a
       missing causeClass in the real-handler battery. Handler-level tests
       trigger the real branches (games_status/show game_not_found, corrupt-claim
-      stop/kill, connect failure). F4: a real games_start with a status hook
+      stop/kill, connect failure). ROUND 14 (F2 reopened): the central step also
+      ran over games_call_tool, which forwards the GAME's GABP payload as
+      StructuredContent — so a game result or error whose key collided with a
+      GABS stable code (e.g. {"code":"spawn_failed"}) was wrongly injected with
+      causeClass/trackRecord/nextActions. Fixed by explicit PROVENANCE: a
+      ToolResult.BridgePassthrough flag (json:"-") marks every bridge-forwarded
+      payload (success + error, main handler + callDirectGABPTool), and
+      completeFailureAttribution skips it regardless of keys/error flag; the
+      GABS-OWNED call_tool wrapper failures (malformed tool arg, no connection,
+      transport error, game-not-found, ambiguous) are attributed BY CLASS
+      DIRECTLY (call/state) with NO minted stable code. Tests: an end-to-end
+      colliding-code bridge result stays un-attributed, the central gate is
+      unit-tested for success+error passthrough vs a GABS-owned coded control,
+      and each wrapper failure carries its class without a code. F4: a real
+      games_start with a status hook
       reporting stopped exercises the production hook-stopped exitedFailure
       branch and asserts game class + preserved hookEvidence + recorded game
       failure. F9/F5 (history-credit loss/double-count) RESOLVED in round 14 by
       record-first credits idempotent by event ID across both write directions
-      (see the F5 Deviations entry); M2.10 stays [!] on the still-open F2
-      attribution-provenance blocker)
+      (see the F5 Deviations entry). Both round-14 M2.10 blockers — F2
+      attribution provenance and F5 crash-safe history credit — are now
+      addressed; M2.10 stays [!] pending reviewer re-verification (protocol §18:
+      a deviation stays [!] until the adjudicator signs off, not when the
+      implementer believes it resolved))
       (F6 RESOLVED by reviewer adjudication: exited_during_start is `game` by
       the evidence-based default — a post-spawn exit is attributed to the
       workload because GABS observes only the first process it created and
@@ -785,8 +802,9 @@ contract, not a scratchpad.
   the round-13 review correctly rejected: recording a disagreement does not
   authorize [x], and it was not part of any adjudication. Round 13 instead
   FIXES the root cause for ALL four counters. The transition primitive gained
-  an afterCommit hook (TransitionRuntimeStateThen / FencedTransitionThen) that
-  runs under the same lock but only AFTER SaveRuntimeState succeeds; every
+  an afterCommit hook (later renamed to the beforeCommit/…WithCredit form in
+  round 14, below) that ran under the same lock but only AFTER SaveRuntimeState
+  succeeded; every
   history increment — workloadStarts (all 4 promotion paths), bridgeConnects,
   deliveriesVerified — moved from the mutate callback into afterCommit, and
   cleanStops now records AFTER RemoveRuntimeState commits. So a runtime save/

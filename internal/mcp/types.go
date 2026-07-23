@@ -112,6 +112,13 @@ type ToolResult struct {
 	Content           []Content              `json:"content,omitempty"`
 	StructuredContent map[string]interface{} `json:"structuredContent,omitempty"`
 	IsError           bool                   `json:"isError,omitempty"`
+	// BridgePassthrough marks a result whose StructuredContent is a game's
+	// GABP payload forwarded verbatim (games_call_tool). It is provenance, not
+	// wire data (json:"-"): GABS failure attribution must NEVER touch a
+	// bridge-returned payload — its `code` is game-defined and may collide with
+	// a GABS stable code — so completeFailureAttribution skips it regardless of
+	// keys or error flag (round 14 F2).
+	BridgePassthrough bool `json:"-"`
 }
 
 // Content represents text or image content

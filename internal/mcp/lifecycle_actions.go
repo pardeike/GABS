@@ -896,6 +896,14 @@ func (s *Server) completeFailureAttribution(toolName string, result *ToolResult)
 	if result == nil || result.StructuredContent == nil || !coreManagementTools[toolName] {
 		return
 	}
+	// A bridge-returned payload (games_call_tool forwarding a game's GABP result)
+	// is passed through UNCHANGED regardless of its keys or error flag: its
+	// `code` is game-defined and must never be read as a GABS stable code (round
+	// 14 F2). GABS-owned games_call_tool failures are attributed at their own
+	// branch instead, so they are not marked passthrough.
+	if result.BridgePassthrough {
+		return
+	}
 	code, _ := result.StructuredContent["code"].(string)
 	if code == "" {
 		return
@@ -913,6 +921,30 @@ func (s *Server) completeFailureAttribution(toolName string, result *ToolResult)
 	if _, has := result.StructuredContent["nextActions"]; !has {
 		gameID, _ := result.StructuredContent["gameId"].(string)
 		result.StructuredContent["nextActions"] = failureNextActions(gameID, class)
+	}
+}
+
+// gabsCallToolFailure builds a GABS-OWNED games_call_tool failure with direct
+// class attribution (round 14 F2). A malformed tool argument, no live GABP
+// connection, and a GABP transport error are GABS's own failures, not the
+// game's payload, so they must carry attribution — but they have no stable
+// lifecycle code and none is minted, so causeClass, a neutral track line, and
+// class-keyed next actions are attached DIRECTLY. The result is NOT marked
+// BridgePassthrough, and its code field stays empty, so the central completion
+// leaves these fields intact rather than reclassifying them.
+func (s *Server) gabsCallToolFailure(gameID, message, class string) *ToolResult {
+	sc := map[string]interface{}{
+		"causeClass":  class,
+		"trackRecord": process.TrackRecordLine(nil),
+		"nextActions": failureNextActions(gameID, class),
+	}
+	if gameID != "" {
+		sc["gameId"] = gameID
+	}
+	return &ToolResult{
+		Content:           []Content{{Type: "text", Text: message}},
+		StructuredContent: sc,
+		IsError:           true,
 	}
 }
 

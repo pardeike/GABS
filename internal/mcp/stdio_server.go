@@ -3046,10 +3046,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}
 		toolName, ok := args["tool"].(string)
 		if !ok || toolName == "" {
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: "Missing required argument: tool"}},
-				IsError: true,
-			}, nil
+			// A malformed/missing tool argument is a caller error (round 14 F2):
+			// GABS-owned, attributed by class directly (no minted code).
+			return s.gabsCallToolFailure(gameIdArg, "Missing required argument: tool", process.CauseCall), nil
 		}
 
 		toolArgs, _ := args["arguments"].(map[string]interface{})
@@ -3085,10 +3084,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			if disconnectNote != "" {
 				disconnectNote = " " + disconnectNote
 			}
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' is not connected via GABP. Use games_status to verify whether it is still running, then use games_connect or games_start as appropriate.%s", entry.GameID, disconnectNote)}},
-				IsError: true,
-			}, nil
+			// No live GABP connection is a GABS-owned runtime-state situation to
+			// resolve (round 14 F2, CauseState) — not a game payload.
+			msg := fmt.Sprintf("Game '%s' is not connected via GABP. Use games_status to verify whether it is still running, then use games_connect or games_start as appropriate.%s", entry.GameID, disconnectNote)
+			return s.gabsCallToolFailure(entry.GameID, msg, process.CauseState), nil
 		}
 
 		if blocked := s.ensureRuntimeOwnershipForGameCall(entry.GameID, fmt.Sprintf("tool '%s'", toolName), proxyTimeout); blocked != nil {
@@ -3109,41 +3108,24 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 
 		result, isError, err := client.CallToolWithTimeout(gabpToolName, toolArgs, proxyTimeout)
 		if err != nil {
-			disconnectNote := s.describeLastGABPDisconnect(entry.GameID)
-			if disconnectNote != "" {
-				disconnectNote = " " + disconnectNote
-			}
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("GABP tool call failed: %v.%s", err, disconnectNote)}},
-				IsError: true,
-			}, nil
+			// GABS-owned transport failure (CauseState) — shared helper.
+			return s.gabpCallErrorResult(entry.GameID, err), nil
 		}
 
 		if isError {
+			// A game-DEFINED error payload, forwarded verbatim and marked
+			// BridgePassthrough so GABS attribution never reads its keys as a
+			// GABS code (round 14 F2).
 			return &ToolResult{
 				Content:           []Content{{Type: "text", Text: fmt.Sprintf("Tool error: %v", result)}},
 				StructuredContent: result,
 				IsError:           true,
+				BridgePassthrough: true,
 			}, nil
 		}
 
-		// Convert result to text content
-		content := []Content{}
-		if resultText, ok := result["text"].(string); ok {
-			content = append(content, Content{Type: "text", Text: resultText})
-		} else {
-			if jsonData, err := json.Marshal(result); err != nil {
-				content = append(content, Content{Type: "text", Text: fmt.Sprintf("%v", result)})
-			} else {
-				content = append(content, Content{Type: "text", Text: string(jsonData)})
-			}
-		}
-
-		return &ToolResult{
-			Content:           content,
-			StructuredContent: result,
-			IsError:           false,
-		}, nil
+		// A successful game payload, forwarded verbatim (BridgePassthrough).
+		return gabpCallSuccessResult(result), nil
 	}, normalizationConfig)
 }
 
@@ -3793,10 +3775,14 @@ func (s *Server) callDirectGABPTool(gamesConfig *config.GamesConfig, gameIDArg s
 		}
 
 		if isError {
+			// A game-DEFINED error payload, forwarded verbatim and marked
+			// BridgePassthrough so GABS attribution never reads its keys as a
+			// GABS code (round 14 F2).
 			return &ToolResult{
 				Content:           []Content{{Type: "text", Text: fmt.Sprintf("Tool error: %v", callResult)}},
 				StructuredContent: callResult,
 				IsError:           true,
+				BridgePassthrough: true,
 			}, true
 		}
 
@@ -3816,10 +3802,8 @@ func (s *Server) resolveDirectGABPToolGame(gamesConfig *config.GamesConfig, game
 	if hasGameID {
 		game, exists := s.resolveGameId(gamesConfig, gameIDArg)
 		if !exists {
-			return "", &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIDArg)}},
-				IsError: true,
-			}, true
+			// GABS-owned caller error (round 14 F2, CauseCall).
+			return "", s.gabsCallToolFailure(gameIDArg, fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIDArg), process.CauseCall), true
 		}
 		return game.ID, nil, false
 	}
@@ -3850,10 +3834,8 @@ func (s *Server) resolveDirectGABPToolGame(gamesConfig *config.GamesConfig, game
 	}
 	if len(matches) > 1 {
 		sort.Strings(matches)
-		return "", &ToolResult{
-			Content: []Content{{Type: "text", Text: fmt.Sprintf("Tool '%s' matched multiple connected games (%s). Include gameId.", requested, strings.Join(matches, ", "))}},
-			IsError: true,
-		}, true
+		// GABS-owned caller error: ambiguous tool reference (round 14 F2, CauseCall).
+		return "", s.gabsCallToolFailure("", fmt.Sprintf("Tool '%s' matched multiple connected games (%s). Include gameId.", requested, strings.Join(matches, ", ")), process.CauseCall), true
 	}
 
 	if len(connectedGameIDs) == 1 {
@@ -3863,17 +3845,20 @@ func (s *Server) resolveDirectGABPToolGame(gamesConfig *config.GamesConfig, game
 	return "", nil, false
 }
 
+// gabpCallErrorResult is a GABS-owned GABP transport failure (the connection
+// dropped or the RPC errored): a runtime-state situation to resolve (round 14
+// F2, CauseState), attributed directly with no minted code.
 func (s *Server) gabpCallErrorResult(gameID string, err error) *ToolResult {
 	disconnectNote := s.describeLastGABPDisconnect(gameID)
 	if disconnectNote != "" {
 		disconnectNote = " " + disconnectNote
 	}
-	return &ToolResult{
-		Content: []Content{{Type: "text", Text: fmt.Sprintf("GABP tool call failed: %v.%s", err, disconnectNote)}},
-		IsError: true,
-	}
+	return s.gabsCallToolFailure(gameID, fmt.Sprintf("GABP tool call failed: %v.%s", err, disconnectNote), process.CauseState)
 }
 
+// gabpCallSuccessResult forwards a game's successful GABP payload verbatim as
+// the games_call_tool result, marked BridgePassthrough so GABS attribution
+// never rewrites it — its keys are game-defined (round 14 F2).
 func gabpCallSuccessResult(result map[string]interface{}) *ToolResult {
 	content := []Content{}
 	if resultText, ok := result["text"].(string); ok {
@@ -3890,6 +3875,7 @@ func gabpCallSuccessResult(result map[string]interface{}) *ToolResult {
 		Content:           content,
 		StructuredContent: result,
 		IsError:           false,
+		BridgePassthrough: true,
 	}
 }
 
