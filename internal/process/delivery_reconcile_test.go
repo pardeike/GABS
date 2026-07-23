@@ -2,11 +2,52 @@ package process
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/pardeike/gabs/internal/launch"
 )
+
+// TestPendingDeliveryReplayNoDoubleCreditBeyondCap is the round-17 F5 P1
+// reproduction: with more pending events than the dedup cap, a reconcile whose
+// runtime-save (pruning) fails must NOT double-credit on replay — the dedup
+// identity must remain durable until the pending record is durably removed.
+func TestPendingDeliveryReplayNoDoubleCreditBeyondCap(t *testing.T) {
+	dir := t.TempDir()
+	var pending []PendingCredit
+	for i := 0; i < 33; i++ {
+		pending = append(pending, PendingCredit{ID: fmt.Sprintf("conn-%02d", i), ContextHash: "sha256:ctx"})
+	}
+	lid := seedDeliveryClaim(t, dir, "g1", pending, nil)
+
+	// Reconcile with the final runtime save failing: the 33 history credits land,
+	// but the pending list is not durably pruned.
+	restore := SetSaveRuntimeStateFailHookForTesting(func() error { return errors.New("runtime down") })
+	err := ReconcilePendingCredits("g1", dir, lid)
+	restore()
+	if err == nil {
+		t.Fatal("expected the runtime save to fail")
+	}
+	if got := deliveriesVerified(t, dir, "g1", ""); got != 33 {
+		t.Fatalf("all 33 must credit exactly once: got %d", got)
+	}
+	if c, _ := LoadRuntimeState("g1", dir); len(c.PendingDeliveries) != 33 {
+		t.Fatalf("pending must remain durable when the save fails: got %d", len(c.PendingDeliveries))
+	}
+
+	// Replay with a healthy runtime save: must NOT double-credit the pending
+	// records whose dedup ids would have been evicted by an LRU cap.
+	if err := ReconcilePendingCredits("g1", dir, lid); err != nil {
+		t.Fatal(err)
+	}
+	if got := deliveriesVerified(t, dir, "g1", ""); got != 33 {
+		t.Fatalf("replay must not double-credit: got %d, want 33", got)
+	}
+	if c, _ := LoadRuntimeState("g1", dir); len(c.PendingDeliveries) != 0 {
+		t.Fatalf("pending must be pruned after the successful replay: got %d", len(c.PendingDeliveries))
+	}
+}
 
 func seedDeliveryClaim(t *testing.T, dir, gameID string, pending []PendingCredit, attach *RuntimeAttachment) string {
 	t.Helper()
@@ -39,7 +80,7 @@ func creditedDelivery(t *testing.T, dir, gameID, profile, connectionID string) b
 	if e == nil {
 		return false
 	}
-	for _, k := range e.CreditedEvents {
+	for _, k := range e.CreditedPendingEvents {
 		if k == "delivery:"+connectionID {
 			return true
 		}
@@ -184,6 +225,54 @@ func TestPendingDeliveryReconciledAtClaimRemoval(t *testing.T) {
 	}
 	if got := deliveriesVerified(t, dir, "g1", "combat"); got != 1 {
 		t.Fatalf("a pending delivery must be credited before the claim is removed, got %d", got)
+	}
+}
+
+// TestPendingDeliveryPreservedAtSaturation is the round-17 F5 P2 reproduction:
+// with the pending list already full, a NEW verified welcome report (already
+// consumed) must still be persisted — never dropped at a cap.
+func TestPendingDeliveryPreservedAtSaturation(t *testing.T) {
+	dir := t.TempDir()
+	cwd := t.TempDir()
+	managed := map[string]string{"K": "v"}
+	context := map[string]string{"CONTENT": "combat-pack"}
+	digests, err := ComputeContextDigests([]string{"-p", "combat"}, cwd, false, managed, context, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var pending []PendingCredit
+	for i := 0; i < 512; i++ { // well past any prior cap
+		pending = append(pending, PendingCredit{ID: fmt.Sprintf("old-%03d", i), ContextHash: "sha256:ctx"})
+	}
+	spec := LaunchSpec{GameId: "g1", Mode: "DirectPath", PathOrId: "/opt/game"}
+	st := NewRuntimeState(spec, RuntimeStateStatusRunning)
+	st.Phase = PhaseActive
+	st.SpawnState = SpawnStateSpawned
+	st.HistoryContextHash = "sha256:ctx"
+	st.ContextDigests = digests
+	st.PendingDeliveries = pending
+	st.Attachment = &RuntimeAttachment{ConnectionID: "overflow-conn", OwnerPID: 1, OwnerPIDStartTime: 1}
+	lid := st.LaunchID
+	if err := ClaimRuntimeState("g1", dir, st); err != nil {
+		t.Fatal(err)
+	}
+
+	obs := &ObservedContext{Argv: []string{"/opt/game", "-p", "combat"}, Cwd: cwd,
+		EnvValues: map[string]string{"K": "v", "CONTENT": "combat-pack"}}
+	if err := AppendPendingDelivery("g1", dir, lid, "overflow-conn", obs, time.Now().UTC()); err != nil {
+		t.Fatalf("append at saturation must not error: %v", err)
+	}
+
+	cur, _ := LoadRuntimeState("g1", dir)
+	found := false
+	for _, p := range cur.PendingDeliveries {
+		if p.ID == "overflow-conn" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the one-shot verified delivery must be persisted at saturation, never dropped")
 	}
 }
 

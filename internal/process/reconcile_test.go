@@ -2,11 +2,91 @@ package process
 
 import (
 	"errors"
+	"fmt"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/pardeike/gabs/internal/launch"
 )
+
+// TestPendingCleanStopReplayNoDoubleCreditBeyondCap is the clean-stop analogue
+// of the P1 delivery replay: beyond any dedup cap, a reconcile whose runtime
+// prune fails must not double-credit clean stops on replay.
+func TestPendingCleanStopReplayNoDoubleCreditBeyondCap(t *testing.T) {
+	dir := t.TempDir()
+	const hash = "sha256:ctx"
+	var pending []PendingCredit
+	for i := 0; i < 40; i++ {
+		pending = append(pending, PendingCredit{ID: fmt.Sprintf("op-%03d", i), Profile: "combat", ContextHash: hash})
+	}
+	spec := LaunchSpec{GameId: "g1", Mode: "DirectPath", PathOrId: "/opt/game"}
+	st := NewRuntimeState(spec, RuntimeStateStatusRunning)
+	st.Phase = PhaseActive
+	st.SpawnState = SpawnStateSpawned
+	st.HistoryContextHash = hash
+	st.PendingCleanStops = pending
+	lid := st.LaunchID
+	if err := ClaimRuntimeState("g1", dir, st); err != nil {
+		t.Fatal(err)
+	}
+
+	restore := SetSaveRuntimeStateFailHookForTesting(func() error { return errors.New("runtime down") })
+	err := ReconcilePendingCredits("g1", dir, lid)
+	restore()
+	if err == nil {
+		t.Fatal("expected the runtime save to fail")
+	}
+	if got := cleanStops(t, dir, "g1", "combat"); got != 40 {
+		t.Fatalf("all 40 must credit once: got %d", got)
+	}
+	if err := ReconcilePendingCredits("g1", dir, lid); err != nil {
+		t.Fatal(err)
+	}
+	if got := cleanStops(t, dir, "g1", "combat"); got != 40 {
+		t.Fatalf("replay must not double-credit: got %d, want 40", got)
+	}
+}
+
+// TestPendingCleanStopPreservedAtSaturation is the round-17 F5 P2 reproduction:
+// a verified-termination clean stop must be recorded even when the pending list
+// is already full — the action already executed, so a drop would be permanent
+// loss.
+func TestPendingCleanStopPreservedAtSaturation(t *testing.T) {
+	dir := t.TempDir()
+	const hash = "sha256:ctx"
+	opID := NewFencingID()
+
+	st := NewRuntimeState(m2Spec("g1"), RuntimeStateStatusRunning)
+	st.Phase = PhaseStopping
+	st.SpawnState = SpawnStateSpawned
+	st.HistoryContextHash = hash
+	for i := 0; i < 512; i++ { // well past any prior cap
+		st.PendingCleanStops = append(st.PendingCleanStops, PendingCredit{ID: fmt.Sprintf("old-%03d", i), Profile: "combat", ContextHash: hash})
+	}
+	st.Operation = &RuntimeOperation{
+		OperationID: opID, Action: OperationActionStop,
+		ExecutorPID: os.Getpid(), ExecutorPIDStartTime: 1,
+		AttemptStartedAt: time.Now().UTC(), Deadline: time.Now().UTC().Add(time.Minute),
+	}
+	launchID := st.LaunchID
+	if err := ClaimRuntimeState("g1", dir, st); err != nil {
+		t.Fatal(err)
+	}
+
+	req := StopRequest{GameID: "g1", ConfigDir: dir, InstanceID: "inst", HistoryProfile: "combat", HistoryContextHash: hash}
+	if err := removeRuntimeStateForStopCompletion(req, launchID, opID); err != nil {
+		t.Fatalf("completion at saturation must not error: %v", err)
+	}
+
+	// All 513 clean stops (512 pending + the completion) credited; claim removed.
+	if got := cleanStops(t, dir, "g1", "combat"); got != 513 {
+		t.Fatalf("every verified clean stop must credit at saturation: got %d, want 513", got)
+	}
+	if c, _ := LoadRuntimeState("g1", dir); c != nil {
+		t.Fatalf("the claim must be removed after crediting: %+v", c)
+	}
+}
 
 // failedVerifiedStop runs a real stop that VERIFIES termination while its
 // clean-stop history write fails, leaving the claim with one self-contained

@@ -1,9 +1,6 @@
 package process
 
-import (
-	"fmt"
-	"time"
-)
+import "time"
 
 // Round-16 F5: verified history events (clean stops, verified deliveries) whose
 // credit failed once are recorded as SELF-CONTAINED pending events on the claim,
@@ -13,80 +10,78 @@ import (
 // clears. Every deleter reconciles both lists before removal (and status also
 // reconciles pending deliveries on the live claim, for the disconnect case).
 
-// pendingCreditCap bounds each pending list. Pending lists only grow during a
-// sustained history-write outage (normally 0-1 entries), so hitting the cap is
-// a real fault, never routine — it is logged loudly and the append is refused
-// rather than silently evicting an older un-credited event (which would be the
-// very loss this design prevents).
-const pendingCreditCap = 256
-
-// appendPendingCreditOnce appends a pending credit unless its ID is already
-// present (a repeat observation of the same event) or the list is full. Returns
-// the new list and whether it changed; overflow returns changed=false so the
-// caller can surface the fault.
-func appendPendingCreditOnce(list []PendingCredit, e PendingCredit) (out []PendingCredit, changed, overflow bool) {
+// appendPendingCredit records a pending credit for an already-happened event
+// (a verified welcome report, a verified termination) unless its id is already
+// present. It NEVER drops the event at a cap (round 17 F5): the report was
+// already consumed / the action already executed, so refusing would be permanent
+// loss. In normal operation the list stays tiny — the reconcile after every
+// append drains it. It could only grow under a sustained, history-SPECIFIC write
+// outage (runtime writes landing while history writes fail), and non-dropping is
+// deliberately correct there: a bounded, replayable backlog is strictly better
+// than discarding an event that already happened.
+func appendPendingCredit(list []PendingCredit, e PendingCredit) []PendingCredit {
 	for _, p := range list {
 		if p.ID == e.ID {
-			return list, false, false
+			return list
 		}
 	}
-	if len(list) >= pendingCreditCap {
-		return list, false, true
-	}
-	return append(list, e), true, false
-}
-
-// removePendingCreditByID drops the entry with id, if present.
-func removePendingCreditByID(list []PendingCredit, id string) ([]PendingCredit, bool) {
-	for i, p := range list {
-		if p.ID == id {
-			return append(list[:i:i], list[i+1:]...), true
-		}
-	}
-	return list, false
+	return append(list, e)
 }
 
 // creditPendingEventsLocked credits every pending clean-stop and delivery on cur
-// by the entry's OWN stored coordinates (idempotent by "stop:"/"delivery:"+ID),
-// pruning each entry from cur once its credit has landed. MUST be called under
-// the per-game transition lock. Returns whether cur's pending lists changed (so
-// the caller can persist them) and the FIRST credit error encountered — on
-// error the credited entries are already pruned, so a retry re-attempts only the
-// rest. A no-op (no error, no change) when nothing is pending.
-func creditPendingEventsLocked(gameID, configDir string, cur *RuntimeState) (changed bool, err error) {
-	for _, p := range append([]PendingCredit(nil), cur.PendingCleanStops...) {
-		if cerr := applyCleanStop(gameID, configDir, p.Profile, p.ContextHash, p.ID, creditAt(p.At)); cerr != nil {
-			return changed, cerr
+// in ONE history write (round 17 F5): each is credited by its own self-contained
+// coordinates, idempotent by a lifetime-coupled marker (CreditedPendingEvents)
+// that is GC'd against the claim's current pending ids in the SAME write — so
+// the dedup identity is durable exactly as long as the pending record it guards,
+// never dropped by an LRU while the record can still replay. Does NOT prune
+// cur's pending lists: the caller prunes them and persists runtime AFTER this
+// (or removes the claim); until that prune is durable the markers keep the
+// credit idempotent, and are GC'd once the pending records are gone. MUST hold
+// the per-game transition lock.
+func creditPendingEventsLocked(gameID, configDir string, cur *RuntimeState) error {
+	live := livePendingMarkers(cur)
+	return applyHistoryLocked(gameID, configDir, func(h *GameHistory) {
+		for _, p := range cur.PendingDeliveries {
+			e := h.entryForContext(p.Profile, p.ContextHash)
+			if e.markPendingCreditOnce("delivery:" + p.ID) {
+				e.DeliveriesVerified++
+			}
 		}
-		cur.PendingCleanStops, _ = removePendingCreditByID(cur.PendingCleanStops, p.ID)
-		changed = true
-	}
-	for _, p := range append([]PendingCredit(nil), cur.PendingDeliveries...) {
-		if cerr := ApplyDeliveryVerifiedLocked(gameID, configDir, p.Profile, p.ContextHash, p.ID); cerr != nil {
-			return changed, cerr
+		for _, p := range cur.PendingCleanStops {
+			e := h.entryForContext(p.Profile, p.ContextHash)
+			if e.markPendingCreditOnce("stop:" + p.ID) {
+				e.CleanStops++
+			}
 		}
-		cur.PendingDeliveries, _ = removePendingCreditByID(cur.PendingDeliveries, p.ID)
-		changed = true
-	}
-	return changed, nil
+		// GC: a marker whose pending record is no longer on the claim is durably
+		// unreplayable and safe to forget, keeping the marker set a bounded
+		// subset of the current pending ids.
+		for _, e := range h.Profiles {
+			e.retainPendingCreditMarkers(live)
+		}
+	})
 }
 
-func creditAt(at time.Time) time.Time {
-	if at.IsZero() {
-		return time.Now().UTC()
+// livePendingMarkers is the "kind:id" marker set for the claim's CURRENT pending
+// records — the markers whose credit could still replay.
+func livePendingMarkers(cur *RuntimeState) map[string]bool {
+	live := make(map[string]bool, len(cur.PendingDeliveries)+len(cur.PendingCleanStops))
+	for _, p := range cur.PendingDeliveries {
+		live["delivery:"+p.ID] = true
 	}
-	return at
+	for _, p := range cur.PendingCleanStops {
+		live["stop:"+p.ID] = true
+	}
+	return live
 }
 
 // reconcilePendingBeforeRemoval credits every pending event on cur under the
-// transition lock immediately BEFORE the claim is removed (round 16 F5). If any
-// credit write fails it returns the error so the caller ABORTS removal and
-// persists cur (with the credited entries already pruned) for a later retry —
-// no verified event is ever lost with the deleted claim. cur is the claim
-// loaded under the lock; the caller must hold that lock.
+// transition lock immediately BEFORE the claim is removed (round 16 F5). If the
+// credit write fails it returns the error so the caller ABORTS removal, leaving
+// the claim + its durable pending records for a later retry — no verified event
+// is ever lost with the deleted claim. cur is loaded under the lock.
 func reconcilePendingBeforeRemoval(gameID, configDir string, cur *RuntimeState) error {
-	_, err := creditPendingEventsLocked(gameID, configDir, cur)
-	return err
+	return creditPendingEventsLocked(gameID, configDir, cur)
 }
 
 // pendingDeliveryEvent builds a self-contained pending delivery credit for a
@@ -131,13 +126,16 @@ func ReconcilePendingCredits(gameID, configDir, launchID string) error {
 	if len(cur.PendingCleanStops) == 0 && len(cur.PendingDeliveries) == 0 {
 		return nil
 	}
-	changed, cerr := creditPendingEventsLocked(gameID, configDir, cur)
-	if changed {
-		if serr := SaveRuntimeState(gameID, configDir, *cur); serr != nil && cerr == nil {
-			cerr = serr
-		}
+	if err := creditPendingEventsLocked(gameID, configDir, cur); err != nil {
+		return err
 	}
-	return cerr
+	// All pending events are now credited (marked). Prune them and persist; the
+	// markers keep the credit idempotent until this prune is durable (a save
+	// failure leaves both the pending records and their markers, so a replay
+	// re-credits nothing).
+	cur.PendingDeliveries = nil
+	cur.PendingCleanStops = nil
+	return SaveRuntimeState(gameID, configDir, *cur)
 }
 
 // AppendPendingDelivery evaluates the welcome report against the claim's PINNED
@@ -155,11 +153,10 @@ func AppendPendingDelivery(gameID, configDir, launchID, connectionID string, obs
 		verdict := EvaluateContextDelivery(st.ContextDigests, obs)
 		st.ContextDelivery = verdict // rendered: the latest connection's verdict
 		if verdict != nil && verdict.Overall == DeliveryVerified && st.HistoryContextHash != "" {
-			next, _, overflow := appendPendingCreditOnce(st.PendingDeliveries, pendingDeliveryEvent(st, connectionID, at))
-			if overflow {
-				return fmt.Errorf("pending delivery credits for %s exceeded %d: a sustained history-write outage is losing credits", gameID, pendingCreditCap)
-			}
-			st.PendingDeliveries = next
+			// Never dropped at a cap — the report was already consumed, so a
+			// refusal would be permanent loss (round 17 F5). The reconcile that
+			// follows this append drains the list.
+			st.PendingDeliveries = appendPendingCredit(st.PendingDeliveries, pendingDeliveryEvent(st, connectionID, at))
 		}
 		return nil
 	})

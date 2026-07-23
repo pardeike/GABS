@@ -94,19 +94,32 @@ type HistoryEntry struct {
 	// failure or a crash between the two files replays without double-counting —
 	// a retried promotion finds the launchID already credited. LRU-capped.
 	CreditedLaunchIDs []string `json:"creditedLaunchIds,omitempty"`
-	// CreditedEvents are the non-start history events (bridge connect, delivery
-	// verified, clean stop) already counted, keyed "kind:id" so the same id
-	// under two kinds cannot collide (connect:cid vs delivery:cid share a
-	// connectionID). Same record-first idempotency as CreditedLaunchIDs (round
-	// 14 F5): every counter increments at exactly its defined point and never
-	// twice across a runtime-write, history-write, or crash-between-writes
-	// failure. LRU-capped.
+	// CreditedEvents are the RECORD-FIRST non-start events (bridge connect)
+	// already counted, keyed "kind:id". Their replay source is TRANSIENT (a
+	// reconnect gets a fresh connectionID), so a small LRU window suffices
+	// (round 14 F5). Delivery/clean-stop are NOT here — their replay source is a
+	// durable pending record, so they use CreditedPendingEvents (round 17 F5).
 	CreditedEvents []string `json:"creditedEvents,omitempty"`
+	// CreditedPendingEvents are the delivery/clean-stop events already counted
+	// whose replay source is a DURABLE pending record on the claim (round 17
+	// F5). Keyed "delivery:connectionID" / "stop:operationID". This set is NOT
+	// LRU-capped: it is lifetime-coupled to the pending records. Reconciliation
+	// GCs a marker exactly when its pending record is durably gone (every
+	// reconcile prunes ALL entries against the current claim's live ids), so a
+	// marker can never be evicted while the record it guards can still replay —
+	// the invariant an LRU would break. A just-credited batch's markers persist
+	// until the next reconcile of this entry prunes them (bounded by one claim's
+	// events, and dropped on the next launch's first reconcile); they cannot
+	// suppress a future credit because every id is a fresh 128-bit random
+	// (NewFencingID) that a parked marker can never collide with. That is the
+	// per-pending-record "credited" bit, stored history-side for atomicity with
+	// the counter.
+	CreditedPendingEvents []string `json:"creditedPendingEvents,omitempty"`
 }
 
-// creditEventOnce reports whether key is a NEW history event for this entry,
-// recording it (LRU-capped) so a replay of the same event no-ops. The key is
-// "kind:id" (round 14 F5). Returns false when the event was already credited.
+// creditEventOnce reports whether key is a NEW record-first event for this entry
+// (bridge connect), recording it LRU-capped so a recent retry no-ops (round 14
+// F5). Returns false when already credited.
 func (e *HistoryEntry) creditEventOnce(key string) bool {
 	if key == "" {
 		return true // no identity to dedup by; credit unconditionally
@@ -123,9 +136,45 @@ func (e *HistoryEntry) creditEventOnce(key string) bool {
 	return true
 }
 
-// creditedEventCap bounds the per-entry dedup ring for non-start events. Only
-// very recent events can race a double-credit (a retry or crash-replay), so a
-// small LRU window suffices — matching creditedLaunchCap.
+// markPendingCreditOnce reports whether key is a NEW pending-event credit for
+// this entry, recording it WITHOUT an LRU cap (round 17 F5): the marker is
+// GC'd by retainPendingCreditMarkers when its pending record is durably gone, so
+// it must never be dropped by recency while the record can still replay.
+func (e *HistoryEntry) markPendingCreditOnce(key string) bool {
+	if key == "" {
+		return true
+	}
+	for _, k := range e.CreditedPendingEvents {
+		if k == key {
+			return false
+		}
+	}
+	e.CreditedPendingEvents = append(e.CreditedPendingEvents, key)
+	return true
+}
+
+// retainPendingCreditMarkers drops every pending-credit marker whose id is not
+// in live — those pending records are durably gone, so their credit can never
+// replay and the marker is safe to forget (round 17 F5). This keeps the marker
+// set a bounded subset of the claim's current pending ids.
+func (e *HistoryEntry) retainPendingCreditMarkers(live map[string]bool) {
+	if len(e.CreditedPendingEvents) == 0 {
+		return
+	}
+	kept := e.CreditedPendingEvents[:0]
+	for _, k := range e.CreditedPendingEvents {
+		if live[k] {
+			kept = append(kept, k)
+		}
+	}
+	if len(kept) == 0 {
+		e.CreditedPendingEvents = nil
+	} else {
+		e.CreditedPendingEvents = kept
+	}
+}
+
+// creditedEventCap bounds the per-entry LRU dedup ring for record-first events.
 const creditedEventCap = 32
 
 func (e *HistoryEntry) hasBucket(declHash, valueDigest string) bool {
@@ -522,21 +571,6 @@ func applyCleanStop(gameID, configDir, profile, contextHash, operationID string,
 		e := h.entryForContext(profile, contextHash)
 		if e.creditEventOnce("stop:" + operationID) {
 			e.CleanStops++
-		}
-	})
-}
-
-// ApplyDeliveryVerifiedLocked records deliveriesVerified++ using an already
-// held transition lock, idempotent by connectionID — applied when a pending
-// delivery event is reconciled (round 16 F5): each verified welcome report is a
-// self-contained pending credit keyed by its OWN connectionID, so this credits
-// exactly that connection's delivery, never a successor's, and a
-// retry/crash-replay counts at most once. Returns the write error.
-func ApplyDeliveryVerifiedLocked(gameID, configDir, profile, contextHash, connectionID string) error {
-	return applyHistoryLocked(gameID, configDir, func(h *GameHistory) {
-		e := h.entryForContext(profile, contextHash)
-		if e.creditEventOnce("delivery:" + connectionID) {
-			e.DeliveriesVerified++
 		}
 	})
 }

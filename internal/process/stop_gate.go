@@ -489,12 +489,11 @@ func removeRuntimeStateGuarded(gameID, configDir, instanceID, launchID, operatio
 		return errStopAttachmentLive
 	}
 	if completion != nil {
-		next, _, overflow := appendPendingCreditOnce(cur.PendingCleanStops,
+		// Never dropped at a cap — termination already verified, so a refusal
+		// would be permanent loss (round 17 F5); this claim's pending records are
+		// credited and removed immediately below.
+		cur.PendingCleanStops = appendPendingCredit(cur.PendingCleanStops,
 			pendingCleanStopEvent(completion.operationID, completion.profile, completion.contextHash, time.Now().UTC()))
-		if overflow {
-			return fmt.Errorf("pending clean-stop credits for %s exceeded %d: a sustained history-write outage is losing credits", gameID, pendingCreditCap)
-		}
-		cur.PendingCleanStops = next
 	}
 	if rerr := reconcilePendingBeforeRemoval(gameID, configDir, cur); rerr != nil {
 		// A credit write failed: persist the pending lists (credited entries

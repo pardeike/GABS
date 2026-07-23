@@ -585,11 +585,13 @@ contract, not a scratchpad.
       branch and asserts game class + preserved hookEvidence + recorded game
       failure. F2 (attribution provenance) accepted round 15. F9/F5
       (history-credit loss/double-count) fixed round 14 by record-first credits;
-      rounds 15-16 additionally bind each deferred credit to its own immutable
+      rounds 15-17 additionally bind each deferred credit to its own immutable
       event identity — self-contained pending clean-stop/delivery events
       reconciled by every deleter and by games_status, independent of the
-      claim's current Operation/Attachment — see the F5 Deviations entry. M2.10
-      stays [!] pending reviewer sign-off of the round-16 F5 correction (protocol
+      claim's current Operation/Attachment, with a lifetime-coupled dedup that
+      cannot outlive its pending record and a non-dropping append at saturation —
+      see the F5 Deviations entry. M2.10
+      stays [!] pending reviewer sign-off of the round-17 F5 correction (protocol
       §18: a deviation stays [!] until the adjudicator signs off, not when the
       implementer believes it resolved))
       (F6 RESOLVED by reviewer adjudication: exited_during_start is `game` by
@@ -884,7 +886,32 @@ contract, not a scratchpad.
   Production-path, teeth-checked tests cover the reviewer's clean-stop set
   (operation replacement, both-counted, concurrent deleter) and delivery set
   (detach, successor-never-credited-from-predecessor, partial-preserves-pending,
-  restart, reconcile-at-removal). M2.10 stays [!] pending reviewer sign-off. Per
+  restart, reconcile-at-removal). ROUND 17 (F5 reopened again): the round-16
+  self-contained identity was right, but its dedup LIFETIME was wrong in two
+  ways. (1) the pending credit was deduped through the shared record-first LRU
+  (CreditedEvents, cap 32), while a durable pending record can outnumber it (the
+  list cap was 256) — so an evicted marker let a still-replayable pending event
+  double-count (reproduced: 33 pending -> 66 credited). FIX: pending events dedup
+  through a SEPARATE, lifetime-coupled marker set (CreditedPendingEvents) that is
+  NOT LRU-evicted; it is GC'd against the claim's CURRENT pending ids in the SAME
+  history write that credits them (retainPendingCreditMarkers), so a marker stays
+  durable exactly as long as the pending record it guards and is forgotten only
+  once that record is durably gone — the dedup identity can never outlive, nor be
+  outlived by, its pending record. (2) appending a verified event at the bounded
+  cap DROPPED it — but the welcome report was already consumed (TakeObservedContext)
+  and the clean stop already executed, so a drop is permanent loss, not a loud
+  refusal. FIX: appendPendingCredit NEVER drops (dedup by id, no cap); unbounded
+  growth is unreachable because the reconcile after every append drains the list,
+  and a history-write outage that blocks draining also fails the runtime write
+  that stores the pending record (same filesystem) — the list cannot grow while
+  it cannot drain. Reconcile now credits + GCs + prunes in one history write, then
+  one runtime save; a save failure leaves both the records and their markers, so a
+  replay re-credits nothing. Permanent regressions added: the 33/40-event
+  runtime-save-failure replay (delivery AND clean-stop, asserting exactly-once
+  beyond the old LRU cap), and the full-list one-shot saturation tests (delivery
+  and clean-stop, asserting the next verified event is preserved not dropped).
+  Dead ApplyDeliveryVerifiedLocked removed (reconcile inlines the credit). M2.10
+  stays [!] pending reviewer sign-off. Per
   protocol §18 a deviation stays [!] until the adjudicator signs off.
 - 2026-07-22, M2.10, round 12 F3, design/10:37 (authorized codes): two codes
   invented in round 11 were removed. Malformed profile/launchInputs CONTAINER
