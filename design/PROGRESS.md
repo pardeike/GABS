@@ -647,7 +647,8 @@ contract, not a scratchpad.
       attribution path — including the proof-adjusted launch_spec_unresolvable
       (a target that vanished after proven starts reads environment, computed
       from input-free coordinates with NO history mutation), the pre-resolution
-      call-class errors (no context, no track line, no mutation), config_invalid
+      call-class errors (no context, the NEUTRAL "no successful starts" track
+      line per design/08:39, no mutation), config_invalid
       / launch_mode_incompatible, and the internal stop/kill execution error;
       Stage 4 verified now credits workloadStarts++ at EVERY promotion path —
       synchronous, passive status observation, bridge attachment, and restart
@@ -865,18 +866,16 @@ contract, not a scratchpad.
   (exited_during_start, spawn_failed, endpoint_unavailable, spec_too_large);
   the record side is gated to the exact ProcessError types the renderer
   labels spawn_failed so write-coverage never exceeds render-coverage.
-- 2026-07-22, M2.10, review round 11 P2-5 (reversal of round 10 finding 8):
-  round 10 directed exited_during_start to classify environment when a status
-  hook surfaced the stop and game otherwise. Round 11 corrected this: a status
-  hook is LIVENESS evidence, not CAUSE evidence (a plain game with a status
-  hook that crashes is still design/08 "crash on start → game"; a container
-  wrapper that exits without a hook is still environment). exited_during_start
-  now defaults to game and is environment ONLY with positive wrapper/container
-  CAUSE evidence (ClassifyContext.WrapperExit). Production wires WrapperExit
-  false — no robust wrapper-exit signal exists yet — so production
-  exited_during_start is game; the wrapper→environment path is classifier-
-  ready and unit-tested for when a producer fact is wired. Recorded because
-  this is a directed reversal of a prior accepted finding, not an oversight.
+- 2026-07-22, M2.10, review round 11 P2-5 (reversal of round 10 finding 8) —
+  SUPERSEDED by the round-12 F6 adjudication below: round 10 directed
+  exited_during_start to classify environment when a status hook surfaced the
+  stop and game otherwise; round 11 corrected the status-hook inference. Round
+  11 still retained a hypothetical ClassifyContext.WrapperExit seam. That seam
+  was REMOVED entirely by the F6 adjudication (see the round-12 F6 Deviations
+  entry): there is no producer fact for a wrapper/container exit at the first
+  process GABS creates, so exited_during_start is ALWAYS game and the design row
+  was amended. This note is retained only for history; the WrapperExit branch no
+  longer exists.
   Test coverage of the record sites: the inline exitedFailure recorder
   (T-TRACK exited-during-start) and the deferred pendingFailCode recorder
   (T-TRACK spec_too_large) are both exercised through the real handler with

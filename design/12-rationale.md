@@ -83,6 +83,22 @@ concurrent profiles ✗ (separate IDs; reserved extension).
 
 ## Decisions and rejected alternatives (do not re-add)
 
+- **`exited_during_start` cause class: no launch-mode heuristic, no
+  classification-only config flag.** A post-spawn exit is `game` by the
+  evidence-based default (05-start-pipeline.md §"Why exited_during_start is
+  always game"). GABS observes only the first process it creates and cannot
+  distinguish a game binary from a user-owned wrapper/container launcher.
+  Two signals were considered and **rejected**: (1) a launch-mode heuristic
+  (`CustomCommand`/`SteamManaged` → environment) would misclassify the common
+  case — a real game crash under those modes — as an environment problem,
+  sending agents to "fix the environment" for a game-side bug; false
+  attribution is worse than the honest default. (2) A classification-only
+  config flag (`launchKind: container`) would push a cause GABS cannot observe
+  onto the user to declare, and would drift the moment the same command is
+  reused for a non-container target. The wrapper's own stderr — which says what
+  actually failed — is preserved in `outputTail`, and the guidance tells the
+  caller to read it. (An OS process-**creation** failure stays `spawn_failed` /
+  environment.)
 - **No public operation IDs, journal, or background operation model.**
   Operations are bounded by configured hook timeouts plus the verify
   window; progress is observable via the persisted `phase`, and the
