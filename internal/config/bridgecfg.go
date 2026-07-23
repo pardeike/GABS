@@ -12,6 +12,28 @@ import (
 	"sync"
 )
 
+// bridgeWriteLocks serializes every bridge.json read-modify-write for a game
+// (round 13 F1): endpoint preparation (read/reuse/rotate) and the spawn-boundary
+// diagnostics stamp are otherwise three separate steps — read, compare, rewrite
+// — that an interleaving endpoint rotation can defeat, restoring a superseded
+// launch's token/diagnostics over the successor's. Holding one dedicated
+// per-(configDir,gameID) lock across the whole read-compare-write makes it
+// atomic. A dedicated lock (not the runtime transition flock) avoids nesting
+// deadlocks, since the stamp runs adjacent to runtime transitions. Cross-process
+// starts of the same game are already serialized by GateStart's transition lock,
+// so no successor's endpoint reaches preparation while another launch holds a
+// live claim.
+var bridgeWriteLocks sync.Map // key "configDir\x00gameID" -> *sync.Mutex
+
+func bridgeWriteLock(configDir, gameID string) *sync.Mutex {
+	m, _ := bridgeWriteLocks.LoadOrStore(configDir+"\x00"+gameID, &sync.Mutex{})
+	return m.(*sync.Mutex)
+}
+
+// bridgeStampAfterReadHook is a test-only barrier fired inside
+// StampBridgeDiagnostics after the read, while the write lock is held.
+var bridgeStampAfterReadHook func()
+
 type BridgeJSON struct {
 	Port   int    `json:"port"`
 	Token  string `json:"token"`
@@ -111,6 +133,11 @@ func EnsureBridgeJSONWithConfig(gameID, configDir string, gamesConfig *GamesConf
 // carried, so a pre-spawn failure never leaves a profile/revision/startedAt
 // for a process that was never spawned (round 11 P2-8).
 func PrepareBridgeEndpointForStart(gameID, configDir string, gamesConfig *GamesConfig, resetEndpoint bool) (int, string, string, bool, error) {
+	// Serialize the entire read/reuse/rotate against a concurrent stamp or
+	// preparation for this game (round 13 F1).
+	lk := bridgeWriteLock(configDir, gameID)
+	lk.Lock()
+	defer lk.Unlock()
 	if resetEndpoint {
 		port, token, path, err := WriteBridgeJSONWithConfig(gameID, configDir, gamesConfig)
 		return port, token, path, false, err
@@ -166,6 +193,12 @@ func PrepareBridgeEndpointForStart(gameID, configDir string, gamesConfig *GamesC
 // ErrBridgeEndpointRotated in that case; a missing file returns its read error.
 // Diagnostics never influence a read decision.
 func StampBridgeDiagnostics(gameID, configDir string, expectedPort int, expectedToken string, diag BridgeDiagnostics) error {
+	// The read → compare → rewrite must be atomic with respect to any endpoint
+	// rotation, or a successor's token published between the read and the write
+	// would be overwritten by this stale launch (round 13 F1).
+	lk := bridgeWriteLock(configDir, gameID)
+	lk.Lock()
+	defer lk.Unlock()
 	cp, err := NewConfigPaths(configDir)
 	if err != nil {
 		return fmt.Errorf("failed to create config paths: %w", err)
@@ -174,6 +207,12 @@ func StampBridgeDiagnostics(gameID, configDir string, expectedPort int, expected
 	bridge, err := readBridgeJSONFile(cfgPath)
 	if err != nil {
 		return err
+	}
+	// Test barrier: a hook fired after the read (still under the lock) lets a
+	// deterministic test attempt a rotation and prove it CANNOT land until the
+	// stamp completes (round 13 F1).
+	if bridgeStampAfterReadHook != nil {
+		bridgeStampAfterReadHook()
 	}
 	if bridge.Port != expectedPort || bridge.Token != expectedToken {
 		return ErrBridgeEndpointRotated

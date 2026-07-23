@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"sync"
 	"testing"
 	"time"
 )
@@ -152,6 +153,80 @@ func TestStampRefusesRotatedEndpoint(t *testing.T) {
 	if b.Profile == "stale-A" || b.Token != bToken {
 		t.Fatalf("a superseded launch must never stamp the successor's token: %+v", b)
 	}
+}
+
+// TestStampCannotRestoreRotatedTokenUnderRace is the F1 concurrency invariant:
+// a stale launch's stamp racing a successor's endpoint rotation can NEVER
+// restore the stale token or land its diagnostics on the successor's token.
+// Under the shared per-game write lock the read→compare→write is atomic, so
+// the final token is always the successor's, whatever the interleaving.
+func TestStampCannotRestoreRotatedTokenUnderRace(t *testing.T) {
+	for iter := 0; iter < 400; iter++ {
+		dir := t.TempDir()
+		aPort, aToken, _, _, err := PrepareBridgeEndpointForStart("g", dir, nil, false)
+		if err != nil {
+			t.Fatalf("prepare A: %v", err)
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		var bToken string
+		go func() {
+			defer wg.Done()
+			_ = StampBridgeDiagnostics("g", dir, aPort, aToken, BridgeDiagnostics{Profile: "stale-A", StartedAt: "2026-07-22T10:00:00Z"})
+		}()
+		go func() {
+			defer wg.Done()
+			_, tok, _, _, _ := PrepareBridgeEndpointForStart("g", dir, nil, false)
+			bToken = tok
+		}()
+		wg.Wait()
+
+		cp, _ := NewConfigPaths(dir)
+		b, _ := readBridgeJSONFile(cp.GetBridgeConfigPath("g"))
+		if b.Token != bToken {
+			t.Fatalf("iter %d: a stale stamp restored the rotated token: final=%q successor=%q", iter, b.Token, bToken)
+		}
+		if b.Profile == "stale-A" {
+			t.Fatalf("iter %d: stale-A diagnostics landed on the successor's endpoint: %+v", iter, b)
+		}
+	}
+}
+
+// TestStampBlocksRotationDeterministically uses the after-read barrier to prove
+// the read→compare→write is atomic: while A's stamp holds the lock, B's
+// preparation cannot rotate the endpoint until A completes (round 13 F1).
+func TestStampBlocksRotationDeterministically(t *testing.T) {
+	dir := t.TempDir()
+	aPort, aToken, _, _, err := PrepareBridgeEndpointForStart("g", dir, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rotated := make(chan struct{})
+	entered := make(chan struct{})
+	bridgeStampAfterReadHook = func() {
+		close(entered)
+		// Kick off B's rotation; it must BLOCK on the write lock A holds.
+		go func() {
+			_, _, _, _, _ = PrepareBridgeEndpointForStart("g", dir, nil, false)
+			close(rotated)
+		}()
+		// Give B a chance to run; it must not have rotated yet.
+		time.Sleep(30 * time.Millisecond)
+		select {
+		case <-rotated:
+			t.Error("B rotated the endpoint while A held the stamp lock — not atomic")
+		default:
+		}
+	}
+	defer func() { bridgeStampAfterReadHook = nil }()
+
+	if err := StampBridgeDiagnostics("g", dir, aPort, aToken, BridgeDiagnostics{Profile: "A"}); err != nil {
+		t.Fatalf("A's stamp must succeed (it ran before any rotation): %v", err)
+	}
+	<-entered
+	<-rotated // B unblocks once A released the lock
 }
 
 // Diagnostics must never enter the endpoint-reuse decision.

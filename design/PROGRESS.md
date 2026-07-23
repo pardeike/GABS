@@ -641,16 +641,24 @@ contract, not a scratchpad.
       input declaration invalidates its buckets (not only editing one); a clean
       terminated stop carries no failure cause; buildHistoryContext is split
       into a pure compute and the accepted-start mutation)
-- [x] M2.11 bridge.json diagnostic fields; env-only live contract
+- [~] M2.11 bridge.json diagnostic fields; env-only live contract
       preserved — spec: 03; tests: T-DELIV
-      (round-12 F10 resolved: the spawn-boundary diagnostics stamp is now
-      fenced to the launch's endpoint — StampBridgeDiagnostics requires the
-      expected port+token and returns ErrBridgeEndpointRotated when a successor
-      rotated the token, so a superseded launch never writes its profile/
-      revision onto the successor's endpoint; a stamp WRITE failure surfaces as
-      a structured start warning rather than a silent log. Tested by an A-spawns
-      /B-rotates/A-stamps race cell. All round-11/round-12 M2.11 findings closed
-      and gates green.)
+      (round-12 F10: the spawn-boundary diagnostics stamp is fenced to the
+      launch's endpoint — StampBridgeDiagnostics requires the expected
+      port+token and returns ErrBridgeEndpointRotated for a successor's token; a
+      stamp WRITE failure surfaces as a structured start warning. Round-13 F1:
+      that generation check was a non-atomic read→compare→write that an
+      interleaving rotation could defeat (A reads token A, B publishes token B,
+      A rewrites restoring token A). Fixed by a dedicated per-(configDir,gameID)
+      in-process write lock held across the WHOLE read-compare-write in BOTH
+      StampBridgeDiagnostics and PrepareBridgeEndpointForStart, so the two can
+      no longer interleave; cross-process same-game starts are already
+      serialized by GateStart's transition lock. The earlier "A-spawns/
+      B-rotates" cell was SEQUENTIAL and did not exercise the interleaving —
+      replaced by a 400-iteration concurrency invariant (the final token is
+      always the successor's, never restored to the stale one) and a
+      deterministic after-read-barrier test proving a rotation cannot land while
+      the stamp holds the lock. Reopened to [~] pending reviewer re-verification.)
       (config.BridgeJSON gained three diagnostic-ONLY fields — profile,
       configRevision, startedAt (the binding key name, design/20:235; RFC3339)
       — stamped AT SPAWN (design/20 "written at spawn"; round 11 P2-7/P2-8) by
