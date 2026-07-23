@@ -12,26 +12,20 @@ import (
 	"sync"
 )
 
-// bridgeWriteLocks serializes every bridge.json read-modify-write for a game
-// (round 13 F1): endpoint preparation (read/reuse/rotate) and the spawn-boundary
-// diagnostics stamp are otherwise three separate steps — read, compare, rewrite
-// — that an interleaving endpoint rotation can defeat, restoring a superseded
-// launch's token/diagnostics over the successor's. Holding one dedicated
-// per-(configDir,gameID) lock across the whole read-compare-write makes it
-// atomic. A dedicated lock (not the runtime transition flock) avoids nesting
-// deadlocks, since the stamp runs adjacent to runtime transitions. Cross-process
-// starts of the same game are already serialized by GateStart's transition lock,
-// so no successor's endpoint reaches preparation while another launch holds a
-// live claim.
-var bridgeWriteLocks sync.Map // key "configDir\x00gameID" -> *sync.Mutex
-
-func bridgeWriteLock(configDir, gameID string) *sync.Mutex {
-	m, _ := bridgeWriteLocks.LoadOrStore(configDir+"\x00"+gameID, &sync.Mutex{})
-	return m.(*sync.Mutex)
-}
+// The bridge.json read-modify-write for a game must be atomic against a
+// concurrent endpoint rotation — otherwise endpoint preparation (read/reuse/
+// rotate) and the spawn-boundary diagnostics stamp are three separate steps
+// (read, compare, rewrite) that an interleaving rotation can defeat, restoring a
+// superseded launch's token/diagnostics over the successor's rotated endpoint.
+// The earlier round-13 fix used a process-local sync.Map of mutexes, which
+// cannot serialize a superseded GABS process against a successor GABS process:
+// endpoint rotation and the async stamp run OUTSIDE any held transition lock
+// (GateStart releases its lock internally, see withBridgeLock), so the fence
+// MUST cross process boundaries. Round 14 F1 holds the dedicated cross-process
+// bridge.lock (withBridgeLock) across the whole read-compare-write.
 
 // bridgeStampAfterReadHook is a test-only barrier fired inside
-// StampBridgeDiagnostics after the read, while the write lock is held.
+// StampBridgeDiagnostics after the read, while the bridge lock is held.
 var bridgeStampAfterReadHook func()
 
 type BridgeJSON struct {
@@ -133,11 +127,25 @@ func EnsureBridgeJSONWithConfig(gameID, configDir string, gamesConfig *GamesConf
 // carried, so a pre-spawn failure never leaves a profile/revision/startedAt
 // for a process that was never spawned (round 11 P2-8).
 func PrepareBridgeEndpointForStart(gameID, configDir string, gamesConfig *GamesConfig, resetEndpoint bool) (int, string, string, bool, error) {
-	// Serialize the entire read/reuse/rotate against a concurrent stamp or
-	// preparation for this game (round 13 F1).
-	lk := bridgeWriteLock(configDir, gameID)
-	lk.Lock()
-	defer lk.Unlock()
+	// Hold the cross-process bridge lock across the entire read/reuse/rotate so
+	// a concurrent stamp or preparation — in this process or a successor GABS
+	// process — cannot interleave and restore a superseded endpoint (round 14
+	// F1). A business error (e.g. port-in-use) is returned verbatim via opErr,
+	// not the lock error, so callers still see the exact endpoint diagnostics.
+	var port int
+	var token, path string
+	var reused bool
+	var opErr error
+	if lerr := withBridgeLock(configDir, gameID, func() error {
+		port, token, path, reused, opErr = prepareBridgeEndpointForStartLocked(gameID, configDir, gamesConfig, resetEndpoint)
+		return nil
+	}); lerr != nil {
+		return 0, "", "", false, lerr
+	}
+	return port, token, path, reused, opErr
+}
+
+func prepareBridgeEndpointForStartLocked(gameID, configDir string, gamesConfig *GamesConfig, resetEndpoint bool) (int, string, string, bool, error) {
 	if resetEndpoint {
 		port, token, path, err := WriteBridgeJSONWithConfig(gameID, configDir, gamesConfig)
 		return port, token, path, false, err
@@ -194,33 +202,34 @@ func PrepareBridgeEndpointForStart(gameID, configDir string, gamesConfig *GamesC
 // Diagnostics never influence a read decision.
 func StampBridgeDiagnostics(gameID, configDir string, expectedPort int, expectedToken string, diag BridgeDiagnostics) error {
 	// The read → compare → rewrite must be atomic with respect to any endpoint
-	// rotation, or a successor's token published between the read and the write
-	// would be overwritten by this stale launch (round 13 F1).
-	lk := bridgeWriteLock(configDir, gameID)
-	lk.Lock()
-	defer lk.Unlock()
-	cp, err := NewConfigPaths(configDir)
-	if err != nil {
-		return fmt.Errorf("failed to create config paths: %w", err)
-	}
-	cfgPath := cp.GetBridgeConfigPath(gameID)
-	bridge, err := readBridgeJSONFile(cfgPath)
-	if err != nil {
-		return err
-	}
-	// Test barrier: a hook fired after the read (still under the lock) lets a
-	// deterministic test attempt a rotation and prove it CANNOT land until the
-	// stamp completes (round 13 F1).
-	if bridgeStampAfterReadHook != nil {
-		bridgeStampAfterReadHook()
-	}
-	if bridge.Port != expectedPort || bridge.Token != expectedToken {
-		return ErrBridgeEndpointRotated
-	}
-	bridge.Profile = diag.Profile
-	bridge.ConfigRevision = diag.ConfigRevision
-	bridge.StartedAt = diag.StartedAt
-	return writeBridgeJSONFile(cfgPath, bridge)
+	// rotation — in this process OR a successor GABS process — or a successor's
+	// token published between the read and the write would be overwritten by
+	// this stale launch (round 14 F1). The cross-process bridge lock provides
+	// that fence.
+	return withBridgeLock(configDir, gameID, func() error {
+		cp, err := NewConfigPaths(configDir)
+		if err != nil {
+			return fmt.Errorf("failed to create config paths: %w", err)
+		}
+		cfgPath := cp.GetBridgeConfigPath(gameID)
+		bridge, err := readBridgeJSONFile(cfgPath)
+		if err != nil {
+			return err
+		}
+		// Test barrier: a hook fired after the read (still under the lock) lets
+		// a deterministic test attempt a rotation and prove it CANNOT land until
+		// the stamp completes (round 14 F1).
+		if bridgeStampAfterReadHook != nil {
+			bridgeStampAfterReadHook()
+		}
+		if bridge.Port != expectedPort || bridge.Token != expectedToken {
+			return ErrBridgeEndpointRotated
+		}
+		bridge.Profile = diag.Profile
+		bridge.ConfigRevision = diag.ConfigRevision
+		bridge.StartedAt = diag.StartedAt
+		return writeBridgeJSONFile(cfgPath, bridge)
+	})
 }
 
 // ErrBridgeEndpointRotated reports that bridge.json no longer carries the

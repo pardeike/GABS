@@ -666,19 +666,27 @@ contract, not a scratchpad.
       (round-12 F10: the spawn-boundary diagnostics stamp is fenced to the
       launch's endpoint — StampBridgeDiagnostics requires the expected
       port+token and returns ErrBridgeEndpointRotated for a successor's token; a
-      stamp WRITE failure surfaces as a structured start warning. Round-13 F1:
-      that generation check was a non-atomic read→compare→write that an
-      interleaving rotation could defeat (A reads token A, B publishes token B,
-      A rewrites restoring token A). Fixed by a dedicated per-(configDir,gameID)
-      in-process write lock held across the WHOLE read-compare-write in BOTH
-      StampBridgeDiagnostics and PrepareBridgeEndpointForStart, so the two can
-      no longer interleave; cross-process same-game starts are already
-      serialized by GateStart's transition lock. The earlier "A-spawns/
-      B-rotates" cell was SEQUENTIAL and did not exercise the interleaving —
-      replaced by a 400-iteration concurrency invariant (the final token is
-      always the successor's, never restored to the stale one) and a
-      deterministic after-read-barrier test proving a rotation cannot land while
-      the stamp holds the lock. Reopened to [~] pending reviewer re-verification.)
+      stamp WRITE failure surfaces as a structured start warning. That
+      generation check was a non-atomic read→compare→write that an interleaving
+      rotation could defeat (A reads token A, B publishes token B, A rewrites
+      restoring token A). Round-13 fixed it with a per-(configDir,gameID)
+      IN-PROCESS mutex and justified it by claiming GateStart's transition lock
+      serialized cross-process starts — which round-14 F1 found FALSE: GateStart
+      acquires and releases the transition lock internally and does NOT retain it
+      across PrepareBridgeEndpointForStart or the async StampBridgeDiagnostics,
+      so an in-process mutex cannot fence a superseded GABS process against a
+      successor GABS process (design/06: phase/generation transitions are
+      cross-process). Round-14 F1 replaces the mutex with a DEDICATED
+      CROSS-PROCESS advisory lock (bridge.lock, flock/LockFileEx via
+      withBridgeLock) held across the WHOLE read-compare-write in BOTH
+      StampBridgeDiagnostics and PrepareBridgeEndpointForStart — dedicated so it
+      never nests with a transition lock, cross-process so it serializes separate
+      GABS processes. Coverage: the 400-iteration in-process concurrency
+      invariant (final token is always the successor's) and after-read barrier
+      are kept, PLUS a new SUBPROCESS barrier test (a re-exec'd process holds the
+      lock paused inside the stamp while this process's rotation must block until
+      it releases) — verified to FAIL without the cross-process lock. Stays [~]
+      pending reviewer re-verification of the cross-process fence.)
       (config.BridgeJSON gained three diagnostic-ONLY fields — profile,
       configRevision, startedAt (the binding key name, design/20:235; RFC3339)
       — stamped AT SPAWN (design/20 "written at spawn"; round 11 P2-7/P2-8) by

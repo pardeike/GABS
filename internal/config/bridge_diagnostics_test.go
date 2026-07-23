@@ -155,11 +155,12 @@ func TestStampRefusesRotatedEndpoint(t *testing.T) {
 	}
 }
 
-// TestStampCannotRestoreRotatedTokenUnderRace is the F1 concurrency invariant:
-// a stale launch's stamp racing a successor's endpoint rotation can NEVER
-// restore the stale token or land its diagnostics on the successor's token.
-// Under the shared per-game write lock the read→compare→write is atomic, so
-// the final token is always the successor's, whatever the interleaving.
+// TestStampCannotRestoreRotatedTokenUnderRace is the F1 in-process concurrency
+// invariant: a stale launch's stamp racing a successor's endpoint rotation can
+// NEVER restore the stale token or land its diagnostics on the successor's
+// token. Under the cross-process bridge lock the read→compare→write is atomic,
+// so the final token is always the successor's, whatever the interleaving. The
+// cross-PROCESS case is covered by TestStampBlocksRotationAcrossProcesses.
 func TestStampCannotRestoreRotatedTokenUnderRace(t *testing.T) {
 	for iter := 0; iter < 400; iter++ {
 		dir := t.TempDir()
@@ -195,7 +196,7 @@ func TestStampCannotRestoreRotatedTokenUnderRace(t *testing.T) {
 
 // TestStampBlocksRotationDeterministically uses the after-read barrier to prove
 // the read→compare→write is atomic: while A's stamp holds the lock, B's
-// preparation cannot rotate the endpoint until A completes (round 13 F1).
+// preparation cannot rotate the endpoint until A completes (round 14 F1).
 func TestStampBlocksRotationDeterministically(t *testing.T) {
 	dir := t.TempDir()
 	aPort, aToken, _, _, err := PrepareBridgeEndpointForStart("g", dir, nil, false)
