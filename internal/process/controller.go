@@ -712,10 +712,11 @@ func (c *Controller) IsLauncherProcessRunning() bool {
 		return false
 	}
 
-	if c.cmd.ProcessState != nil {
-		return false
-	}
-
+	// waitDone is the race-free "already reaped" signal (closed after
+	// waitForExit's cmd.Wait() returns); reading c.cmd.ProcessState here would
+	// race that Wait()'s write, and once the process is reaped Signal(0) already
+	// returns ErrProcessDone via os.Process's own done-tracking — so this branch
+	// covers the reaped case without the unsynchronized read (see getExitCode).
 	select {
 	case <-c.waitDone:
 		return false

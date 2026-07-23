@@ -920,3 +920,16 @@ contract, not a scratchpad.
   Windows lane scoped to vet + build + ./internal/process with GOOS
   gates on POSIX-only tests, wider fixture porting recorded as future
   work rather than claimed.
+- 2026-07-23, M2.4, round 13 F6 side-discovery (controller race — FIXED in this
+  commit), internal/process/controller.go:715: the M2.16 -race lane flagged an
+  unsynchronized read of c.cmd.ProcessState in IsLauncherProcessRunning, which
+  raced waitForExit's cmd.Wait() write. It was the one liveness path reading
+  ProcessState ahead of the race-free waitDone signal; fixed to rely on
+  waitDone + Signal(0) (ErrProcessDone on a reaped process), matching the
+  file's existing pattern (lines 466/594/674 and getExitCode). Whether the F6
+  constructor change SURFACED a pre-existing race or the prior -race lane was
+  merely lucky is unprovable — the earlier lane's "green" was read from a
+  mis-indexed shell variable and never actually asserted pass, so this is
+  treated as a pre-existing latent race, not a regression. M2.4 kept [x] (the
+  fix restores the invariant it claimed); flagged for REVIEWER to decide whether
+  M2.4 warrants reopening.
