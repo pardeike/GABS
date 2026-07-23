@@ -115,7 +115,7 @@ func RecoverInterruptedClaim(gameID, configDir, instanceID string, claim *Runtim
 
 	normalize := func() error {
 		creditStart := false
-		updated, err := FencedTransitionThen(gameID, configDir, claim.LaunchID, op.OperationID, func(s *RuntimeState) error {
+		updated, err := FencedTransitionWithCredit(gameID, configDir, claim.LaunchID, op.OperationID, func(s *RuntimeState) error {
 			// A recovered START that was still in phase=starting is the Stage 4
 			// verification for that launch — credit workloadStarts++ from the
 			// pinned identity (round 11 P1-2). An interrupted stop/kill recovery
@@ -130,11 +130,14 @@ func RecoverInterruptedClaim(gameID, configDir, instanceID string, claim *Runtim
 				s.Status = RuntimeStateStatusRunning
 			}
 			return nil
-		}, func(s *RuntimeState) {
-			// afterCommit (round 13 F5): credit only after the runtime save.
+		}, func(s *RuntimeState) error {
+			// Credit BEFORE the runtime save (round 14 F5), idempotent by
+			// launchID: a history-write failure aborts the recovery so a retry
+			// re-credits exactly once; a crash before the save replays.
 			if creditStart {
-				ApplyPinnedWorkloadStartLocked(gameID, configDir, s, now)
+				return ApplyPinnedWorkloadStartLocked(gameID, configDir, s, now)
 			}
+			return nil
 		})
 		if err != nil {
 			return err

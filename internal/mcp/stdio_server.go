@@ -4390,19 +4390,21 @@ func (s *Server) evaluateClaimStatusOnce(gameID string, claim *process.RuntimeSt
 				// Passive promotion (design/20): running seen by a status
 				// observation promotes a completed-unobserved claim to
 				// active; an in-flight start owns its own completion.
-				if _, err := process.FencedTransitionThen(gameID, s.configDir, claim.LaunchID, "", func(st *process.RuntimeState) error {
+				if _, err := process.FencedTransitionWithCredit(gameID, s.configDir, claim.LaunchID, "", func(st *process.RuntimeState) error {
 					if st.Operation != nil || st.Phase != process.PhaseStarting {
 						return process.ErrFencingViolation
 					}
 					st.Phase = process.PhaseActive
 					st.Status = process.RuntimeStateStatusRunning
 					return nil
-				}, func(st *process.RuntimeState) {
+				}, func(st *process.RuntimeState) error {
 					// Stage 4 verification by status observation: credit the
-					// start from the pinned identity AFTER the flip commits
-					// (round 11 P1-2; round 13 F5 — afterCommit so history never
-					// advances ahead of the runtime save).
-					s.applyPinnedWorkloadStart(gameID, st)
+					// start from the pinned identity BEFORE the flip commits
+					// (round 11 P1-2; round 14 F5 — record-first + launchID-
+					// idempotent, so a history-write failure aborts the flip and
+					// a retry credits exactly once; a crash before the save
+					// replays as another passive promotion).
+					return s.applyPinnedWorkloadStart(gameID, st)
 				}); err == nil {
 					return process.RuntimeStateStatusRunning, &ev, false
 				}
@@ -5403,7 +5405,7 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	}
 	newPID := resolveRuntimeGamePID(game, controller)
 	wasStarting := false
-	promoted, err := process.FencedTransitionThen(game.ID, s.configDir, launchID, opID, func(st *process.RuntimeState) error {
+	promoted, err := process.FencedTransitionWithCredit(game.ID, s.configDir, launchID, opID, func(st *process.RuntimeState) error {
 		wasStarting = st.Phase == process.PhaseStarting
 		st.Status = process.RuntimeStateStatusRunning
 		st.Phase = process.PhaseActive
@@ -5416,13 +5418,17 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 		st.ProcessStartDeadline = time.Time{}
 		*st = process.RefreshRuntimeOwnerLease(*st, os.Getpid(), s.instanceID, s.runtimeOwnerLeaseForOperation(totalGABPTimeout), time.Now().UTC())
 		return nil
-	}, func(st *process.RuntimeState) {
-		// Stage 4 verified: credit workloadStarts++ AFTER the flip commits
-		// (round 11 P1-2; round 13 F5), only when this transition actually
+	}, func(st *process.RuntimeState) error {
+		// Stage 4 verified: credit workloadStarts++ BEFORE the flip commits
+		// (round 11 P1-2; round 14 F5), only when this transition actually
 		// promoted a starting claim, so the four promotion paths record once.
+		// Record-first + launchID-idempotent: a history-write failure aborts
+		// the promote (surfaced below as a stable refusal) and a retry credits
+		// exactly once.
 		if wasStarting {
-			s.applyPinnedWorkloadStart(game.ID, st)
+			return s.applyPinnedWorkloadStart(game.ID, st)
 		}
+		return nil
 	})
 	if err != nil {
 		cleanupRuntimeState = false
@@ -5439,9 +5445,11 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	}
 	cleanupRuntimeState = false
 
-	// Stage 4 verified was recorded INSIDE the promote fence above (round 11
-	// P1-2), so the passive promotion paths (status, attachment, recovery)
-	// never double-count and a crash between promote and record cannot lose it.
+	// Stage 4 verified was recorded INSIDE the promote fence above, BEFORE the
+	// runtime save (round 11 P1-2; round 14 F5), so the passive promotion paths
+	// (status, attachment, recovery) never double-count (launchID idempotency)
+	// and no crash window can lose the credit: a crash before the save replays
+	// the promotion, a history-write failure aborts the promote for a retry.
 
 	s.mu.Lock()
 	s.games[game.ID] = controller

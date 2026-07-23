@@ -431,19 +431,27 @@ var errStopAttachmentLive = errors.New("live foreign bridge attachment")
 // removeRuntimeStateForStopCompletion removes the claim only while it still
 // carries the completing attempt's launch and operation identity, and only
 // when no fresh fingerprint-matched foreign attachment lease exists — the
-// last-instant re-check behind the per-round evidence reads. A verified
-// stop records cleanStops++ inside the SAME lock, before removal, so it can
-// never race a successor claim (design/20; round 10).
+// last-instant re-check behind the per-round evidence reads. A verified stop
+// records cleanStops++ (idempotent by operationID) inside the SAME lock and
+// BEFORE removal, so it can never race a successor claim and a history-write
+// failure aborts the removal — a retry re-credits at most once, never losing
+// the clean-stop event once the claim is gone (design/20; round 14 F5).
 func removeRuntimeStateForStopCompletion(req StopRequest, launchID, operationID string) error {
 	return removeRuntimeStateGuarded(req.GameID, req.ConfigDir, req.InstanceID, launchID, operationID, req.SelfConnection,
-		func() {
+		func() error {
 			if req.HistoryContextHash != "" {
-				applyCleanStop(req.GameID, req.ConfigDir, req.HistoryProfile, req.HistoryContextHash, time.Now().UTC())
+				return applyCleanStop(req.GameID, req.ConfigDir, req.HistoryProfile, req.HistoryContextHash, operationID, time.Now().UTC())
 			}
+			return nil
 		})
 }
 
-func removeRuntimeStateGuarded(gameID, configDir, instanceID, launchID, operationID string, selfLive func(connectionID string) bool, onRemove func()) error {
+// removeRuntimeStateGuarded removes the claim under the transition lock. When
+// beforeRemove is non-nil it runs UNDER THE LOCK BEFORE the removal and can
+// abort it by returning an error (round 14 F5): the clean-stop credit records
+// first so a history-write failure leaves the claim in place for a retry rather
+// than losing the event with the deleted claim.
+func removeRuntimeStateGuarded(gameID, configDir, instanceID, launchID, operationID string, selfLive func(connectionID string) bool, beforeRemove func() error) error {
 	lock, err := AcquireTransitionLock(gameID, configDir, transitionLockGateTimeout)
 	if err != nil {
 		return err
@@ -465,14 +473,18 @@ func removeRuntimeStateGuarded(gameID, configDir, instanceID, launchID, operatio
 	if attachmentBlocksRemoval(cur.Attachment, instanceID, selfLive) {
 		return errStopAttachmentLive
 	}
+	if beforeRemove != nil {
+		// Record the clean-stop credit (idempotent by operationID) BEFORE the
+		// claim is removed, still under this lock (round 14 F5): if the history
+		// write fails the removal is aborted, so the claim survives for a retry
+		// that re-credits exactly once — the credit is never lost with the
+		// deleted claim, and never double-counted.
+		if err := beforeRemove(); err != nil {
+			return err
+		}
+	}
 	if err := RemoveRuntimeState(gameID, configDir); err != nil {
 		return err
-	}
-	if onRemove != nil {
-		// Record cleanStop AFTER the claim removal committed, still under this
-		// lock (round 13 F5): if removal fails, history never advances, so a
-		// retry cannot double-count a completion that was never persisted.
-		onRemove()
 	}
 	return nil
 }

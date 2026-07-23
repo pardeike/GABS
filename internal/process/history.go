@@ -88,13 +88,45 @@ type HistoryEntry struct {
 	LastFailure         *HistoryFailure `json:"lastFailure,omitempty"`
 	Buckets             []HistoryBucket `json:"buckets,omitempty"`
 	// CreditedLaunchIDs are the launches whose Stage-4 verified start already
-	// counted (round 12 F9): the history write happens inside the runtime-state
-	// transition callback but BEFORE runtime.json is saved, so a claim-save
-	// failure or a crash between the two files could otherwise let a later
-	// passive promotion double-count. Keyed by launchID, the credit is
-	// idempotent across both crash directions. LRU-capped.
+	// counted (round 12 F9). Keyed by launchID, the credit is idempotent across
+	// both crash directions: the credit is recorded FIRST under the transition
+	// lock, before runtime.json is saved (round 14 F5), so a runtime-save
+	// failure or a crash between the two files replays without double-counting —
+	// a retried promotion finds the launchID already credited. LRU-capped.
 	CreditedLaunchIDs []string `json:"creditedLaunchIds,omitempty"`
+	// CreditedEvents are the non-start history events (bridge connect, delivery
+	// verified, clean stop) already counted, keyed "kind:id" so the same id
+	// under two kinds cannot collide (connect:cid vs delivery:cid share a
+	// connectionID). Same record-first idempotency as CreditedLaunchIDs (round
+	// 14 F5): every counter increments at exactly its defined point and never
+	// twice across a runtime-write, history-write, or crash-between-writes
+	// failure. LRU-capped.
+	CreditedEvents []string `json:"creditedEvents,omitempty"`
 }
+
+// creditEventOnce reports whether key is a NEW history event for this entry,
+// recording it (LRU-capped) so a replay of the same event no-ops. The key is
+// "kind:id" (round 14 F5). Returns false when the event was already credited.
+func (e *HistoryEntry) creditEventOnce(key string) bool {
+	if key == "" {
+		return true // no identity to dedup by; credit unconditionally
+	}
+	for _, k := range e.CreditedEvents {
+		if k == key {
+			return false
+		}
+	}
+	e.CreditedEvents = append(e.CreditedEvents, key)
+	if len(e.CreditedEvents) > creditedEventCap {
+		e.CreditedEvents = e.CreditedEvents[len(e.CreditedEvents)-creditedEventCap:]
+	}
+	return true
+}
+
+// creditedEventCap bounds the per-entry dedup ring for non-start events. Only
+// very recent events can race a double-credit (a retry or crash-replay), so a
+// small LRU window suffices — matching creditedLaunchCap.
+const creditedEventCap = 32
 
 func (e *HistoryEntry) hasBucket(declHash, valueDigest string) bool {
 	for i := range e.Buckets {
@@ -286,7 +318,27 @@ func emptyHistory() *GameHistory {
 	return &GameHistory{Version: 1, Profiles: map[string]*HistoryEntry{}}
 }
 
+// saveHistoryFailHook forces saveHistory to fail — test-only, to exercise the
+// round-14 F5 record-first ordering (a history-write failure must abort the
+// runtime transition so a retry re-credits exactly once, never losing the
+// event). Guarded by the caller's transition lock, so no synchronization is
+// needed on the var itself.
+var saveHistoryFailHook func() error
+
+// SetSaveHistoryFailHookForTesting installs a hook whose non-nil error makes
+// the next saveHistory calls fail. Returns a restore func.
+func SetSaveHistoryFailHookForTesting(fn func() error) func() {
+	prev := saveHistoryFailHook
+	saveHistoryFailHook = fn
+	return func() { saveHistoryFailHook = prev }
+}
+
 func saveHistory(gameID, configDir string, h *GameHistory) error {
+	if saveHistoryFailHook != nil {
+		if err := saveHistoryFailHook(); err != nil {
+			return err
+		}
+	}
 	cp, err := config.NewConfigPaths(configDir)
 	if err != nil {
 		return err
@@ -460,32 +512,47 @@ func RecordDeliveryVerified(gameID, configDir, launchID, profile, contextHash st
 	})
 }
 
-// applyCleanStop records a verified stop (cleanStops++) using an already
-// held transition lock — called from the stop completion inside the same
-// removal decision, so it cannot race a successor claim (round 10).
-func applyCleanStop(gameID, configDir, profile, contextHash string, at time.Time) {
-	_ = applyHistoryLocked(gameID, configDir, func(h *GameHistory) {
-		h.entryForContext(profile, contextHash).CleanStops++
+// applyCleanStop records a verified stop (cleanStops++) using an already held
+// transition lock, idempotent by operationID and recorded BEFORE the claim is
+// removed (round 14 F5) — so a history-write failure aborts the removal and a
+// retry re-credits at most once. Returns the write error to the caller so the
+// removal is gated on the credit committing.
+func applyCleanStop(gameID, configDir, profile, contextHash, operationID string, at time.Time) error {
+	return applyHistoryLocked(gameID, configDir, func(h *GameHistory) {
+		e := h.entryForContext(profile, contextHash)
+		if e.creditEventOnce("stop:" + operationID) {
+			e.CleanStops++
+		}
 	})
 }
 
 // ApplyDeliveryVerifiedLocked records deliveriesVerified++ using an already
-// held transition lock — called INSIDE the delivery callback's fenced
-// transition (launchID + connectionID already validated), so a stale
-// callback can never bump a successor's history (round 10).
-func ApplyDeliveryVerifiedLocked(gameID, configDir, profile, contextHash string) {
-	_ = applyHistoryLocked(gameID, configDir, func(h *GameHistory) {
-		h.entryForContext(profile, contextHash).DeliveriesVerified++
+// held transition lock, idempotent by connectionID — called INSIDE the
+// delivery callback's fenced transition (launchID + connectionID already
+// validated), so a stale callback can never bump a successor's history (round
+// 10) and a retry/crash-replay counts at most once (round 14 F5). Returns the
+// write error so the runtime commit is gated on the credit.
+func ApplyDeliveryVerifiedLocked(gameID, configDir, profile, contextHash, connectionID string) error {
+	return applyHistoryLocked(gameID, configDir, func(h *GameHistory) {
+		e := h.entryForContext(profile, contextHash)
+		if e.creditEventOnce("delivery:" + connectionID) {
+			e.DeliveriesVerified++
+		}
 	})
 }
 
 // ApplyBridgeConnectLocked records bridgeConnects++ using an already held
-// transition lock — called INSIDE the attachment-publication transition, so
-// it fires exactly once per credential-bound attachment across all connect
-// paths (round 10).
-func ApplyBridgeConnectLocked(gameID, configDir, profile, contextHash string) {
-	_ = applyHistoryLocked(gameID, configDir, func(h *GameHistory) {
-		h.entryForContext(profile, contextHash).BridgeConnects++
+// transition lock, idempotent by connectionID — called INSIDE the attachment-
+// publication transition, so it fires exactly once per credential-bound
+// attachment across all connect paths (round 10) and across a retry or
+// crash-replay (round 14 F5). Returns the write error so the runtime commit is
+// gated on the credit.
+func ApplyBridgeConnectLocked(gameID, configDir, profile, contextHash, connectionID string) error {
+	return applyHistoryLocked(gameID, configDir, func(h *GameHistory) {
+		e := h.entryForContext(profile, contextHash)
+		if e.creditEventOnce("connect:" + connectionID) {
+			e.BridgeConnects++
+		}
 	})
 }
 
@@ -496,11 +563,11 @@ func ApplyBridgeConnectLocked(gameID, configDir, profile, contextHash string) {
 // passive status observation, bridge attachment, restart recovery) credits the
 // start exactly once (round 11 P1-2). The identity is the one pinned in the
 // claim at publication, never recomputed from hot config.
-func ApplyWorkloadStartLocked(gameID, configDir, profile, contextHash, launchID string, snap ContextSnapshot, bucket SuccessBucket, at time.Time) {
+func ApplyWorkloadStartLocked(gameID, configDir, profile, contextHash, launchID string, snap ContextSnapshot, bucket SuccessBucket, at time.Time) error {
 	if contextHash == "" {
-		return
+		return nil
 	}
-	_ = applyHistoryLocked(gameID, configDir, func(h *GameHistory) {
+	return applyHistoryLocked(gameID, configDir, func(h *GameHistory) {
 		e := h.entryForContext(profile, contextHash)
 		// Idempotent by launchID (round 12 F9): if this launch's start was
 		// already credited (a retried promote after a runtime-save failure, or
@@ -545,11 +612,11 @@ const creditedLaunchCap = 16
 // lock (round 11 P1-2). No-op for a claim without a pinned identity. The caller
 // MUST invoke this only when the transition actually flips starting→active for
 // a start (never for a recovered stop/kill, whose workload started earlier).
-func ApplyPinnedWorkloadStartLocked(gameID, configDir string, st *RuntimeState, at time.Time) {
+func ApplyPinnedWorkloadStartLocked(gameID, configDir string, st *RuntimeState, at time.Time) error {
 	if st == nil || st.HistorySuccess == nil || st.HistoryContextHash == "" {
-		return
+		return nil
 	}
-	ApplyWorkloadStartLocked(gameID, configDir, EffectiveClaimProfile(st),
+	return ApplyWorkloadStartLocked(gameID, configDir, EffectiveClaimProfile(st),
 		st.HistoryContextHash, st.LaunchID, st.HistorySuccess.Snapshot, st.HistorySuccess.Bucket, at)
 }
 

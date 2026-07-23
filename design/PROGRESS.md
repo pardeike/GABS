@@ -569,9 +569,10 @@ contract, not a scratchpad.
       stop/kill, connect failure). F4: a real games_start with a status hook
       reporting stopped exercises the production hook-stopped exitedFailure
       branch and asserts game class + preserved hookEvidence + recorded game
-      failure. F9/F5 (counter double-count on side-file-first transitions)
-      remains — see the round-13 F5 commit, which keeps this at [!] pending
-      reviewer adjudication of the attempt-vs-commit counter semantics)
+      failure. F9/F5 (history-credit loss/double-count) RESOLVED in round 14 by
+      record-first credits idempotent by event ID across both write directions
+      (see the F5 Deviations entry); M2.10 stays [!] on the still-open F2
+      attribution-provenance blocker)
       (F6 RESOLVED by reviewer adjudication: exited_during_start is `game` by
       the evidence-based default — a post-spawn exit is attributed to the
       workload because GABS observes only the first process it created and
@@ -782,17 +783,27 @@ contract, not a scratchpad.
   deliveriesVerified — moved from the mutate callback into afterCommit, and
   cleanStops now records AFTER RemoveRuntimeState commits. So a runtime save/
   removal failure never advances history ahead of the claim, and the flagged
-  retry-double-count is gone. Proven by failure-injection tests (inject a save
-  failure → the counter is not recorded; the retry records it exactly once).
-  workloadStart additionally keeps its launchID idempotency as belt-and-braces.
-  RESIDUAL: a crash in the tiny window between the successful runtime save and
-  the afterCommit history write would UNDERCOUNT by one (history behind, never
-  ahead) — strictly better than the flagged double-count and not a corrupted
-  proof signal. M2.10 stays [!] pending REVIEWER CONFIRMATION that the
-  commit-ordering fix resolves F9 (and whether the residual undercount window is
-  acceptable or a logical-event-ID reconciliation is also required); per
-  protocol §18 a deviation stays [!] until the adjudicator signs off, not when
-  the implementer believes it resolved.
+  retry-double-count is gone. ROUND 14 (F5 reopened): the reviewer rejected
+  adjudicating the residual undercount window as acceptable — the round-13
+  afterCommit ordering ran the credit AFTER the runtime commit, so a history-
+  write failure or crash once the trigger was consumed permanently LOST the
+  event (a lost workloadStart can flip a later missing-target from environment
+  to speculative config, exactly what the track record must prevent). Fixed by
+  the required logical-event-ID reconciliation: the credit is now recorded FIRST
+  under the transition lock, idempotent by event ID (start:launchID via
+  CreditedLaunchIDs; connect/delivery:connectionID and stop:operationID via a
+  new CreditedEvents ring), BEFORE the runtime write, which is gated on the
+  credit committing (afterCommit→beforeCommit: TransitionRuntimeStateWithCredit
+  / FencedTransitionWithCredit return the credit's error and abort; clean-stop
+  credits before removal). A history-write failure aborts the transition so a
+  retry re-credits exactly once (no loss); a runtime-write failure or crash
+  between the two writes replays to exactly-one via idempotency (no double). A
+  corrupt/unreadable history still degrades inside LoadHistory (repair-and-
+  credit), so the degradation rule never blocks the lifecycle. Proven by
+  history_credit_replay_test.go: BOTH write directions (history-write and
+  runtime-write, the latter = crash-between-writes) for ALL FOUR counters. F5 is
+  resolved; M2.10 stays [!] pending the still-open F2 (attribution provenance).
+  Per protocol §18 a deviation stays [!] until the adjudicator signs off.
 - 2026-07-22, M2.10, round 12 F3, design/10:37 (authorized codes): two codes
   invented in round 11 were removed. Malformed profile/launchInputs CONTAINER
   arguments (wrong JSON type) now return a plain protocol-level invalid-params

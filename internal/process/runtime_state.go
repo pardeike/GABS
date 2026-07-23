@@ -355,8 +355,9 @@ func claimRuntimeStateWithoutLink(gameID, configDir, path, tmpPath string, linkE
 
 // SaveRuntimeState overwrites the shared runtime state file in-place.
 // saveRuntimeStateFailHook forces SaveRuntimeState to fail — test-only, to
-// exercise the round-13 F5 afterCommit ordering (history must not advance when
-// the runtime save fails).
+// exercise the round-14 F5 record-first ordering (a runtime-save failure after
+// a credit must replay to exactly-one via the idempotent credit, never losing
+// or double-counting the event).
 var saveRuntimeStateFailHook func() error
 
 // SetSaveRuntimeStateFailHookForTesting installs a hook whose non-nil error
@@ -469,7 +470,26 @@ func parseRuntimeState(data []byte) (*RuntimeState, error) {
 }
 
 // RemoveRuntimeState removes the shared runtime state file for a game.
+// removeRuntimeStateFailHook forces RemoveRuntimeState to fail — test-only, to
+// exercise the round-14 F5 record-first clean-stop ordering (a claim-removal
+// failure after the cleanStop credit must replay to exactly-one, never losing
+// or double-counting the stop event).
+var removeRuntimeStateFailHook func() error
+
+// SetRemoveRuntimeStateFailHookForTesting installs a hook whose non-nil error
+// makes the next RemoveRuntimeState calls fail. Returns a restore func.
+func SetRemoveRuntimeStateFailHookForTesting(fn func() error) func() {
+	prev := removeRuntimeStateFailHook
+	removeRuntimeStateFailHook = fn
+	return func() { removeRuntimeStateFailHook = prev }
+}
+
 func RemoveRuntimeState(gameID, configDir string) error {
+	if removeRuntimeStateFailHook != nil {
+		if err := removeRuntimeStateFailHook(); err != nil {
+			return err
+		}
+	}
 	cp, err := config.NewConfigPaths(configDir)
 	if err != nil {
 		return fmt.Errorf("failed to create config paths: %w", err)
@@ -606,17 +626,28 @@ func marshalRuntimeState(state RuntimeState) ([]byte, error) {
 // transition. The lock is never held while a hook runs or anything waits —
 // callers do slow work outside and call this for the state write alone.
 func TransitionRuntimeState(gameID, configDir string, lockTimeout time.Duration, mutate func(*RuntimeState) error) (*RuntimeState, error) {
-	return TransitionRuntimeStateThen(gameID, configDir, lockTimeout, mutate, nil)
+	return TransitionRuntimeStateWithCredit(gameID, configDir, lockTimeout, mutate, nil)
 }
 
-// TransitionRuntimeStateThen is TransitionRuntimeState plus an afterCommit hook
-// that runs UNDER THE LOCK, but only AFTER runtime.json is successfully saved
-// (round 13 F5). Side-file writes that must not advance ahead of the runtime
-// commit — the history counters — belong here, never in mutate: if the save
-// fails, afterCommit never runs, so a retry cannot double-count a completion
-// that was never persisted. Still fenced by the same lock, so a stale caller
+// TransitionRuntimeStateWithCredit is TransitionRuntimeState plus a credit hook
+// that runs UNDER THE LOCK, BEFORE runtime.json is saved, and can ABORT the
+// transition by returning an error (round 14 F5). The history counters belong
+// here — recorded FIRST (idempotent by event ID), so the runtime commit is
+// gated on the credit committing:
+//   - a history-write failure aborts the runtime save; the caller retries and
+//     the idempotent credit counts at most once — no event is ever lost. (The
+//     earlier round-13 afterCommit ordering ran the credit AFTER the save and
+//     could permanently drop an event whose history write failed once the
+//     runtime commit had already consumed the trigger.)
+//   - a runtime-save failure after a successful credit replays the same way:
+//     the credit no-ops by event ID, the runtime save is retried.
+//   - a crash between the two writes replays: the runtime state is unchanged,
+//     so the operation re-runs and the credit no-ops.
+// A corrupt/unreadable history degrades to an empty track record inside
+// LoadHistory (design/30) and still credits+repairs, so the degradation rule
+// never blocks the lifecycle. Still fenced by the same lock, so a stale caller
 // can never touch a successor.
-func TransitionRuntimeStateThen(gameID, configDir string, lockTimeout time.Duration, mutate func(*RuntimeState) error, afterCommit func(*RuntimeState)) (*RuntimeState, error) {
+func TransitionRuntimeStateWithCredit(gameID, configDir string, lockTimeout time.Duration, mutate func(*RuntimeState) error, credit func(*RuntimeState) error) (*RuntimeState, error) {
 	lock, err := AcquireTransitionLock(gameID, configDir, lockTimeout)
 	if err != nil {
 		return nil, err
@@ -634,11 +665,13 @@ func TransitionRuntimeStateThen(gameID, configDir string, lockTimeout time.Durat
 		return nil, err
 	}
 	state.Generation++
+	if credit != nil {
+		if err := credit(state); err != nil {
+			return nil, err
+		}
+	}
 	if err := SaveRuntimeState(gameID, configDir, *state); err != nil {
 		return nil, err
-	}
-	if afterCommit != nil {
-		afterCommit(state)
 	}
 	return state, nil
 }

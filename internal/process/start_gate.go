@@ -526,14 +526,15 @@ func persistExternalSnapshot(g StartGate, state *RuntimeState, observedProfile s
 // carries the caller's launch identity (and operation identity when one is
 // given): completions never apply to a superseded claim (design/06).
 func FencedTransition(gameID, configDir, launchID, operationID string, mutate func(*RuntimeState) error) (*RuntimeState, error) {
-	return FencedTransitionThen(gameID, configDir, launchID, operationID, mutate, nil)
+	return FencedTransitionWithCredit(gameID, configDir, launchID, operationID, mutate, nil)
 }
 
-// FencedTransitionThen is FencedTransition with an afterCommit hook run under
-// the lock only after a successful runtime.json save (round 13 F5) — history
-// counters that must not advance ahead of the commit belong here, not in mutate.
-func FencedTransitionThen(gameID, configDir, launchID, operationID string, mutate func(*RuntimeState) error, afterCommit func(*RuntimeState)) (*RuntimeState, error) {
-	return TransitionRuntimeStateThen(gameID, configDir, transitionLockGateTimeout, func(s *RuntimeState) error {
+// FencedTransitionWithCredit is FencedTransition with a credit hook run under
+// the lock BEFORE the runtime.json save, able to abort the transition (round 14
+// F5) — the history counters that must be recorded first (idempotent by event
+// ID) so no event is lost or double-counted belong here, not in mutate.
+func FencedTransitionWithCredit(gameID, configDir, launchID, operationID string, mutate func(*RuntimeState) error, credit func(*RuntimeState) error) (*RuntimeState, error) {
+	return TransitionRuntimeStateWithCredit(gameID, configDir, transitionLockGateTimeout, func(s *RuntimeState) error {
 		if s.LaunchID != launchID {
 			return ErrFencingViolation
 		}
@@ -543,5 +544,5 @@ func FencedTransitionThen(gameID, configDir, launchID, operationID string, mutat
 			}
 		}
 		return mutate(s)
-	}, afterCommit)
+	}, credit)
 }

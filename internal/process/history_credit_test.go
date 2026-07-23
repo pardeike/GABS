@@ -5,11 +5,11 @@ import (
 	"time"
 )
 
-// TestWorkloadStartCreditIdempotentByLaunchID covers F9: the Stage-4 credit is
-// written inside the runtime-state transition callback BEFORE runtime.json is
-// saved, so a retried promote (after a claim-save failure) or a passive
-// promotion after a crash between the two files must not double-count. Keyed by
-// launchID, a repeat is a no-op; a different launch counts again.
+// TestWorkloadStartCreditIdempotentByLaunchID covers the Stage-4 credit's
+// idempotency identity (round 14 F5): the credit is recorded first under the
+// transition lock, keyed by launchID, so a retried promote (after a runtime-
+// write failure) or a passive promotion after a crash between the two writes
+// counts once; a genuinely different launch counts again.
 func TestWorkloadStartCreditIdempotentByLaunchID(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now().UTC()

@@ -142,7 +142,7 @@ func (s *Server) recordBridgeAttachment(gameID string, client *gabp.Client, endp
 
 	var launchID string
 	promotedToActive := false
-	_, terr := process.TransitionRuntimeStateThen(gameID, s.configDir, lifecycleLockTimeout, func(st *process.RuntimeState) error {
+	_, terr := process.TransitionRuntimeStateWithCredit(gameID, s.configDir, lifecycleLockTimeout, func(st *process.RuntimeState) error {
 		if st.SchemaVersion == 0 {
 			// Legacy claims get attachment records only after their full
 			// normalization (design/07).
@@ -177,20 +177,25 @@ func (s *Server) recordBridgeAttachment(gameID string, client *gabp.Client, endp
 			promotedToActive = true
 		}
 		return nil
-	}, func(st *process.RuntimeState) {
-		// afterCommit (round 13 F5): the history counters advance ONLY after
-		// the runtime save committed, so a save failure never leaves history
-		// ahead of the claim (retry-double-count). Still under the transition
-		// lock and fenced to this launch.
+	}, func(st *process.RuntimeState) error {
+		// Credit BEFORE the runtime save (round 14 F5), still under the
+		// transition lock and fenced to this launch: recorded first and
+		// idempotent, so a history-write failure aborts the attachment persist
+		// (retry re-credits exactly once) and no counter is ever lost or
+		// double-counted.
 		if promotedToActive {
 			// Stage 4 verification for a previously unobserved launch:
 			// workloadStarts++ (launchID-idempotent).
-			s.applyPinnedWorkloadStart(gameID, st)
+			if err := s.applyPinnedWorkloadStart(gameID, st); err != nil {
+				return err
+			}
 		}
-		// bridgeConnects++ per credential-bound attachment (design/20).
+		// bridgeConnects++ per credential-bound attachment (design/20),
+		// idempotent by this attachment's connectionID.
 		if st.HistoryContextHash != "" {
-			process.ApplyBridgeConnectLocked(gameID, s.configDir, process.EffectiveClaimProfile(st), st.HistoryContextHash)
+			return process.ApplyBridgeConnectLocked(gameID, s.configDir, process.EffectiveClaimProfile(st), st.HistoryContextHash, connID)
 		}
+		return nil
 	})
 	if terr != nil {
 		if errors.Is(terr, errAttachmentSkipped) || errors.Is(terr, errStaleAttachmentCredential) {
@@ -804,8 +809,8 @@ func perInputDeclHashes(game config.GameConfig, names []string) map[string]strin
 // once, atomically with the phase flip, from the claim alone. No-op for a
 // claim without a pinned identity (legacy/external claims). The caller MUST
 // invoke this only when the transition actually flips starting→active.
-func (s *Server) applyPinnedWorkloadStart(gameID string, st *process.RuntimeState) {
-	process.ApplyPinnedWorkloadStartLocked(gameID, s.configDir, st, time.Now().UTC())
+func (s *Server) applyPinnedWorkloadStart(gameID string, st *process.RuntimeState) error {
+	return process.ApplyPinnedWorkloadStartLocked(gameID, s.configDir, st, time.Now().UTC())
 }
 
 // recordTerminalStartFailure writes a terminal accepted-attempt failure to
@@ -1129,7 +1134,7 @@ func (s *Server) recordContextDelivery(gameID string, ref bridgeAttachmentRef, o
 	// successor's history (round 10). The history coordinates come from the
 	// claim's PINNED hash, never recomputed from hot config.
 	verified := false
-	if _, err := process.FencedTransitionThen(gameID, s.configDir, ref.launchID, "", func(st *process.RuntimeState) error {
+	if _, err := process.FencedTransitionWithCredit(gameID, s.configDir, ref.launchID, "", func(st *process.RuntimeState) error {
 		if st.Attachment == nil || st.Attachment.ConnectionID != ref.connectionID {
 			return process.ErrFencingViolation
 		}
@@ -1137,12 +1142,15 @@ func (s *Server) recordContextDelivery(gameID string, ref bridgeAttachmentRef, o
 		st.ContextDelivery = delivery
 		verified = delivery.Overall == process.DeliveryVerified
 		return nil
-	}, func(st *process.RuntimeState) {
-		// deliveriesVerified++ only AFTER the verdict commits to runtime.json
-		// (round 13 F5), so a save failure never advances history alone.
+	}, func(st *process.RuntimeState) error {
+		// deliveriesVerified++ recorded BEFORE the verdict commits to
+		// runtime.json (round 14 F5), idempotent by this attachment's
+		// connectionID, so a history-write failure aborts the verdict persist
+		// and a retry credits exactly once — the delivery event is never lost.
 		if verified && st.HistoryContextHash != "" {
-			process.ApplyDeliveryVerifiedLocked(gameID, s.configDir, process.EffectiveClaimProfile(st), st.HistoryContextHash)
+			return process.ApplyDeliveryVerifiedLocked(gameID, s.configDir, process.EffectiveClaimProfile(st), st.HistoryContextHash, ref.connectionID)
 		}
+		return nil
 	}); err != nil && !errors.Is(err, process.ErrFencingViolation) && !errors.Is(err, process.ErrNoRuntimeClaim) {
 		s.log.Warnw("failed to persist context delivery verdict", "gameId", gameID, "error", err)
 	}

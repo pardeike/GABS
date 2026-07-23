@@ -393,8 +393,8 @@ func writeCorruptHistory(dir, gameID string) error {
 	return os.WriteFile(cp.GetHistoryPath(gameID), []byte("{ this is not valid json"), 0o600)
 }
 
-// applyCleanStopUnderLock exercises the lock-free clean-stop path the stop
-// pipeline uses (the caller holds the transition lock).
+// applyCleanStopUnderLock exercises the clean-stop credit the stop pipeline
+// uses (the caller holds the transition lock), idempotent by operationID.
 func applyCleanStopUnderLock(t *testing.T, gameID, dir, profile, hash string, at time.Time) {
 	t.Helper()
 	lock, err := AcquireTransitionLock(gameID, dir, transitionLockGateTimeout)
@@ -402,5 +402,7 @@ func applyCleanStopUnderLock(t *testing.T, gameID, dir, profile, hash string, at
 		t.Fatal(err)
 	}
 	defer lock.Release()
-	applyCleanStop(gameID, dir, profile, hash, at)
+	if err := applyCleanStop(gameID, dir, profile, hash, "op-"+gameID, at); err != nil {
+		t.Fatalf("applyCleanStop: %v", err)
+	}
 }
