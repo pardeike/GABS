@@ -334,9 +334,13 @@ func (s *Server) releaseGameArtifacts(gameID string, expectedController process.
 func (s *Server) lifecycleActionResult(game config.GameConfig, action, configRevision string) *ToolResult {
 	claim, err := process.LoadRuntimeState(game.ID, s.configDir)
 	if err != nil {
+		// An unreadable claim is a GABS-side state situation to resolve first
+		// (round 13 F2: authorized code blocked_unknown_state; dispatch fills
+		// causeClass/track record/next actions).
 		return &ToolResult{
-			Content: []Content{{Type: "text", Text: fmt.Sprintf("The runtime claim for '%s' is unreadable: %v. Inspect it, or use 'gabs games repair %s --forget-runtime' if the game is provably gone.", game.ID, err, game.ID)}},
-			IsError: true,
+			Content:           []Content{{Type: "text", Text: fmt.Sprintf("The runtime claim for '%s' is unreadable: %v. Inspect it, or use 'gabs games repair %s --forget-runtime' if the game is provably gone.", game.ID, err, game.ID)}},
+			IsError:           true,
+			StructuredContent: map[string]interface{}{"code": "blocked_unknown_state", "gameId": game.ID, "action": action},
 		}
 	}
 	if claim == nil {
@@ -346,8 +350,9 @@ func (s *Server) lifecycleActionResult(game config.GameConfig, action, configRev
 		normalized, nerr := process.NormalizeLegacyClaim(game.ID, s.configDir, game.LaunchMode, configRevision)
 		if nerr != nil {
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("The pre-upgrade runtime claim for '%s' could not be normalized: %v. Retry, or use 'gabs games repair %s --forget-runtime' if the game is provably gone.", game.ID, nerr, game.ID)}},
-				IsError: true,
+				Content:           []Content{{Type: "text", Text: fmt.Sprintf("The pre-upgrade runtime claim for '%s' could not be normalized: %v. Retry, or use 'gabs games repair %s --forget-runtime' if the game is provably gone.", game.ID, nerr, game.ID)}},
+				IsError:           true,
+				StructuredContent: map[string]interface{}{"code": "blocked_unknown_state", "gameId": game.ID, "action": action},
 			}
 		}
 		claim = normalized
@@ -846,39 +851,52 @@ func writeEligibleStartFailure(code string) bool {
 	}
 }
 
-// lifecycleFailureTools are the start/connect/stop/kill tools whose every
-// stable failure result must carry attribution (round 12 F1). Both the dotted
-// and strict-safe spellings are listed since either can reach dispatch.
-var lifecycleFailureTools = map[string]bool{
+// coreManagementTools are the GABS core game-management tools — the ones that
+// return the stable-code failures the attribution contract governs (design/20:
+// 220). Mirrored game/GABP tools are deliberately excluded: their result's
+// `code` field is game-defined and must not be attributed (round 13 F2). Both
+// the dotted and strict-safe spellings are listed since either reaches dispatch.
+var coreManagementTools = map[string]bool{
+	"games.list": true, "games_list": true,
+	"games.show": true, "games_show": true,
+	"games.status": true, "games_status": true,
 	"games.start": true, "games_start": true,
-	"games.connect": true, "games_connect": true,
 	"games.stop": true, "games_stop": true,
 	"games.kill": true, "games_kill": true,
+	"games.connect": true, "games_connect": true,
+	"games.tools": true, "games_tools": true,
+	"games.tool_names": true, "games_tool_names": true,
+	"games.tool_detail": true, "games_tool_detail": true,
+	"games.call_tool": true, "games_call_tool": true,
+	"games.get_attention": true, "games_get_attention": true,
+	"games.ack_attention": true, "games_ack_attention": true,
 }
 
-// ensureFailureAttribution is the FINAL safety net over the start/connect/stop
-// pipelines (round 12 F1): any stable FAILURE result that reached dispatch
-// without causeClass gets code-only attribution — the class, the neutral
-// track-record line, and class-keyed next actions — so no terminal branch can
-// escape the "every failure carries attribution" contract (design/08:53,
-// design/20:220). Branches that already attributed (often proof-adjusted) are
-// left untouched; success/pending codes get nothing (empty class).
-func (s *Server) ensureFailureAttribution(toolName string, result *ToolResult) {
-	if result == nil || result.StructuredContent == nil || !lifecycleFailureTools[toolName] {
+// completeFailureAttribution is the single central completion step applied at
+// dispatch to EVERY core-management ToolResult (round 13 F2): any stable
+// FAILURE result gets causeClass, a neutral track-record line, and class-keyed
+// next actions — INDEPENDENTLY, so a partially-attributed result (e.g. one that
+// set causeClass at its branch but no track line) cannot escape. Branches that
+// already filled a field keep it (proof-adjusted attribution wins). Success/
+// pending and unmapped codes (empty class) get nothing. This is what closes the
+// "every failure carries attribution" contract across games_status/show/list
+// and the codeless generic branches (now code-bearing), not just the four
+// lifecycle tools.
+func (s *Server) completeFailureAttribution(toolName string, result *ToolResult) {
+	if result == nil || result.StructuredContent == nil || !coreManagementTools[toolName] {
 		return
 	}
 	code, _ := result.StructuredContent["code"].(string)
 	if code == "" {
 		return
 	}
-	if _, has := result.StructuredContent["causeClass"]; has {
-		return
-	}
 	class := process.Classify(code, process.ClassifyContext{}).Class
 	if class == "" {
-		return // success / pending — no failure cause
+		return // success / pending / unmapped — no failure cause
 	}
-	result.StructuredContent["causeClass"] = class
+	if _, has := result.StructuredContent["causeClass"]; !has {
+		result.StructuredContent["causeClass"] = class
+	}
 	if _, has := result.StructuredContent["trackRecord"]; !has {
 		result.StructuredContent["trackRecord"] = process.TrackRecordLine(nil)
 	}

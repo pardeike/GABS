@@ -2615,8 +2615,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			normalized, candidate, nerr := process.NormalizeLegacyClaimCapturingEndpoint(game.ID, s.configDir, game.LaunchMode, configRevision)
 			if nerr != nil {
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("The pre-upgrade runtime claim for '%s' could not be normalized: %v", game.ID, nerr)}},
-					IsError: true,
+					Content:           []Content{{Type: "text", Text: fmt.Sprintf("The pre-upgrade runtime claim for '%s' could not be normalized: %v", game.ID, nerr)}},
+					IsError:           true,
+					StructuredContent: map[string]interface{}{"code": "blocked_unknown_state", "gameId": game.ID},
 				}, nil
 			}
 			runtimeState = normalized
@@ -2637,8 +2638,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 					return staleBridgeCredentialResult(game.ID, stale.Error()), nil
 				}
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to resolve live GABP endpoint for '%s': %v", game.ID, eerr)}},
-					IsError: true,
+					Content:           []Content{{Type: "text", Text: fmt.Sprintf("Failed to resolve live GABP endpoint for '%s': %v", game.ID, eerr)}},
+					IsError:           true,
+					StructuredContent: map[string]interface{}{"code": "endpoint_unavailable", "gameId": game.ID},
 				}, nil
 			}
 		}
@@ -2653,8 +2655,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		runtimeState, err := s.saveRuntimeOwnerLease(*game, runtimeState, connectTimeout)
 		if err != nil {
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to claim runtime ownership for '%s': %v", game.ID, err)}},
-				IsError: true,
+				Content:           []Content{{Type: "text", Text: fmt.Sprintf("Failed to claim runtime ownership for '%s': %v", game.ID, err)}},
+				IsError:           true,
+				StructuredContent: map[string]interface{}{"code": "blocked_unknown_state", "gameId": game.ID},
 			}, nil
 		}
 
@@ -2703,8 +2706,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				}
 				s.restoreRuntimeOwnerAfterFailedConnect(game.ID, runtimeStateBeforeClaim)
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to connect to GABP server for '%s' on port %d after %s: %v. GABS currently sees status '%s'. Make sure the game is still running and the GABP bridge is fully loaded.%s", game.ID, port, connectTimeout.Round(time.Second), err, status, disconnectNote)}},
-					IsError: true,
+					Content:           []Content{{Type: "text", Text: fmt.Sprintf("Failed to connect to GABP server for '%s' on port %d after %s: %v. GABS currently sees status '%s'. Make sure the game is still running and the GABP bridge is fully loaded.%s", game.ID, port, connectTimeout.Round(time.Second), err, status, disconnectNote)}},
+					IsError:           true,
+					StructuredContent: map[string]interface{}{"code": "blocked_unknown_state", "gameId": game.ID},
 				}, nil
 			}
 
@@ -2713,8 +2717,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}
 			s.restoreRuntimeOwnerAfterFailedConnect(game.ID, runtimeStateBeforeClaim)
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to connect to GABP server for '%s' on port %d after %s: %v. Make sure the GABP bridge is loaded.%s", game.ID, port, connectTimeout.Round(time.Second), err, disconnectNote)}},
-				IsError: true,
+				Content:           []Content{{Type: "text", Text: fmt.Sprintf("Failed to connect to GABP server for '%s' on port %d after %s: %v. Make sure the GABP bridge is loaded.%s", game.ID, port, connectTimeout.Round(time.Second), err, disconnectNote)}},
+				IsError:           true,
+				StructuredContent: map[string]interface{}{"code": "blocked_unknown_state", "gameId": game.ID},
 			}, nil
 		}
 
@@ -6370,8 +6375,9 @@ func (s *Server) handleToolsCall(msg *Message) *Message {
 		return NewError(msg.ID, -32603, "Tool execution failed", err.Error())
 	}
 
-	// Final safety net: no stable lifecycle failure escapes attribution (F1).
-	s.ensureFailureAttribution(params.Name, result)
+	// Central completion: every core-management stable failure carries
+	// causeClass + track record + next actions, filled independently (F2).
+	s.completeFailureAttribution(params.Name, result)
 
 	return NewResponse(msg.ID, result)
 }

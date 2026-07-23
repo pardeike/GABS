@@ -551,9 +551,27 @@ contract, not a scratchpad.
       operation_in_progress/blocked_unknown_state; occupied persistence
       failure is blocked_unknown_state), and the detach s.mu/
       transition-lock inversion is removed)
-- [x] M2.10 History store + classifier + input-combination buckets +
+- [~] M2.10 History store + classifier + input-combination buckets +
       edit notice + causeClass/track-record rendering — spec: 08; tests:
       T-TRACK
+      (round 13 reopened. F2: attribution is now a SINGLE central completion
+      step at dispatch over every core-management tool (games_status/show/list/
+      start/stop/kill/connect/tools/…), not a four-tool whitelist; causeClass,
+      track-record line, and nextActions are filled INDEPENDENTLY so a
+      partially-attributed result cannot escape; the codeless terminal branches
+      (unreadable/unnormalizable stop-kill claims, connect legacy/endpoint/
+      ownership/connection failures) now carry authorized codes
+      (blocked_unknown_state / endpoint_unavailable); the classifier no longer
+      silently defaults an UNMAPPED code to environment — it returns no class,
+      so an untaught code fails visibly in the exhaustiveness test and as a
+      missing causeClass in the real-handler battery. Handler-level tests
+      trigger the real branches (games_status/show game_not_found, corrupt-claim
+      stop/kill, connect failure). F4: a real games_start with a status hook
+      reporting stopped exercises the production hook-stopped exitedFailure
+      branch and asserts game class + preserved hookEvidence + recorded game
+      failure. F9/F5 (counter double-count on side-file-first transitions)
+      remains — see the round-13 F5 commit, which keeps this at [!] pending
+      reviewer adjudication of the attempt-vs-commit counter semantics)
       (F6 RESOLVED by reviewer adjudication: exited_during_start is `game` by
       the evidence-based default — a post-spawn exit is attributed to the
       workload because GABS observes only the first process it created and

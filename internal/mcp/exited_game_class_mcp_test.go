@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"runtime"
+
 	"github.com/pardeike/gabs/internal/config"
 	"github.com/pardeike/gabs/internal/launch"
 	"github.com/pardeike/gabs/internal/process"
@@ -81,6 +83,54 @@ func TestExitedDuringStartIsGameAcrossLaunchModes(t *testing.T) {
 				t.Fatalf("%s: the terminal failure must record the game class: %+v", tc.mode, h.Profiles[""])
 			}
 		})
+	}
+}
+
+// TestStatusHookStoppedExitIsGameEndToEnd is the real F6/F4 production cell: a
+// launch whose status hook reports STOPPED reaches assessWorkload with a
+// LivenessSourceStatusHook verdict and becomes exitedFailure. It must classify
+// game (the hook is liveness, not cause), preserve the hook evidence and output,
+// and record the game-class failure in history.
+func TestStatusHookStoppedExitIsGameEndToEnd(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses /bin/sh as the status-hook stand-in")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	s := NewServerForTesting(util.NewLogger("error"))
+	s.SetConfigDir(dir)
+	t.Cleanup(s.Shutdown)
+	// The fake controller stamps a dead PID; the status hook (authoritative in
+	// EvaluateLiveness) reports stopped, so assessWorkload's Source is the
+	// status hook — the exact branch F4 requires.
+	s.SetControllerFactoryForTesting(newExitBeforeStage4Controller)
+	game := config.GameConfig{
+		ID: "hooked", Name: "Hooked", LaunchMode: "DirectPath", Target: exe,
+		Lifecycle: &config.LifecycleConfig{
+			Status: &config.HookConfig{Command: "/bin/sh", Args: []string{"-c", "exit 1"}, StoppedExitCodes: []int{1}},
+		},
+	}
+	s.RegisterGameManagementTools(&config.GamesConfig{
+		Version: "1.0", Games: map[string]config.GameConfig{game.ID: game},
+	}, 0, 0)
+
+	_, structured := callTool(t, s, "games.start", map[string]interface{}{"gameId": game.ID, "timeout": 1})
+	if structured["code"] != "exited_during_start" {
+		t.Fatalf("a status-hook-stopped launch must be exited_during_start, got %v", structured["code"])
+	}
+	if structured["causeClass"] != process.CauseGame {
+		t.Fatalf("a status-hook-stopped exit is game-class, got %#v", structured["causeClass"])
+	}
+	if ev, ok := structured["hookEvidence"].(string); !ok || ev == "" {
+		t.Fatalf("the hook evidence must be preserved: %#v", structured["hookEvidence"])
+	}
+	// The game-class failure is recorded.
+	h, _ := process.LoadHistory(game.ID, s.configDir)
+	if e := h.Profiles[""]; e == nil || e.LastFailure == nil || e.LastFailure.Class != process.CauseGame {
+		t.Fatalf("the status-hook-stopped exit must record a game-class failure: %+v", h.Profiles[""])
 	}
 }
 

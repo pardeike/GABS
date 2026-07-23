@@ -157,6 +157,14 @@ func TestClassifyExhaustiveOverStableCodes(t *testing.T) {
 			t.Errorf("Classify(%q) = %q, want %q", code, got, class)
 		}
 	}
+	// An UNMAPPED code must return NO class (round 13 F2) — the classifier no
+	// longer silently defaults an unknown code to environment, which masked
+	// codes it was never taught. A code reaching the default fails visibly:
+	// here, and (since the completion step attributes only a non-empty class)
+	// as a missing causeClass in the handler battery.
+	if got := Classify("some_unmapped_code_xyz", ClassifyContext{}).Class; got != "" {
+		t.Errorf("an unmapped code must return no class (fail visibly), got %q", got)
+	}
 }
 
 func TestClassifyTerminatedHasNoFailureCause(t *testing.T) {

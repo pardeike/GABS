@@ -92,10 +92,12 @@ func Classify(code string, ctx ClassifyContext) Classification {
 		return Classification{Class: CauseConfig}
 
 	default:
-		// An unmapped terminal code is treated as environment rather than
-		// config, so a new branch never sends agents at the config file by
-		// default; adding a branch means adding a case (design/10).
-		return Classification{Class: CauseEnvironment}
+		// An UNMAPPED code returns no class (round 13 F2) — it must NOT
+		// silently default to environment, which masked codes the classifier
+		// was never taught. Every stable code is explicitly cased above; the
+		// exhaustiveness test (T-TRACK) fails visibly if a handler emits a code
+		// that reaches here, forcing an explicit mapping (design/10, design/20).
+		return Classification{}
 	}
 }
 

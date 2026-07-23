@@ -123,7 +123,7 @@ func TestFinalizerAttributesEveryStableFailureCode(t *testing.T) {
 	}
 	for _, code := range failureCodes {
 		result := &ToolResult{StructuredContent: map[string]interface{}{"code": code, "gameId": "g"}}
-		s.ensureFailureAttribution("games.start", result)
+		s.completeFailureAttribution("games.start", result)
 		if _, ok := result.StructuredContent["causeClass"]; !ok {
 			t.Errorf("%s: the finalizer must attach causeClass", code)
 		}
@@ -133,7 +133,7 @@ func TestFinalizerAttributesEveryStableFailureCode(t *testing.T) {
 	}
 	for _, code := range []string{"started_connected", "started_bridge_pending", "terminated", "started_attachment_deferred"} {
 		result := &ToolResult{StructuredContent: map[string]interface{}{"code": code, "gameId": "g"}}
-		s.ensureFailureAttribution("games.start", result)
+		s.completeFailureAttribution("games.start", result)
 		if _, ok := result.StructuredContent["causeClass"]; ok {
 			t.Errorf("%s: a success/pending code must never acquire causeClass", code)
 		}
