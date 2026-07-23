@@ -354,7 +354,25 @@ func claimRuntimeStateWithoutLink(gameID, configDir, path, tmpPath string, linkE
 }
 
 // SaveRuntimeState overwrites the shared runtime state file in-place.
+// saveRuntimeStateFailHook forces SaveRuntimeState to fail — test-only, to
+// exercise the round-13 F5 afterCommit ordering (history must not advance when
+// the runtime save fails).
+var saveRuntimeStateFailHook func() error
+
+// SetSaveRuntimeStateFailHookForTesting installs a hook whose non-nil error
+// makes the next SaveRuntimeState calls fail. Returns a restore func.
+func SetSaveRuntimeStateFailHookForTesting(fn func() error) func() {
+	prev := saveRuntimeStateFailHook
+	saveRuntimeStateFailHook = fn
+	return func() { saveRuntimeStateFailHook = prev }
+}
+
 func SaveRuntimeState(gameID, configDir string, state RuntimeState) error {
+	if saveRuntimeStateFailHook != nil {
+		if err := saveRuntimeStateFailHook(); err != nil {
+			return err
+		}
+	}
 	cp, err := config.NewConfigPaths(configDir)
 	if err != nil {
 		return fmt.Errorf("failed to create config paths: %w", err)
@@ -588,6 +606,17 @@ func marshalRuntimeState(state RuntimeState) ([]byte, error) {
 // transition. The lock is never held while a hook runs or anything waits —
 // callers do slow work outside and call this for the state write alone.
 func TransitionRuntimeState(gameID, configDir string, lockTimeout time.Duration, mutate func(*RuntimeState) error) (*RuntimeState, error) {
+	return TransitionRuntimeStateThen(gameID, configDir, lockTimeout, mutate, nil)
+}
+
+// TransitionRuntimeStateThen is TransitionRuntimeState plus an afterCommit hook
+// that runs UNDER THE LOCK, but only AFTER runtime.json is successfully saved
+// (round 13 F5). Side-file writes that must not advance ahead of the runtime
+// commit — the history counters — belong here, never in mutate: if the save
+// fails, afterCommit never runs, so a retry cannot double-count a completion
+// that was never persisted. Still fenced by the same lock, so a stale caller
+// can never touch a successor.
+func TransitionRuntimeStateThen(gameID, configDir string, lockTimeout time.Duration, mutate func(*RuntimeState) error, afterCommit func(*RuntimeState)) (*RuntimeState, error) {
 	lock, err := AcquireTransitionLock(gameID, configDir, lockTimeout)
 	if err != nil {
 		return nil, err
@@ -607,6 +636,9 @@ func TransitionRuntimeState(gameID, configDir string, lockTimeout time.Duration,
 	state.Generation++
 	if err := SaveRuntimeState(gameID, configDir, *state); err != nil {
 		return nil, err
+	}
+	if afterCommit != nil {
+		afterCommit(state)
 	}
 	return state, nil
 }

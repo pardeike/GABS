@@ -551,7 +551,7 @@ contract, not a scratchpad.
       operation_in_progress/blocked_unknown_state; occupied persistence
       failure is blocked_unknown_state), and the detach s.mu/
       transition-lock inversion is removed)
-- [~] M2.10 History store + classifier + input-combination buckets +
+- [!] M2.10 History store + classifier + input-combination buckets +
       edit notice + causeClass/track-record rendering — spec: 08; tests:
       T-TRACK
       (round 13 reopened. F2: attribution is now a SINGLE central completion
@@ -760,23 +760,30 @@ contract, not a scratchpad.
   classification-only config flag (launchKind: container) would push a cause
   GABS cannot observe onto the user to declare and would drift the moment the
   command is reused for a non-container target. M2.10 → [x].
-- 2026-07-22, M2.10, round 12 F9 (idempotency scope): the Stage-4 workloadStart
-  credit is now idempotent by launchID (CreditedLaunchIDs on the entry), because
-  its semantics are exactly-once-per-launch and the history write precedes the
-  runtime.json save inside one transition — a claim-save failure or crash
-  between the two files could otherwise let a later passive promotion
-  double-count. The test proves the dedup MECHANISM (two applies with the same
-  launchID → one count) rather than literally injecting a post-history/pre-save
-  fault; the fault reduces to "the same launch's credit runs twice," which is
-  exactly what the mechanism test exercises. The two other locked counters the
-  reviewer named are left per-attempt by DELIBERATE choice, not because a replay
-  is impossible: bridgeConnects counts EVERY credential-bound attachment
-  (design/20 P1-7) and deliveriesVerified EVERY verified welcome. A retry after a
-  history-then-save fault would mint a NEW connectionID and count again — a real
-  double-count for one logical connection — but under "count every attempt"
-  semantics that is an acceptable overcount, not a corrupted proof signal, and
-  launchID dedup there would instead UNDERCOUNT legitimate reconnects of one
-  launch. Documented so the asymmetry is a decision, not an oversight.
+- 2026-07-23, M2.10, round 13 F9/F5 (history-before-save double-count — FIXED
+  by commit ordering; awaiting reviewer confirmation): round 12 acknowledged
+  the flagged double-count only for workloadStart (launchID dedup) and
+  UNILATERALLY declared bridgeConnect/delivery/cleanStop "per-attempt" — which
+  the round-13 review correctly rejected: recording a disagreement does not
+  authorize [x], and it was not part of any adjudication. Round 13 instead
+  FIXES the root cause for ALL four counters. The transition primitive gained
+  an afterCommit hook (TransitionRuntimeStateThen / FencedTransitionThen) that
+  runs under the same lock but only AFTER SaveRuntimeState succeeds; every
+  history increment — workloadStarts (all 4 promotion paths), bridgeConnects,
+  deliveriesVerified — moved from the mutate callback into afterCommit, and
+  cleanStops now records AFTER RemoveRuntimeState commits. So a runtime save/
+  removal failure never advances history ahead of the claim, and the flagged
+  retry-double-count is gone. Proven by failure-injection tests (inject a save
+  failure → the counter is not recorded; the retry records it exactly once).
+  workloadStart additionally keeps its launchID idempotency as belt-and-braces.
+  RESIDUAL: a crash in the tiny window between the successful runtime save and
+  the afterCommit history write would UNDERCOUNT by one (history behind, never
+  ahead) — strictly better than the flagged double-count and not a corrupted
+  proof signal. M2.10 stays [!] pending REVIEWER CONFIRMATION that the
+  commit-ordering fix resolves F9 (and whether the residual undercount window is
+  acceptable or a logical-event-ID reconciliation is also required); per
+  protocol §18 a deviation stays [!] until the adjudicator signs off, not when
+  the implementer believes it resolved.
 - 2026-07-22, M2.10, round 12 F3, design/10:37 (authorized codes): two codes
   invented in round 11 were removed. Malformed profile/launchInputs CONTAINER
   arguments (wrong JSON type) now return a plain protocol-level invalid-params

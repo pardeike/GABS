@@ -141,7 +141,8 @@ func (s *Server) recordBridgeAttachment(gameID string, client *gabp.Client, endp
 	lease := s.runtimeOwnerLeaseDuration()
 
 	var launchID string
-	_, terr := process.TransitionRuntimeState(gameID, s.configDir, lifecycleLockTimeout, func(st *process.RuntimeState) error {
+	promotedToActive := false
+	_, terr := process.TransitionRuntimeStateThen(gameID, s.configDir, lifecycleLockTimeout, func(st *process.RuntimeState) error {
 		if st.SchemaVersion == 0 {
 			// Legacy claims get attachment records only after their full
 			// normalization (design/07).
@@ -173,19 +174,23 @@ func (s *Server) recordBridgeAttachment(gameID string, client *gabp.Client, endp
 		if st.Phase == process.PhaseStarting && st.Operation == nil && st.SpawnState == process.SpawnStateSpawned {
 			st.Phase = process.PhaseActive
 			st.Status = process.RuntimeStateStatusRunning
-			// This attachment is the Stage 4 verification for a previously
-			// unobserved launch: credit workloadStarts++ from the pinned
-			// identity, inside this same flip fence (round 11 P1-2).
+			promotedToActive = true
+		}
+		return nil
+	}, func(st *process.RuntimeState) {
+		// afterCommit (round 13 F5): the history counters advance ONLY after
+		// the runtime save committed, so a save failure never leaves history
+		// ahead of the claim (retry-double-count). Still under the transition
+		// lock and fenced to this launch.
+		if promotedToActive {
+			// Stage 4 verification for a previously unobserved launch:
+			// workloadStarts++ (launchID-idempotent).
 			s.applyPinnedWorkloadStart(gameID, st)
 		}
-		// bridgeConnects++ exactly once per credential-bound attachment
-		// (design/20; round 10) — covering the synchronous-start,
-		// background, reconnect, and migration paths — using this claim's
-		// PINNED history hash, inside the same transition.
+		// bridgeConnects++ per credential-bound attachment (design/20).
 		if st.HistoryContextHash != "" {
 			process.ApplyBridgeConnectLocked(gameID, s.configDir, process.EffectiveClaimProfile(st), st.HistoryContextHash)
 		}
-		return nil
 	})
 	if terr != nil {
 		if errors.Is(terr, errAttachmentSkipped) || errors.Is(terr, errStaleAttachmentCredential) {
@@ -1123,16 +1128,21 @@ func (s *Server) recordContextDelivery(gameID string, ref bridgeAttachmentRef, o
 	// that persists the verdict — a stale callback can never bump a
 	// successor's history (round 10). The history coordinates come from the
 	// claim's PINNED hash, never recomputed from hot config.
-	if _, err := process.FencedTransition(gameID, s.configDir, ref.launchID, "", func(st *process.RuntimeState) error {
+	verified := false
+	if _, err := process.FencedTransitionThen(gameID, s.configDir, ref.launchID, "", func(st *process.RuntimeState) error {
 		if st.Attachment == nil || st.Attachment.ConnectionID != ref.connectionID {
 			return process.ErrFencingViolation
 		}
 		delivery := process.EvaluateContextDelivery(st.ContextDigests, pobs)
 		st.ContextDelivery = delivery
-		if delivery.Overall == process.DeliveryVerified && st.HistoryContextHash != "" {
+		verified = delivery.Overall == process.DeliveryVerified
+		return nil
+	}, func(st *process.RuntimeState) {
+		// deliveriesVerified++ only AFTER the verdict commits to runtime.json
+		// (round 13 F5), so a save failure never advances history alone.
+		if verified && st.HistoryContextHash != "" {
 			process.ApplyDeliveryVerifiedLocked(gameID, s.configDir, process.EffectiveClaimProfile(st), st.HistoryContextHash)
 		}
-		return nil
 	}); err != nil && !errors.Is(err, process.ErrFencingViolation) && !errors.Is(err, process.ErrNoRuntimeClaim) {
 		s.log.Warnw("failed to persist context delivery verdict", "gameId", gameID, "error", err)
 	}

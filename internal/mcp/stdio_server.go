@@ -4428,17 +4428,19 @@ func (s *Server) evaluateClaimStatusOnce(gameID string, claim *process.RuntimeSt
 				// Passive promotion (design/20): running seen by a status
 				// observation promotes a completed-unobserved claim to
 				// active; an in-flight start owns its own completion.
-				if _, err := process.FencedTransition(gameID, s.configDir, claim.LaunchID, "", func(st *process.RuntimeState) error {
+				if _, err := process.FencedTransitionThen(gameID, s.configDir, claim.LaunchID, "", func(st *process.RuntimeState) error {
 					if st.Operation != nil || st.Phase != process.PhaseStarting {
 						return process.ErrFencingViolation
 					}
 					st.Phase = process.PhaseActive
 					st.Status = process.RuntimeStateStatusRunning
-					// Stage 4 verification by status observation: credit the
-					// start from the pinned identity inside this flip fence
-					// (round 11 P1-2).
-					s.applyPinnedWorkloadStart(gameID, st)
 					return nil
+				}, func(st *process.RuntimeState) {
+					// Stage 4 verification by status observation: credit the
+					// start from the pinned identity AFTER the flip commits
+					// (round 11 P1-2; round 13 F5 — afterCommit so history never
+					// advances ahead of the runtime save).
+					s.applyPinnedWorkloadStart(gameID, st)
 				}); err == nil {
 					return process.RuntimeStateStatusRunning, &ev, false
 				}
@@ -5438,8 +5440,9 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 		totalGABPTimeout = defaultGABPTimeout
 	}
 	newPID := resolveRuntimeGamePID(game, controller)
-	promoted, err := process.FencedTransition(game.ID, s.configDir, launchID, opID, func(st *process.RuntimeState) error {
-		wasStarting := st.Phase == process.PhaseStarting
+	wasStarting := false
+	promoted, err := process.FencedTransitionThen(game.ID, s.configDir, launchID, opID, func(st *process.RuntimeState) error {
+		wasStarting = st.Phase == process.PhaseStarting
 		st.Status = process.RuntimeStateStatusRunning
 		st.Phase = process.PhaseActive
 		st.GamePID = newPID
@@ -5450,13 +5453,14 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 		st.Operation = nil
 		st.ProcessStartDeadline = time.Time{}
 		*st = process.RefreshRuntimeOwnerLease(*st, os.Getpid(), s.instanceID, s.runtimeOwnerLeaseForOperation(totalGABPTimeout), time.Now().UTC())
-		// Stage 4 verified: credit workloadStarts++ INSIDE the flip fence
-		// (round 11 P1-2), only when this transition actually promotes a
-		// starting claim, so the four promotion paths record exactly once.
+		return nil
+	}, func(st *process.RuntimeState) {
+		// Stage 4 verified: credit workloadStarts++ AFTER the flip commits
+		// (round 11 P1-2; round 13 F5), only when this transition actually
+		// promoted a starting claim, so the four promotion paths record once.
 		if wasStarting {
 			s.applyPinnedWorkloadStart(game.ID, st)
 		}
-		return nil
 	})
 	if err != nil {
 		cleanupRuntimeState = false

@@ -465,10 +465,16 @@ func removeRuntimeStateGuarded(gameID, configDir, instanceID, launchID, operatio
 	if attachmentBlocksRemoval(cur.Attachment, instanceID, selfLive) {
 		return errStopAttachmentLive
 	}
-	if onRemove != nil {
-		onRemove() // record cleanStop under this same lock before removal
+	if err := RemoveRuntimeState(gameID, configDir); err != nil {
+		return err
 	}
-	return RemoveRuntimeState(gameID, configDir)
+	if onRemove != nil {
+		// Record cleanStop AFTER the claim removal committed, still under this
+		// lock (round 13 F5): if removal fails, history never advances, so a
+		// retry cannot double-count a completion that was never persisted.
+		onRemove()
+	}
+	return nil
 }
 
 // attachmentBlocksRemoval is the tri-state final-deletion guard (design/04):
