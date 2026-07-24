@@ -798,15 +798,23 @@ contract, not a scratchpad.
       is reproduced with targeted `set`; Windows filtering-full is the
       existing forwarding-wrapper cell, and the verdict logic itself is
       unit-tested cross-platform in context_delivery_test.go)
-- [~] M2.13 repair --forget-runtime + no-arg games_status union of
+- [x] M2.13 repair --forget-runtime + no-arg games_status union of
       runtime-only claims — spec: 07, 10; tests: T-RT
-      (status surface landed: process.ListRuntimeClaimIDs enumerates persisted
-      claims; no-arg games_status unions configured entries with runtime-only
-      claims (configured:false + persisted phase, stop/kill next actions), and a
-      removed-but-claimed game stays addressable by ID for single-ID status —
-      both via a claim-based runtimeOnlyStatusItem, status resolved from the
-      claim + liveness, never config. Remaining: stop/kill addressability for a
-      removed-but-claimed game, and the CLI repair --forget-runtime escape hatch.)
+      (process.ListRuntimeClaimIDs enumerates persisted claims; no-arg
+      games_status unions configured entries with runtime-only claims
+      (configured:false + persisted phase, stop/kill next actions), and a
+      removed-but-claimed game stays addressable by ID for single-ID status AND
+      for stop/kill — the claim carries the pinned lifecycle, so a synthetic
+      GameConfig drives the same claim-based design/06 pipeline; status resolves
+      from the claim + liveness, never config. CLI `gabs games repair <id>
+      --forget-runtime` prints the claim's evidence and removes it after
+      confirmation (or --yes), operating on the CLAIM not config so a game
+      already edited out — and a corrupt/unreadable claim — is still forgettable;
+      it takes the cross-process transition lock but deliberately bypasses
+      liveness/fencing and does not reconcile pending credits (the escape hatch
+      exists precisely for a claim fenced removal cannot clear). CLI-only — no
+      MCP tool forgets state (design/07:100). Reproduce-first tests for union,
+      single-ID + stop addressability, and forget confirm/abort/corrupt.)
 - [ ] M2.14 Remove M1 lifecycle feature gate — spec: 21; tests: T-VAL
       update
 - [ ] M2.15 EnsureClientRunning demoted to bounded best-effort warning —

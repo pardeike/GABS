@@ -80,3 +80,21 @@ func TestSingleIDStatusAddressesRuntimeOnlyClaim(t *testing.T) {
 		t.Fatalf("single-ID status of a runtime-only claim must report configured:false, got: %s", statusText)
 	}
 }
+
+// A removed-but-claimed game must be stoppable by ID (design/07:66, "so a fresh
+// agent can stop it"): games_stop <id> resolves the claim's pinned lifecycle,
+// never a not-found error.
+func TestStopAddressesRuntimeOnlyClaim(t *testing.T) {
+	tmpDir := t.TempDir()
+	seedRuntimeOnlyClaim(t, tmpDir, "ghost-game")
+
+	gamesConfig := &config.GamesConfig{Games: map[string]config.GameConfig{}}
+	server := NewServerForTesting(t, util.NewLogger("error"))
+	server.SetConfigDir(tmpDir)
+	server.RegisterGameManagementTools(gamesConfig, 10*time.Millisecond, 20*time.Millisecond)
+
+	stopText := marshalMessage(t, server.HandleMessage(toolCallMessage("stop-ghost", "games.stop", "ghost-game")))
+	if strings.Contains(stopText, "not found") {
+		t.Fatalf("a removed-but-claimed game must be addressable for stop, got: %s", stopText)
+	}
+}

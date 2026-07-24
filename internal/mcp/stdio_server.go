@@ -1523,7 +1523,14 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 
 		game, resolveFail := resolveGameResult(gamesConfig, gameIdOrTarget)
 		if resolveFail != nil {
-			return resolveFail, nil
+			// A removed-but-claimed game stays addressable for stop (design/07):
+			// the claim carries the pinned lifecycle, so a synthetic entry drives
+			// the same claim-based pipeline below.
+			if !process.RuntimeClaimExists(gameIdOrTarget, s.configDir) {
+				return resolveFail, nil
+			}
+			synthetic := config.GameConfig{ID: gameIdOrTarget, Name: gameIdOrTarget}
+			game = &synthetic
 		}
 
 		// Any persisted claim goes through the design/06 pipeline (legacy
@@ -1587,7 +1594,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 
 		game, resolveFail := resolveGameResult(gamesConfig, gameIdOrTarget)
 		if resolveFail != nil {
-			return resolveFail, nil
+			// A removed-but-claimed game stays addressable for kill
+			// (design/07): the claim carries the pinned lifecycle.
+			if !process.RuntimeClaimExists(gameIdOrTarget, s.configDir) {
+				return resolveFail, nil
+			}
+			synthetic := config.GameConfig{ID: gameIdOrTarget, Name: gameIdOrTarget}
+			game = &synthetic
 		}
 
 		if res := s.lifecycleActionResult(*game, process.OperationActionKill, configRevision); res != nil {

@@ -11,6 +11,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/pardeike/gabs/internal/config"
 	"github.com/pardeike/gabs/internal/mcp"
+	"github.com/pardeike/gabs/internal/process"
 	"github.com/pardeike/gabs/internal/steam"
 	"github.com/pardeike/gabs/internal/util"
 	"github.com/pardeike/gabs/internal/version"
@@ -336,6 +338,21 @@ func manageGames(ctx context.Context, log util.Logger, opts options, args []stri
 			fmt.Fprintf(os.Stderr, "games repair requires a game ID\n")
 			return 2
 		}
+		forgetRuntime, assumeYes := false, false
+		for _, a := range args[2:] {
+			switch a {
+			case "--forget-runtime":
+				forgetRuntime = true
+			case "--yes", "-y":
+				assumeYes = true
+			default:
+				fmt.Fprintf(os.Stderr, "unknown repair flag: %s\n", a)
+				return 2
+			}
+		}
+		if forgetRuntime {
+			return forgetRuntimeClaim(args[1], opts.configDir, assumeYes, os.Stdin, os.Stdout)
+		}
 		return repairGame(log, args[1], opts.configDir)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown games action: %s\n", action)
@@ -599,6 +616,67 @@ func doctorGame(log util.Logger, gameID string, configDir string) int {
 		}
 	}
 
+	return 0
+}
+
+// forgetRuntimeClaim is the `repair <id> --forget-runtime` escape hatch
+// (design/07:99): it prints the claim's evidence and removes it after
+// confirmation, WITHOUT verifying the process is gone — the human is the gate.
+// It operates on the claim, not config, so a game already edited out of config
+// (and a corrupt/unreadable claim) is still forgettable. It is CLI-only (no MCP
+// tool can forget state, design/07:100). Removal takes the cross-process
+// transition lock but deliberately bypasses liveness/fencing and does NOT
+// reconcile pending history credits — forget exists precisely to clear a claim
+// that fenced removal will not, and a corrupt claim cannot be reconciled.
+func forgetRuntimeClaim(gameID, configDir string, assumeYes bool, in io.Reader, out io.Writer) int {
+	if !process.RuntimeClaimExists(gameID, configDir) {
+		fmt.Fprintf(out, "No runtime claim for '%s'; nothing to forget.\n", gameID)
+		return 0
+	}
+
+	claim, loadErr := process.LoadRuntimeState(gameID, configDir)
+	fmt.Fprintf(out, "Runtime claim for '%s':\n", gameID)
+	if loadErr != nil || claim == nil {
+		fmt.Fprintf(out, "  (unreadable/corrupt claim: %v)\n", loadErr)
+	} else {
+		fmt.Fprintf(out, "  phase:       %s\n", claim.Phase)
+		fmt.Fprintf(out, "  status:      %s\n", claim.Status)
+		fmt.Fprintf(out, "  launchID:    %s\n", claim.LaunchID)
+		if claim.GamePID > 0 {
+			fmt.Fprintf(out, "  workloadPID: %d\n", claim.GamePID)
+		}
+		if claim.Attachment != nil && claim.Attachment.OwnerPID > 0 {
+			fmt.Fprintf(out, "  ownerPID:    %d\n", claim.Attachment.OwnerPID)
+		}
+		if op := claim.Operation; op != nil {
+			fmt.Fprintf(out, "  operation:   %s (in progress)\n", op.Action)
+		}
+	}
+	fmt.Fprintf(out, "\nForgetting removes the claim WITHOUT verifying the process is gone.\n")
+	fmt.Fprintf(out, "Only do this if the launch is provably gone.\n")
+
+	if !assumeYes {
+		fmt.Fprintf(out, "Forget this runtime claim? [y/N] ")
+		line, _ := bufio.NewReader(in).ReadString('\n')
+		if resp := strings.ToLower(strings.TrimSpace(line)); resp != "y" && resp != "yes" {
+			fmt.Fprintf(out, "Aborted; the runtime claim was not removed.\n")
+			return 1
+		}
+	}
+
+	// The cross-process (flock) transition lock fences a concurrent server
+	// operation; forget then bypasses the liveness/fencing gates on purpose.
+	lock, err := process.AcquireTransitionLock(gameID, configDir, 5*time.Second)
+	if err != nil {
+		fmt.Fprintf(out, "Could not acquire the transition lock for '%s': %v\n", gameID, err)
+		return 1
+	}
+	defer lock.Release()
+	if err := process.RemoveRuntimeState(gameID, configDir); err != nil {
+		fmt.Fprintf(out, "Failed to remove the runtime claim for '%s': %v\n", gameID, err)
+		return 1
+	}
+	fmt.Fprintf(out, "Removed the runtime claim for '%s'.\n", gameID)
 	return 0
 }
 
