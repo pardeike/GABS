@@ -1134,7 +1134,7 @@ func computeSpawnDigests(spec process.LaunchSpec, controller process.ControllerI
 		unverifiable = true
 	}
 
-	digests, err := process.ComputeContextDigests(spec.Args, cwd, unverifiable, managedEnv, contextEnv, absent)
+	digests, err := process.ComputeContextDigests(process.ArgvPayloadForDigest(spec.PathOrId, spec.Args), cwd, unverifiable, managedEnv, contextEnv, absent)
 	if err != nil {
 		return nil
 	}

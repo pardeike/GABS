@@ -87,7 +87,7 @@ func digestsForProbe(t *testing.T, c interface{ FinalEnvironment() []string }, s
 			managed[name] = v
 		}
 	}
-	d, err := ComputeContextDigests(spec.Args, spec.WorkingDir, false, managed, context, spec.AbsentEnvNames)
+	d, err := ComputeContextDigests(ArgvPayloadForDigest(spec.PathOrId, spec.Args), spec.WorkingDir, false, managed, context, spec.AbsentEnvNames)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -756,8 +756,17 @@ contract, not a scratchpad.
       constructor, framework-owned temp dirs, tb.Cleanup shutdown registration,
       and synchronized task admission close both the leak and the
       WaitGroup.Add/Wait race → [x])
-- [x] M2.12 Remaining conformance cells (env-dropping, filtering,
+- [~] M2.12 Remaining conformance cells (env-dropping, filtering,
       absent-env reintroduction, detached) — spec: 03; tests: T-DELIV
+      (REOPENED round-18: the first pass proved delivery observation +
+      verdict per wrapper shape but (1) bypassed the Stage-4 lifecycle so
+      the T-DELIV adoption-on-launcher-exit and detached status-hook
+      liveness cases were absent, (2) declared the Windows cells
+      observation-only over a real production argv gap (the cmd.exe /c
+      prefix is digested), and (3) was flipped to [x] on compiled-not-run
+      Windows cells + no executable macOS .app fixture. Correcting all three
+      in one bounded round; stays [~] until the windows-latest lane actually
+      runs, per the adjudicator.)
       (conformance_delivery_test.go: each cell spawns the probe through a
       real sh wrapper and evaluates what actually arrived against the
       spawn-pinned digests with the production EvaluateContextDelivery, so
@@ -803,6 +812,21 @@ contract, not a scratchpad.
 
 ## Deviations
 
+- 2026-07-23, M2.12, round-18 P1b, design/20:262-264 + design/30:243 (argv
+  payload for the documented cmd.exe /c shape): design/20 defines the argv digest
+  as "elements after argv[0]" — literally one excluded element. That cannot
+  satisfy T-DELIV's requirement (design/30) that the Windows forwarding wrapper,
+  which the design mandates be configured EXPLICITLY as `cmd.exe /c script.cmd
+  ...` (design/01:119-122, GABS never implicitly wraps), verify its argv channel
+  fully: the workload the script re-launches via %* sees only the tokens after the
+  script, so `/c` and the script path are three-token launch prefix, not one.
+  REFINEMENT: argv[0]-exclusion becomes launch-prefix-exclusion for that one
+  documented shape — a pure ArgvPayloadForDigest(pathOrId, args) recognizes
+  basename cmd/cmd.exe + `/c` and digests args[2:]; every other launch
+  (DirectPath, unix wrapper-as-target) returns args unchanged, so no existing
+  digest changes. Unit-tested cross-GOOS (TestArgvPayloadForDigest); the actual
+  %* forwarding is the only CI-gated part. cmd.exe re-quotes %*, so exotic values
+  may mis-split — already a documented caveat (design/03:145-146), not handled.
 - 2026-07-22, M2.10, round 12 F6, design/05:220 (RESOLVED by reviewer
   adjudication — design amended): the bad-case map's fast-exiting-wrapper →
   environment row was not implementable — no producer fact distinguishes a

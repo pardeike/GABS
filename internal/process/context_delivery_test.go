@@ -8,6 +8,36 @@ import (
 	"testing"
 )
 
+// TestArgvPayloadForDigest is the cross-GOOS proof of the round-18 P1b fix: the
+// argv payload the workload receives excludes the documented cmd.exe /c launch
+// prefix, so a cmd.exe /c wrapper.cmd hop can verify the argv channel (design/03,
+// T-DELIV). This is the local proof; only the actual %* forwarding is CI-gated.
+func TestArgvPayloadForDigest(t *testing.T) {
+	cases := []struct {
+		name    string
+		pathOrId string
+		args    []string
+		want    []string
+	}{
+		{"cmd /c strips prefix", "cmd.exe", []string{"/c", "w.cmd", "--data-root", "x"}, []string{"--data-root", "x"}},
+		{"cmd /C case-insensitive", "cmd.exe", []string{"/C", "w.cmd", "-p", "combat"}, []string{"-p", "combat"}},
+		{"absolute cmd path", `C:\Windows\System32\cmd.exe`, []string{"/c", "w.cmd", "a", "b"}, []string{"a", "b"}},
+		{"cmd basename without .exe", "cmd", []string{"/c", "w.cmd", "x"}, []string{"x"}},
+		{"cmd /c wrapper with no payload", "cmd.exe", []string{"/c", "w.cmd"}, []string{}},
+		{"direct path is unchanged", "/opt/game", []string{"-p", "combat"}, []string{"-p", "combat"}},
+		{"unix wrapper target is unchanged", "/opt/wrapper.sh", []string{"--data-root", "x"}, []string{"--data-root", "x"}},
+		{"cmd with a non-/c flag is unchanged", "cmd.exe", []string{"/k", "w.cmd", "x"}, []string{"/k", "w.cmd", "x"}},
+		{"cmd with fewer than two args is unchanged", "cmd.exe", []string{"/c"}, []string{"/c"}},
+		{"a game literally named cmd.exe but no /c is unchanged", "cmd.exe", []string{"-p", "combat"}, []string{"-p", "combat"}},
+	}
+	for _, tc := range cases {
+		got := ArgvPayloadForDigest(tc.pathOrId, tc.args)
+		if strings.Join(got, "\x00") != strings.Join(tc.want, "\x00") {
+			t.Errorf("%s: ArgvPayloadForDigest(%q, %v) = %v, want %v", tc.name, tc.pathOrId, tc.args, got, tc.want)
+		}
+	}
+}
+
 func testDigestsWithCwd(t *testing.T, cwd string) *RuntimeContextDigests {
 	t.Helper()
 	d, err := ComputeContextDigests(

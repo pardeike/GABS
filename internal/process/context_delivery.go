@@ -84,6 +84,34 @@ func ComputeContextDigests(argvPayload []string, cwd string, cwdUnverifiable boo
 	return d, nil
 }
 
+// ArgvPayloadForDigest returns the argv payload the WORKLOAD actually receives —
+// what the argv channel must be digested against (design/03; T-DELIV). For the
+// one documented Windows wrapper shape, `cmd.exe /c script.cmd <payload>`
+// (design/01: batch files are configured EXPLICITLY as cmd.exe with /c ... args;
+// GABS never implicitly wraps), the script re-launches the workload via %%*, so
+// the workload sees only the tokens after the script — the /c flag and the
+// script path are launch prefix, not payload. This refines design/20's "elements
+// after argv[0]" to launch-prefix exclusion for that one shape, driven by
+// T-DELIV's requirement (design/30) that the cmd.exe /c wrapper argv verify
+// fully. Every other launch (DirectPath, unix wrapper-as-target) returns args
+// unchanged, so no existing digest changes. cmd.exe re-quotes %%*, so exotic
+// values may mis-split — already a documented caveat (design/03), not handled
+// here.
+func ArgvPayloadForDigest(pathOrId string, args []string) []string {
+	// Separator-agnostic basename: a cmd.exe target carries Windows `\`
+	// separators, but the digest may be computed off-Windows in tests, where
+	// filepath.Base would not split them.
+	base := pathOrId
+	if i := strings.LastIndexAny(base, `/\`); i >= 0 {
+		base = base[i+1:]
+	}
+	base = strings.ToLower(base)
+	if (base == "cmd" || base == "cmd.exe") && len(args) >= 2 && strings.EqualFold(args[0], "/c") {
+		return args[2:]
+	}
+	return args
+}
+
 // CanonicalizeCwd produces the one platform-canonical form both sides are
 // compared in (design/03): absolute, symlink-resolved, case- and
 // separator-folded on Windows.
