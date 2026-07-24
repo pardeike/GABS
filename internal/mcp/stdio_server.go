@@ -5178,6 +5178,12 @@ const steamNotRunningAdvisory = "Steam does not appear to be running; the launch
 // operation expire before cmd.Start.
 const steamAssistSpawnHeadroom = 2 * time.Second
 
+// minStageFourBudget is the smallest remaining operation budget worth spawning
+// against (M2.15): below it the deadline is effectively consumed, so the
+// operation is treated as supersedable rather than spawning with a uselessly
+// tiny — or, if negative, silently full-defaulted — Stage-4 budget.
+const minStageFourBudget = 200 * time.Millisecond
+
 func (s *Server) hasLiveGABPClient(gameID string) bool {
 	// GABP evidence requires a claim-bound client (review round 8): a live
 	// socket alone — possibly belonging to an earlier launch — is never
@@ -5246,7 +5252,13 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	if isSteamMode(game.LaunchMode) && !steam.ClientRunning() {
 		startWarnings = append(startWarnings, steamNotRunningAdvisory)
 		if game.LaunchMode == "SteamManaged" {
-			if budget := time.Until(runtimeState.Operation.Deadline) - steamAssistSpawnHeadroom; budget > 0 {
+			// Reserve the WHOLE remainder of the start out of the operation
+			// deadline: endpoint preparation can block up to the bridge-lock
+			// bound, and the spawn needs headroom after that. Assistance may only
+			// consume what is left; otherwise it could eat the claim before the
+			// pre-spawn work (M2.15).
+			reserve := config.BridgeLockTimeout() + steamAssistSpawnHeadroom
+			if budget := time.Until(runtimeState.Operation.Deadline) - reserve; budget > 0 {
 				if err := steam.EnsureClientRunningWithin(budget); err != nil {
 					s.log.Debugw("steam client assistance did not complete within budget", "gameId", game.ID, "error", err)
 				}
@@ -5362,6 +5374,17 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	controller.SetSpawnObservers(
 		func() error {
 			_, terr := process.FencedTransition(game.ID, s.configDir, launchID, opID, func(st *process.RuntimeState) error {
+				// The persisted operation deadline is authoritative (M2.15):
+				// checking "operation still live?" and marking spawning are ONE
+				// atomic step under the transition lock, so a concurrent start
+				// that superseded a past-deadline operation cannot slip between
+				// them. Once the deadline has passed the operation is
+				// supersedable — refuse the spawn. ErrFencingViolation surfaces as
+				// the stable supersession outcome (never a game fault), the same
+				// as a lost fence.
+				if st.Operation == nil || !time.Now().Before(st.Operation.Deadline) {
+					return process.ErrFencingViolation
+				}
 				st.SpawnState = process.SpawnStateSpawning
 				return nil
 			})
@@ -5405,7 +5428,22 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 			}
 		})
 
-	result := s.starter.StartWithVerificationWithTimeouts(controller, nil, game.ID, port, token, startBudget, 0)
+	// Charge Stage 4 the REMAINING operation budget, not a fresh full duration
+	// (M2.15): Steam assistance and endpoint preparation already consumed part of
+	// the persisted deadline, and a fresh budget would let the spawn/verify run
+	// well past it. If the deadline is already (near) consumed, do not spawn at
+	// all — a supersedable operation must not create an OS process a concurrent
+	// start could be replacing. ErrFencingViolation maps to the stable
+	// supersession outcome, never a game fault, and never a fresh default budget.
+	remaining := time.Until(runtimeState.Operation.Deadline)
+	if remaining < minStageFourBudget {
+		return nil, &process.ProcessError{
+			Type:    process.ProcessErrorTypeStart,
+			Context: fmt.Sprintf("the start budget for %s was consumed before spawn; the operation is now supersedable", game.ID),
+			Err:     process.ErrFencingViolation,
+		}
+	}
+	result := s.starter.StartWithVerificationWithTimeouts(controller, nil, game.ID, port, token, remaining, 0)
 	// Merge any diagnostic-stamp warning the spawn observer surfaced (F10).
 	stampMu.Lock()
 	startWarnings = append(startWarnings, stampWarnings...)

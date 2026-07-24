@@ -11,6 +11,12 @@ import (
 // bounded acquire).
 const bridgeLockTimeout = 5 * time.Second
 
+// BridgeLockTimeout is the bound on bridge-lock contention. A caller that must
+// leave room for endpoint preparation inside an operation deadline reserves this
+// (M2.15), so the reserve tracks the real lock bound rather than a duplicated
+// literal.
+func BridgeLockTimeout() time.Duration { return bridgeLockTimeout }
+
 // withBridgeLock runs fn while holding a per-game CROSS-PROCESS exclusive
 // advisory lock on <gameDir>/bridge.lock (round 14 F1). It is:
 //
@@ -62,4 +68,27 @@ func withBridgeLock(configDir, gameID string, fn func() error) error {
 	}
 	defer releaseBridgeLock(f)
 	return fn()
+}
+
+// AcquireBridgeLockForTesting takes the per-game bridge lock and holds it until
+// the returned release is called — so a test can contend endpoint preparation
+// (PrepareBridgeEndpointForStart) deterministically. It blocks until the lock is
+// actually held.
+func AcquireBridgeLockForTesting(configDir, gameID string) (release func(), err error) {
+	done := make(chan struct{})
+	held := make(chan error, 1)
+	go func() {
+		e := withBridgeLock(configDir, gameID, func() error {
+			held <- nil // signal the lock is held
+			<-done      // hold it until released
+			return nil
+		})
+		if e != nil {
+			held <- e // withBridgeLock failed before fn ran
+		}
+	}()
+	if e := <-held; e != nil {
+		return nil, e
+	}
+	return func() { close(done) }, nil
 }

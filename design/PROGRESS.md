@@ -877,7 +877,28 @@ contract, not a scratchpad.
       within budget on timeout; Controller.Start invokes no assistance;
       SteamManaged-absent → advisory once + assistance attempted;
       SteamManaged-present → neither; SteamAppId-absent → advisory but no managed
-      ensure.)
+      ensure.
+      ROUND-20 correction: the fixed 2s headroom did not make the persisted
+      deadline authoritative across the REST of the start — endpoint prep can
+      block up to bridgeLockTimeout (5s) on bridge.lock, and Stage 4 received the
+      ORIGINAL full startBudget rather than the remaining time. Now the absolute
+      Operation.Deadline governs Stage 2 + Stage 4 with no overlapping budgets:
+      (1) assistance reserves config.BridgeLockTimeout()+headroom out of the
+      deadline (skipped when nothing is left), so it cannot eat the claim before
+      pre-spawn work; (2) Stage 4 is charged time.Until(Operation.Deadline), and
+      below a minStageFourBudget floor the start does not spawn at all (a
+      supersedable operation must not create an OS process a concurrent start
+      could be replacing); (3) the pre-spawn FencedTransition checks the deadline
+      and marks spawning ATOMICALLY under the transition lock — once past the
+      deadline it returns ErrFencingViolation, which maps to the stable
+      supersession outcome (operation_in_progress/blocked), never spawn_failed or
+      a game fault; assistance failure remains only a warning. Production-path
+      regression: contended endpoint prep (held bridge.lock) under a short
+      deadline proves the first start never spawns after becoming supersedable
+      (spawn-marker absent) while a concurrent second is refused
+      operation_in_progress — it cannot replace the first while its executor
+      legitimately proceeds. Full mcp suite green (the general pre-spawn deadline
+      check introduced no fallout).)
 
 ## Milestone 3 — CLI + docs + skill
 

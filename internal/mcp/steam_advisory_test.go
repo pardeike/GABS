@@ -58,8 +58,9 @@ func TestSteamStoreLauncherAdvisory(t *testing.T) {
 		gamesConfig := &config.GamesConfig{
 			Games: map[string]config.GameConfig{"g": game},
 			// Bound every mode's process-start deadline (URL modes default to
-			// 60s) so the test stays fast; still leaves > headroom for assistance.
-			Timeouts: &config.TimeoutsConfig{Startup: &config.StartupTimeoutsConfig{ProcessStartSeconds: 5}},
+			// 60s) so the test stays fast, while leaving budget past the
+			// bridge-lock + spawn reserve for SteamManaged assistance to run.
+			Timeouts: &config.TimeoutsConfig{Startup: &config.StartupTimeoutsConfig{ProcessStartSeconds: 10}},
 		}
 		server := NewServerForTesting(t, util.NewLogger("error"))
 		server.SetConfigDir(tmpDir)
