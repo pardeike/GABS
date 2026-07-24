@@ -526,6 +526,14 @@ func LoadRuntimeState(gameID, configDir string) (*RuntimeState, error) {
 	// Failure to tighten surfaces — the token must not stay world-readable.
 	if fi, statErr := os.Stat(path); statErr == nil && fi.Mode().Perm()&0o077 != 0 {
 		if chmodErr := os.Chmod(path, 0o600); chmodErr != nil {
+			if errors.Is(chmodErr, os.ErrNotExist) {
+				// The file was removed between the read and the tighten (a stop or
+				// a superseding start replaced the claim). The token it held is
+				// gone, so there is nothing to protect and nothing to return —
+				// report no claim, not a spurious hard error. On Windows this
+				// races more often than on unix, where rename is fully atomic.
+				return nil, nil
+			}
 			return nil, fmt.Errorf("runtime state %s has loose permissions (%v) that cannot be tightened: %w", path, fi.Mode().Perm(), chmodErr)
 		}
 	}

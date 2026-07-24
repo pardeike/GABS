@@ -1,6 +1,7 @@
 package process
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/pardeike/gabs/internal/steam"
@@ -10,6 +11,9 @@ import (
 // step moved to the Stage-2 start manager, so a spawn can never turn assistance
 // failure into spawn_failed nor run it twice.
 func TestControllerStartDoesNotEnsureSteamClient(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("spawns a unix executable; the no-ensure logic is platform-independent")
+	}
 	startCalled := false
 	restoreClient := steam.SetClientControlForTesting(
 		func() (string, []string, error) { startCalled = true; return "/bin/true", nil, nil },
