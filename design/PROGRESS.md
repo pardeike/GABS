@@ -756,8 +756,30 @@ contract, not a scratchpad.
       constructor, framework-owned temp dirs, tb.Cleanup shutdown registration,
       and synchronized task admission close both the leak and the
       WaitGroup.Add/Wait race → [x])
-- [ ] M2.12 Remaining conformance cells (env-dropping, filtering,
+- [x] M2.12 Remaining conformance cells (env-dropping, filtering,
       absent-env reintroduction, detached) — spec: 03; tests: T-DELIV
+      (conformance_delivery_test.go: each cell spawns the probe through a
+      real sh wrapper and evaluates what actually arrived against the
+      spawn-pinned digests with the production EvaluateContextDelivery, so
+      the verdict can claim no more than the chain delivered — filtering
+      boundary forwarding all GABS_FORWARD_ENV names → verified;
+      managed-only filtering (drops the context key) → partial with the
+      context env channel not verified; env-dropping `env -i` scrub →
+      partial (argv+cwd still verify, env unknown); a boundary reintroducing
+      the GABS_ABSENT_ENV name HOST_OVERRIDE → partial (env channel
+      mismatch); detaching double-fork wrapper → verified. Digests use the
+      real ComputeContextDigests over test-controlled values (the
+      managed/context split cannot change any overall verdict); the probe
+      also records HOST_OVERRIDE, and the scrub/filter wrappers carry
+      PROBE_OUTPUT_FILE across as the test's own reporting channel,
+      independent of the GABS channels under test. Windows cmd.exe variants
+      (conformance_windows_test.go: for-loop unset of GABS_FORWARD_ENV,
+      `set CONTENT_SET=`, `set HOST_OVERRIDE=`, `start /b`) are
+      observation-only and written-but-unexecuted until the M2.3
+      windows-latest lane runs them — cmd.exe has no `env -i`, so each shape
+      is reproduced with targeted `set`; Windows filtering-full is the
+      existing forwarding-wrapper cell, and the verdict logic itself is
+      unit-tested cross-platform in context_delivery_test.go)
 - [ ] M2.13 repair --forget-runtime + no-arg games_status union of
       runtime-only claims — spec: 07, 10; tests: T-RT
 - [ ] M2.14 Remove M1 lifecycle feature gate — spec: 21; tests: T-VAL

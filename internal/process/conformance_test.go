@@ -38,7 +38,10 @@ func TestConformanceProbeProcess(t *testing.T) {
 		k := kv[:i]
 		upper := strings.ToUpper(k)
 		if strings.HasPrefix(upper, "GABS_") || strings.HasPrefix(upper, "GABP_") ||
-			k == "CONTENT_SET" || k == "SystemRoot" || k == "WINDIR" {
+			k == "CONTENT_SET" || k == "SystemRoot" || k == "WINDIR" ||
+			k == "HOST_OVERRIDE" {
+			// HOST_OVERRIDE is a GABS_ABSENT_ENV name: recorded so a boundary
+			// that reintroduces it (M2.12 isolation-violation cell) is observable.
 			envOut[k] = kv[i+1:]
 		}
 	}
