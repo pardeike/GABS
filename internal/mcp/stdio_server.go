@@ -19,8 +19,8 @@ import (
 	"github.com/pardeike/gabs/internal/config"
 	"github.com/pardeike/gabs/internal/gabp"
 	"github.com/pardeike/gabs/internal/launch"
+	"github.com/pardeike/gabs/internal/lifecycle"
 	"github.com/pardeike/gabs/internal/process"
-	"github.com/pardeike/gabs/internal/steam"
 	"github.com/pardeike/gabs/internal/util"
 	"github.com/pardeike/gabs/internal/version"
 )
@@ -79,28 +79,6 @@ var serverInstanceCounter uint64
 const ServerInstructions = `GABS controls configured local games and mirrors connected GABP bridge tools into MCP. Start with games_list or games_status, then use games_start or games_connect with gameId.
 For game-specific actions, call games_tool_names with brief=true, inspect one tool with games_tool_detail, then invoke it through games_call_tool.
 Prefer strict-safe tool names such as games_start; dotted aliases remain accepted. Public tools/list is kept stable and core-only, so retry games_tool_names or connect before assuming a bridge tool is missing.`
-
-type gameAlreadyActiveError struct {
-	status string
-}
-
-func (e *gameAlreadyActiveError) Error() string {
-	switch e.status {
-	case process.RuntimeStateStatusStarting:
-		return "game launch is already in progress"
-	default:
-		return "game is already running"
-	}
-}
-
-func (e *gameAlreadyActiveError) ToolMessage(game config.GameConfig) string {
-	switch e.status {
-	case process.RuntimeStateStatusStarting:
-		return fmt.Sprintf("Game '%s' (%s) is already starting. Wait for launch to finish, then use games_connect if you need to attach to the existing instance.", game.ID, game.Name)
-	default:
-		return fmt.Sprintf("Game '%s' (%s) is already running. Use games_status or games_connect instead of starting it again.", game.ID, game.Name)
-	}
-}
 
 // ToolHandler represents a tool handler function
 type ToolHandler struct {
@@ -205,25 +183,6 @@ func NewServer(log util.Logger) *Server {
 func newServerInstanceID() string {
 	seq := atomic.AddUint64(&serverInstanceCounter, 1)
 	return fmt.Sprintf("%d-%d-%d", os.Getpid(), time.Now().UnixNano(), seq)
-}
-
-func (s *Server) runtimeOwnerLeaseDuration() time.Duration {
-	if s.ownerLease > 0 {
-		return s.ownerLease
-	}
-	return (&config.GamesConfig{}).GetSessionOwnerLease()
-}
-
-func (s *Server) runtimeOwnerLeaseForOperation(operationTimeout time.Duration) time.Duration {
-	lease := s.runtimeOwnerLeaseDuration()
-	if operationTimeout <= 0 {
-		return lease
-	}
-	operationLease := operationTimeout + 5*time.Second
-	if operationLease > lease {
-		return operationLease
-	}
-	return lease
 }
 
 func (s *Server) gameConfigForRuntimeOwnership(gameID string) config.GameConfig {
@@ -1297,11 +1256,11 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		hctx := s.buildHistoryContext(snap, *game, resolved, inputsArg)
 		startResult, err := s.startGame(*game, gamesConfig, backoffMin, backoffMax, startupGABPTimeout, resetEndpoint, resolved, hctx)
 		if err != nil {
-			var refusalErr *startRefusalError
+			var refusalErr *lifecycle.StartRefusalError
 			if errors.As(err, &refusalErr) {
 				return s.startRefusalResult(*game, refusalErr, hctx, validationWarnings), nil
 			}
-			var unobsErr *unobservedStartError
+			var unobsErr *lifecycle.UnobservedStartError
 			if errors.As(err, &unobsErr) {
 				structured := map[string]interface{}{
 					"code":   "unobserved",
@@ -1310,8 +1269,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 						mcpNextAction("games_status", map[string]interface{}{"gameId": game.ID}, "Re-check after the store launcher settles."),
 					},
 				}
-				if len(unobsErr.warnings) > 0 {
-					structured["startWarnings"] = unobsErr.warnings
+				if len(unobsErr.Warnings) > 0 {
+					structured["startWarnings"] = unobsErr.Warnings
 				}
 				s.finalizeStartFailure(structured, *game, hctx, "unobserved")
 				addValidationWarnings(structured, validationWarnings)
@@ -1321,21 +1280,21 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 					StructuredContent: structured,
 				}, nil
 			}
-			var exitedErr *exitedDuringStartError
+			var exitedErr *lifecycle.ExitedDuringStartError
 			if errors.As(err, &exitedErr) {
 				structured := map[string]interface{}{
 					"code":     "exited_during_start",
 					"gameId":   game.ID,
-					"exitCode": exitedErr.exitCode,
+					"exitCode": exitedErr.ExitCode,
 				}
-				if exitedErr.tail != "" {
-					structured["outputTail"] = exitedErr.tail
+				if exitedErr.Tail != "" {
+					structured["outputTail"] = exitedErr.Tail
 				}
-				if exitedErr.hookEvidence != "" {
-					structured["hookEvidence"] = exitedErr.hookEvidence
+				if exitedErr.HookEvidence != "" {
+					structured["hookEvidence"] = exitedErr.HookEvidence
 				}
-				if len(exitedErr.warnings) > 0 {
-					structured["startWarnings"] = exitedErr.warnings
+				if len(exitedErr.Warnings) > 0 {
+					structured["startWarnings"] = exitedErr.Warnings
 				}
 				// exited_during_start is game-class by the evidence-based
 				// default (design/05 F6): GABS cannot tell a game crash from a
@@ -1345,14 +1304,14 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				addValidationWarnings(structured, validationWarnings)
 				addResolvedContext(structured, resolved)
 				return &ToolResult{
-					Content:           []Content{{Type: "text", Text: fmt.Sprintf("'%s' exited during start (exit code %d). This is attributed to the workload; read the output tail below for the exact cause — a game crash, missing/corrupt data or save, mod loader failure, DRM refusing to run outside its launcher, anti-cheat rejecting a modified process, a required online login, or (if this launch is a wrapper/container) the wrapper's own error. Output tail:\n%s", game.ID, exitedErr.exitCode, exitedErr.tail)}},
+					Content:           []Content{{Type: "text", Text: fmt.Sprintf("'%s' exited during start (exit code %d). This is attributed to the workload; read the output tail below for the exact cause — a game crash, missing/corrupt data or save, mod loader failure, DRM refusing to run outside its launcher, anti-cheat rejecting a modified process, a required online login, or (if this launch is a wrapper/container) the wrapper's own error. Output tail:\n%s", game.ID, exitedErr.ExitCode, exitedErr.Tail)}},
 					IsError:           true,
 					StructuredContent: structured,
 				}, nil
 			}
-			var activeErr *gameAlreadyActiveError
+			var activeErr *lifecycle.GameAlreadyActiveError
 			if errors.As(err, &activeErr) {
-				status := activeErr.status
+				status := activeErr.Status
 				if status == "" {
 					status = s.checkGameStatus(game.ID)
 				}
@@ -1376,10 +1335,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			if errors.As(err, &endpointErr) {
 				return bridgeEndpointInUseResult(*game, endpointErr), nil
 			}
-			var epErr *endpointUnavailableError
+			var epErr *lifecycle.EndpointUnavailableError
 			if errors.As(err, &epErr) {
 				structured := map[string]interface{}{
-					"code": "endpoint_unavailable", "gameId": game.ID, "detail": epErr.err.Error(),
+					"code": "endpoint_unavailable", "gameId": game.ID, "detail": epErr.Err.Error(),
 				}
 				s.finalizeStartFailure(structured, *game, hctx, "endpoint_unavailable")
 				return &ToolResult{
@@ -1405,7 +1364,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			// Unwraps — map it to the stable supersession outcome, never
 			// spawn_failed (round 10).
 			if errors.Is(err, process.ErrFencingViolation) || errors.Is(err, process.ErrNoRuntimeClaim) {
-				if refErr, ok := s.supersededStartRefusal(game.ID).(*startRefusalError); ok {
+				if refErr, ok := s.supersededStartRefusal(game.ID).(*lifecycle.StartRefusalError); ok {
 					return s.startRefusalResult(*game, refErr, hctx, validationWarnings), nil
 				}
 			}
@@ -4596,15 +4555,6 @@ func (s *Server) resolveSharedRuntimeStatus(gameID string, gabpLive bool) string
 	return ""
 }
 
-// startRefusalError carries a structured Stage 2 refusal (design/05) out of
-// startGame; the handler renders its stable code.
-type startRefusalError struct {
-	refusal  *process.StartRefusal
-	warnings []string
-}
-
-func (e *startRefusalError) Error() string { return e.refusal.Message }
-
 // addStartAdoption renders the Stage 4 adoption verdict and Stage 2 probe
 // warnings into a start result (design/05): adoption means the injected
 // context may not have survived a launcher re-exec.
@@ -4623,8 +4573,8 @@ func addStartAdoption(structured map[string]interface{}, message *string, r *pro
 
 // startRefusalResult renders a Stage 2 refusal with its stable code and
 // per-code next actions.
-func (s *Server) startRefusalResult(game config.GameConfig, e *startRefusalError, hc historyContext, validationWarnings []string) *ToolResult {
-	ref := e.refusal
+func (s *Server) startRefusalResult(game config.GameConfig, e *lifecycle.StartRefusalError, hc historyContext, validationWarnings []string) *ToolResult {
+	ref := e.Refusal
 	structured := map[string]interface{}{
 		"code":   ref.Code,
 		"gameId": game.ID,
@@ -4637,12 +4587,12 @@ func (s *Server) startRefusalResult(game config.GameConfig, e *startRefusalError
 	structured["causeClass"] = cls.Class
 	var entry *process.HistoryEntry
 	if h, herr := process.LoadHistory(game.ID, s.configDir); herr == nil {
-		if en := h.Profiles[hc.profile]; en != nil && en.ContextHash == hc.contextHash && hc.contextHash != "" {
+		if en := h.Profiles[hc.Profile]; en != nil && en.ContextHash == hc.ContextHash && hc.ContextHash != "" {
 			entry = en
 		}
 	}
 	structured["trackRecord"] = process.TrackRecordLine(entry)
-	if hc.contextHash != "" {
+	if hc.ContextHash != "" {
 		if notice := s.editNoticeFor(game.ID, hc); notice != "" {
 			structured["editNotice"] = notice
 		}
@@ -4676,8 +4626,8 @@ func (s *Server) startRefusalResult(game config.GameConfig, e *startRefusalError
 			"deadline":         op.Deadline.Format(time.RFC3339),
 		}
 	}
-	if len(e.warnings) > 0 {
-		structured["startWarnings"] = e.warnings
+	if len(e.Warnings) > 0 {
+		structured["startWarnings"] = e.Warnings
 	}
 
 	var next []map[string]interface{}
@@ -4713,42 +4663,6 @@ func (s *Server) startRefusalResult(game config.GameConfig, e *startRefusalError
 		StructuredContent: structured,
 	}
 }
-
-// unobservedStartError is the Stage 4 unobserved outcome: the claim is kept
-// in phase starting; not a failure to retry blindly.
-type unobservedStartError struct {
-	warnings []string
-}
-
-func (e *unobservedStartError) Error() string {
-	return "nothing observable within the process-start budget"
-}
-
-// exitedDuringStartError carries the Stage 4 exit evidence.
-type exitedDuringStartError struct {
-	exitCode            int
-	tail                string
-	hookEvidence        string
-	warnings            []string
-	hookReportedStopped bool
-}
-
-func (e *exitedDuringStartError) Error() string {
-	return fmt.Sprintf("exited during start (exit code %d)", e.exitCode)
-}
-
-// endpointUnavailableError is the structured Stage 2 endpoint-allocation
-// failure (design/05): port exhaustion, filesystem failure, occupied cache.
-type endpointUnavailableError struct {
-	gameID string
-	err    error
-}
-
-func (e *endpointUnavailableError) Error() string {
-	return fmt.Sprintf("failed to prepare GABS endpoint for game '%s': %v", e.gameID, e.err)
-}
-
-func (e *endpointUnavailableError) Unwrap() error { return e.err }
 
 func (s *Server) cleanupRuntimeStateInternal(gameId string) {
 	// Never remove a claim that still carries pending history credits (round 16
@@ -4977,22 +4891,6 @@ func controllerLooksAliveForMCP(controller process.ControllerInterface) bool {
 	}
 }
 
-func resolveRuntimeGamePID(game config.GameConfig, controller process.ControllerInterface) int {
-	if controller == nil {
-		return 0
-	}
-	if game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId" {
-		if game.StopProcessName != "" {
-			pids, err := process.FindProcessesByName(game.StopProcessName)
-			if err == nil && len(pids) > 0 {
-				return pids[0]
-			}
-		}
-		return 0
-	}
-	return controller.GetPID()
-}
-
 // checkGameStatus snapshots the in-memory state under s.mu, then evaluates
 // evidence — including pinned status hooks that may run for seconds — with
 // the lock released, so concurrent status calls never serialize behind one
@@ -5140,50 +5038,6 @@ func (s *Server) cleanupStoppedGame(gameID string) {
 	}
 }
 
-// startGame starts a game process using the serialized starter approach
-// This implements @pardeike's requirements for serialized, verified process starting
-// processStartBudget is the Stage 4 verification budget (design/05):
-// URL modes get longer because the store launcher sits in the middle.
-func processStartBudget(mode string) time.Duration {
-	if isURLMode(mode) {
-		return 60 * time.Second
-	}
-	return 10 * time.Second
-}
-
-// startBudgetFor returns the single process-start budget used for BOTH the
-// claim's pinned deadlines and the starter's verification wait — a claim
-// deadline that outlives (or undercuts) the actual wait enables incorrect
-// concurrent gating and supersession. Explicit config wins for all modes.
-func (s *Server) startBudgetFor(mode string) time.Duration {
-	if s.gamesConfig != nil && s.gamesConfig.Timeouts != nil &&
-		s.gamesConfig.Timeouts.Startup != nil && s.gamesConfig.Timeouts.Startup.ProcessStartSeconds > 0 {
-		return time.Duration(s.gamesConfig.Timeouts.Startup.ProcessStartSeconds) * time.Second
-	}
-	return processStartBudget(mode)
-}
-
-func isURLMode(mode string) bool { return mode == "SteamAppId" || mode == "EpicAppId" }
-
-// isSteamMode is true for both Steam launch modes — both get the store-launcher
-// advisory scan (design/05, M2.15), though only SteamManaged runs assistance.
-func isSteamMode(mode string) bool { return mode == "SteamAppId" || mode == "SteamManaged" }
-
-// steamNotRunningAdvisory is the single Stage-2 warning when the Steam client is
-// not observable at start (design/05).
-const steamNotRunningAdvisory = "Steam does not appear to be running; the launch may stall at login/startup or the game may relaunch itself through Steam"
-
-// steamAssistSpawnHeadroom is reserved out of the operation deadline for the
-// spawn itself, so bounded Steam-client assistance cannot let the accepted
-// operation expire before cmd.Start.
-const steamAssistSpawnHeadroom = 2 * time.Second
-
-// minStageFourBudget is the smallest remaining operation budget worth spawning
-// against (M2.15): below it the deadline is effectively consumed, so the
-// operation is treated as supersedable rather than spawning with a uselessly
-// tiny — or, if negative, silently full-defaulted — Stage-4 budget.
-const minStageFourBudget = 200 * time.Millisecond
-
 func (s *Server) hasLiveGABPClient(gameID string) bool {
 	// GABP evidence requires a claim-bound client (review round 8): a live
 	// socket alone — possibly belonging to an earlier launch — is never
@@ -5192,447 +5046,78 @@ func (s *Server) hasLiveGABPClient(gameID string) bool {
 	return client != nil
 }
 
-// stampSpawnState applies a fenced claim mutation; a fencing violation
-// means the claim was superseded mid-start and is only logged — the OS
-// spawn itself is not abortable from here.
-func (s *Server) stampSpawnState(gameID, launchID, opID string, mutate func(*process.RuntimeState)) {
-	if _, err := process.FencedTransition(gameID, s.configDir, launchID, opID, func(st *process.RuntimeState) error {
-		mutate(st)
-		return nil
-	}); err != nil {
-		s.log.Warnw("spawn-state transition not applied", "gameId", gameID, "error", err)
-	}
-}
-
 func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration, startupGABPTimeout time.Duration, resetEndpoint bool, resolved *launch.Resolved, hc historyContext) (*process.ProcessStartResult, error) {
+	// Stages 1–4 run in the shared lifecycle manager (design/05, design/11).
+	// The server frontend supplies its live-bridge evidence and in-process
+	// registry policy, then continues to Stage 5 (bridge attach) below; a CLI
+	// frontend stops after Stage 4 with started_attachment_deferred.
 	launchSpec := s.launchSpecWithRuntimeDir(launchSpecFromResolved(game, resolved))
-
-	controller := s.newController()
-	if err := controller.Configure(launchSpec); err != nil {
-		return nil, fmt.Errorf("failed to configure game launcher for '%s' (mode: %s, target: %s): %w",
-			game.ID, game.LaunchMode, game.Target, err)
-	}
-
-	// Stage 2 (design/05): claim gating by the liveness rule, complete
-	// pre-spawn claim with operation stamping, then all-profile probing +
-	// stopProcessName as the lost-claim backstop.
-	startBudget := s.startBudgetFor(game.LaunchMode)
-	gateRes, err := process.GateStart(process.StartGate{
-		GameID:             game.ID,
-		ConfigDir:          s.configDir,
-		InstanceID:         s.instanceID,
-		RequestedProfile:   launchSpec.Profile,
+	sr, err := s.lifecycle().Start(lifecycle.StartRequest{
+		Game:               game,
+		LaunchSpec:         launchSpec,
+		Resolved:           resolved,
+		ResetEndpoint:      resetEndpoint,
+		StartupGABPTimeout: startupGABPTimeout,
+		HistoryContext:     hc,
 		BridgeBound:        s.bridgeBound(game.ID),
-		Spec:               launchSpec,
-		Budget:             startBudget,
-		Probes:             launch.ResolveProfileLifecycles(&game),
-		StopProcessName:    game.StopProcessName,
-		HistoryContextHash: hc.contextHash,
-		HistorySuccess:     &process.HistorySuccessIdentity{Snapshot: hc.snapshot, Bucket: hc.bucket},
+		CheckInProcessActive: func() (string, bool) {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if tracked, ok := s.games[game.ID]; ok && tracked != nil && tracked.IsRunning() {
+				return "running", true
+			}
+			// Clean up any stale controller reference.
+			delete(s.games, game.ID)
+			return "", false
+		},
 	})
 	if err != nil {
 		return nil, err
 	}
-	if gateRes.Refusal != nil {
-		return nil, &startRefusalError{refusal: gateRes.Refusal, warnings: gateRes.Warnings}
-	}
-	runtimeState := *gateRes.Claim
+
+	controller := sr.Controller
+	port, token := sr.Port, sr.Token
+	runtimeState := sr.RuntimeState
 	launchID := runtimeState.LaunchID
-	opID := runtimeState.Operation.OperationID
-	startWarnings := gateRes.Warnings
-	hc.launchID = launchID
+	result := sr.Result
+	startWarnings := sr.Warnings
+	totalGABPTimeout := sr.TotalGABPTimeout
 
-	// Stage 2 store-launcher advisory (design/05, M2.15): for Steam modes, scan
-	// once; if the Steam client is not observable, record the single advisory
-	// warning — and for SteamManaged only, run bounded best-effort assistance
-	// charged against THIS operation's persisted deadline so it cannot expire
-	// before spawn (the single-budget rule). The warning records the observed
-	// preflight condition and stays even if assistance then succeeds; assistance
-	// failure/timeout is advisory, never a start failure.
-	if isSteamMode(game.LaunchMode) && !steam.ClientRunning() {
-		startWarnings = append(startWarnings, steamNotRunningAdvisory)
-		if game.LaunchMode == "SteamManaged" {
-			// Reserve the WHOLE remainder of the start out of the operation
-			// deadline: endpoint preparation can block up to the bridge-lock
-			// bound, and the spawn needs headroom after that. Assistance may only
-			// consume what is left; otherwise it could eat the claim before the
-			// pre-spawn work (M2.15).
-			reserve := config.BridgeLockTimeout() + steamAssistSpawnHeadroom
-			if budget := time.Until(runtimeState.Operation.Deadline) - reserve; budget > 0 {
-				if err := steam.EnsureClientRunningWithin(budget); err != nil {
-					s.log.Debugw("steam client assistance did not complete within budget", "gameId", game.ID, "error", err)
-				}
-			}
-		}
+	// The Stage-5 death recheck below reuses the Stage-4 liveness rule over the
+	// pinned status hook, and records the exited failure fenced to this launch.
+	var statusHook *launch.ResolvedHook
+	if launchSpec.Lifecycle != nil {
+		statusHook = launchSpec.Lifecycle.Status
 	}
-
-	cleanupRuntimeState := true
-	// Terminal accepted-attempt failures must be written to history while the
-	// claim is still alive and fenced to THIS launch (round 10): the handler's
-	// renderer runs after the deferred release, so the write cannot live there.
-	// exitedFailure records inline (its claim is torn down mid-flow); the other
-	// cleanup-path codes record here, immediately before the release.
-	failureRecorded := false
-	var pendingFailCode string
-	recordFail := func(code string) {
-		if failureRecorded || code == "" {
-			return
-		}
-		failureRecorded = true
-		s.recordTerminalStartFailure(game, hc, code)
-	}
-	defer func() {
-		if !cleanupRuntimeState {
-			return
-		}
-		recordFail(pendingFailCode)
-		// Release only OUR claim: fenced by the launch + operation identity
-		// this start created — a cleanup that lost a race (its transition
-		// fenced out, its claim superseded) must never delete a successor
-		// claim by bare game ID (design/06).
-		if err := process.ReleaseStartClaim(game.ID, s.configDir, s.instanceID, launchID, opID, s.selfConnectionFor(game.ID, launchID)); err != nil &&
-			!errors.Is(err, process.ErrFencingViolation) && !errors.Is(err, process.ErrNoRuntimeClaim) {
-			s.log.Warnw("failed to release start claim", "gameId", game.ID, "error", err)
-		}
-	}()
-
-	s.mu.Lock()
-	if trackedController, exists := s.games[game.ID]; exists && trackedController != nil && trackedController.IsRunning() {
-		s.mu.Unlock()
-		return nil, &gameAlreadyActiveError{status: "running"}
-	}
-
-	// Clean up any stale controller reference
-	delete(s.games, game.ID)
-	s.mu.Unlock()
-
-	// portRanges is startup-only (design/09): endpoint allocation uses the
-	// configuration pinned at process start, never the hot-reload snapshot.
-	// Failure is structured and the claim is released (deferred cleanup).
-	// This writes only the endpoint (port/token); the diagnostic fields are
-	// stamped at the spawn boundary (design/20), so a pre-spawn failure never
-	// leaves a profile/revision/startedAt for a process never spawned.
-	port, token, bridgePath, reusedBridge, err := config.PrepareBridgeEndpointForStart(game.ID, s.configDir, s.gamesConfig, resetEndpoint)
-	if err != nil {
-		pendingFailCode = "endpoint_unavailable"
-		return nil, &endpointUnavailableError{gameID: game.ID, err: err}
-	}
-
-	if reusedBridge {
-		s.log.Infow("reusing GABS endpoint cache", "gameId", game.ID, "port", port, "host", "127.0.0.1", "configPath", bridgePath)
-	} else {
-		s.log.Infow("created GABS endpoint cache", "gameId", game.ID, "port", port, "host", "127.0.0.1", "configPath", bridgePath, "resetEndpoint", resetEndpoint)
-	}
-
-	controller.SetBridgeInfo(port, token)
-
-	// The claim carries the endpoint (port + per-launch token): it is the
-	// normal attachment source for games_connect after a CLI start or a
-	// server restart (design/07). The expected-context digests are pinned
-	// in the same transition — non-reversible salted hashes of the argv
-	// payload, canonical cwd, and forwarded env values (design/03), so a
-	// delayed welcome report verifies against what was actually spawned,
-	// never current config.
-	spawnDigests := computeSpawnDigests(launchSpec, controller)
-	if _, err := process.FencedTransition(game.ID, s.configDir, launchID, opID, func(st *process.RuntimeState) error {
-		st.Endpoint = &process.RuntimeEndpoint{Port: port, Token: token}
-		st.ContextDigests = spawnDigests
-		// HistoryContextHash + HistorySuccess were pinned at claim publication
-		// (GateStart), so a crash before this transition still leaves recovery
-		// a track-record identity (round 11 P1-2).
-		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("failed to persist endpoint into runtime claim for '%s': %w", game.ID, err)
-	}
-
-	// Pre-spawn size check on the fully materialized spec (managed env
-	// layer + executable included): a structured spec_too_large beats an
-	// opaque E2BIG/CreateProcess failure (design/03).
-	if resolved != nil {
-		finalEnv := map[string]string{}
-		for _, kv := range controller.FinalEnvironment() {
-			if i := strings.IndexByte(kv, '='); i > 0 {
-				finalEnv[kv[:i]] = kv[i+1:]
-			}
-		}
-		finalArgv := append([]string{launchSpec.PathOrId}, launchSpec.Args...)
-		if iss := launch.CheckProcessSize(finalArgv, finalEnv); iss != nil {
-			pendingFailCode = "spec_too_large"
-			return nil, iss
-		}
-	}
-
-	// A diagnostic-stamp write failure surfaced from the spawn observer
-	// (F10). Guarded because the observer may run on the spawning goroutine.
-	var stampMu sync.Mutex
-	var stampWarnings []string
-
-	// Stage 3: spawnState transitions bracket OS process creation. The
-	// pre-spawn transition must succeed — spawning against an unpublished
-	// or superseded claim would orphan a real workload behind a claim that
-	// recovery considers safely removable.
-	controller.SetSpawnObservers(
-		func() error {
-			_, terr := process.FencedTransition(game.ID, s.configDir, launchID, opID, func(st *process.RuntimeState) error {
-				// The persisted operation deadline is authoritative (M2.15):
-				// checking "operation still live?" and marking spawning are ONE
-				// atomic step under the transition lock, so a concurrent start
-				// that superseded a past-deadline operation cannot slip between
-				// them. Once the deadline has passed the operation is
-				// supersedable — refuse the spawn. ErrFencingViolation surfaces as
-				// the stable supersession outcome (never a game fault), the same
-				// as a lost fence.
-				if st.Operation == nil || !time.Now().Before(st.Operation.Deadline) {
-					return process.ErrFencingViolation
-				}
-				st.SpawnState = process.SpawnStateSpawning
-				return nil
-			})
-			return terr
-		},
-		func(pid int, startTime int64, spawnErr error) {
-			s.stampSpawnState(game.ID, launchID, opID, func(st *process.RuntimeState) {
-				if spawnErr != nil {
-					st.SpawnState = process.SpawnStateFailed
-					return
-				}
-				st.SpawnState = process.SpawnStateSpawned
-				st.GamePID = pid
-				st.PIDStartTime = startTime
-			})
-			// Stamp the diagnostic-only bridge.json fields at the spawn
-			// boundary (design/20: "written at spawn"), ONLY on a successful
-			// spawn (round 11 P2-8) and FENCED to this launch's endpoint —
-			// passing the expected port+token so a superseded launch never
-			// writes onto the successor's rotated token (round 12 F10).
-			if spawnErr == nil {
-				err := config.StampBridgeDiagnostics(game.ID, s.configDir, port, token, config.BridgeDiagnostics{
-					Profile:        launchSpec.Profile,
-					ConfigRevision: launchSpec.ConfigRevision,
-					StartedAt:      time.Now().UTC().Format(time.RFC3339),
-				})
-				switch {
-				case err == nil:
-				case errors.Is(err, config.ErrBridgeEndpointRotated):
-					// Expected: a successor took the endpoint; the fence
-					// correctly skipped this launch's stamp.
-					s.log.Debugw("skipped bridge diagnostics stamp on rotated endpoint", "gameId", game.ID)
-				default:
-					// A write failure left a spawned launch without diagnostics
-					// — surface it, don't just log (round 12 F10).
-					stampMu.Lock()
-					stampWarnings = append(stampWarnings, fmt.Sprintf("bridge diagnostics could not be written for this launch: %v", err))
-					stampMu.Unlock()
-					s.log.Warnw("failed to stamp bridge diagnostics", "gameId", game.ID, "error", err)
-				}
-			}
-		})
-
-	// Charge Stage 4 the REMAINING operation budget, not a fresh full duration
-	// (M2.15): Steam assistance and endpoint preparation already consumed part of
-	// the persisted deadline, and a fresh budget would let the spawn/verify run
-	// well past it. If the deadline is already (near) consumed, do not spawn at
-	// all — a supersedable operation must not create an OS process a concurrent
-	// start could be replacing. ErrFencingViolation maps to the stable
-	// supersession outcome, never a game fault, and never a fresh default budget.
-	remaining := time.Until(runtimeState.Operation.Deadline)
-	if remaining < minStageFourBudget {
-		return nil, &process.ProcessError{
-			Type:    process.ProcessErrorTypeStart,
-			Context: fmt.Sprintf("the start budget for %s was consumed before spawn; the operation is now supersedable", game.ID),
-			Err:     process.ErrFencingViolation,
-		}
-	}
-	result := s.starter.StartWithVerificationWithTimeouts(controller, nil, game.ID, port, token, remaining, 0)
-	// Merge any diagnostic-stamp warning the spawn observer surfaced (F10).
-	stampMu.Lock()
-	startWarnings = append(startWarnings, stampWarnings...)
-	stampMu.Unlock()
-	if result != nil {
-		result.StartWarnings = startWarnings
-	}
-
-	// assessWorkload runs Stage 4 over the unified, pinned liveness
-	// sources (design/05): the claim's status hook and built-in evidence —
-	// never just the direct PID and current-config name.
 	assessWorkload := func() process.LivenessEvidence {
 		claim, _ := process.LoadRuntimeState(game.ID, s.configDir)
 		if claim == nil {
 			claim = &runtimeState
 		}
-		var hook *launch.ResolvedHook
-		if launchSpec.Lifecycle != nil {
-			hook = launchSpec.Lifecycle.Status
-		}
 		return process.EvaluateLiveness(process.LivenessInput{
 			CallerInstanceID: s.instanceID,
 			Claim:            claim,
-			StatusHook:       hook,
+			StatusHook:       statusHook,
 			GameID:           game.ID,
 			Profile:          launchSpec.Profile,
 		})
 	}
-	// keepClaimUnobserved finalizes the Stage 4 unobserved outcome: the
-	// claim is KEPT in phase starting; a later observation promotes it,
-	// the supersession policy or repair clears it — never a no-evidence
-	// status pass (design/05).
-	keepClaimUnobserved := func() (*process.ProcessStartResult, error) {
-		cleanupRuntimeState = false
-		// The unobserved attempt is a terminal failure of an accepted attempt
-		// (design/20:206): proof-adjusted class (proven→environment, never-
-		// proven→config). Computed before the transition to avoid nesting a
-		// history read inside the history write.
-		unobservedClass := process.Classify("unobserved", process.ClassifyContext{Proven: s.contextProven(game.ID, hc)}).Class
-		if _, ferr := process.FencedTransition(game.ID, s.configDir, launchID, opID, func(st *process.RuntimeState) error {
-			st.Operation = nil // the attempt is over; the deadline governs reclaim
-			// Record the unobserved failure fenced to this still-present claim
-			// (round 11 P2-3): repeated unobserved launches accumulate
-			// consecutiveFailures; a later passive Stage 4 promotion resets them
-			// through the pinned success update.
-			if st.HistoryContextHash != "" {
-				process.ApplyActionFailureLocked(game.ID, s.configDir, process.EffectiveClaimProfile(st), st.HistoryContextHash, "unobserved", unobservedClass, hc.inputNames, time.Now().UTC())
-			}
-			return nil
-		}); ferr != nil {
-			// A stable Stage 4 outcome is emitted only after its transition
-			// lands (design/05; review rounds 8-9): a fencing loss reports
-			// supersession (re-evaluated to a stable code), a persistence
-			// failure keeps the claim occupied with blocked_unknown_state.
-			if errors.Is(ferr, process.ErrFencingViolation) || errors.Is(ferr, process.ErrNoRuntimeClaim) {
-				return result, s.supersededStartRefusal(game.ID)
-			}
-			return result, occupiedClaimRefusal(game.ID, "the unobserved outcome could not be persisted", ferr)
-		}
-		return result, &unobservedStartError{warnings: startWarnings}
-	}
 	exitedFailure := func(ev *process.LivenessEvidence) (*process.ProcessStartResult, error) {
-		// Record while the claim is still ours (round 10): some exited paths
-		// remove the claim right after this returns, so the fenced write must
-		// land here, not in the handler's post-release renderer.
-		// exited_during_start is ALWAYS game (the evidence-based default,
-		// design/05 F6 adjudication): the status hook here is liveness, not
-		// cause — it only enriches the captured output (hookEvidence), never
-		// the class. GABS cannot tell a game crash from a wrapper/container
-		// exit at the first process it created.
+		hcRec := hc
+		hcRec.LaunchID = launchID
+		s.lifecycle().RecordTerminalStartFailure(game, hcRec, "exited_during_start")
 		hookStopped := ev != nil && ev.Source == process.LivenessSourceStatusHook
-		recordFail("exited_during_start")
-		e := &exitedDuringStartError{
-			exitCode:            controller.ExitCode(),
-			tail:                controller.LaunchLogTail(16 * 1024),
-			warnings:            startWarnings,
-			hookReportedStopped: hookStopped,
+		e := &lifecycle.ExitedDuringStartError{
+			ExitCode:            controller.ExitCode(),
+			Tail:                controller.LaunchLogTail(16 * 1024),
+			Warnings:            startWarnings,
+			HookReportedStopped: hookStopped,
 		}
 		if hookStopped {
-			e.hookEvidence = ev.Detail
+			e.HookEvidence = ev.Detail
 		}
 		return result, e
 	}
-
-	if result.Error != nil {
-		var procErr *process.ProcessError
-		if errors.As(result.Error, &procErr) && procErr.Type == process.ProcessErrorTypeUnobserved {
-			ev := assessWorkload()
-			switch ev.Verdict {
-			case process.StatusRunning:
-				// the workload is observable (hook or name) even though the
-				// starter's own tracking gave up — verified, likely adopted
-				result.Error = nil
-				result.ProcessStarted = true
-				result.GameStillRunning = true
-			case process.StatusStopped:
-				if ev.Source == process.LivenessSourceStatusHook {
-					return exitedFailure(&ev) // stopped-by-hook after spawn
-				}
-				return keepClaimUnobserved() // absence, not positive evidence
-			default:
-				return keepClaimUnobserved()
-			}
-		} else if errors.Is(result.Error, process.ErrFencingViolation) {
-			cleanupRuntimeState = false
-			return result, s.supersededStartRefusal(game.ID)
-		} else {
-			// Record spawn_failed ONLY when the handler will also render it as
-			// spawn_failed (round 10): a Start/Configuration ProcessError. Any
-			// other error type falls through to the handler's generic branch
-			// with no causeClass — writing spawn_failed for it would credit a
-			// history failure the caller never sees classified.
-			if procErr != nil && (procErr.Type == process.ProcessErrorTypeStart || procErr.Type == process.ProcessErrorTypeConfiguration) {
-				pendingFailCode = "spawn_failed"
-			}
-			return result, fmt.Errorf("failed to start game '%s' (mode: %s, target: %s): %w",
-				game.ID, game.LaunchMode, game.Target, result.Error)
-		}
-	}
-	if !result.GameStillRunning {
-		ev := assessWorkload()
-		switch ev.Verdict {
-		case process.StatusRunning:
-			result.GameStillRunning = true // adopted: workload observed
-		case process.StatusUnknown:
-			return keepClaimUnobserved() // nothing observable is not an exit
-		default:
-			return exitedFailure(&ev)
-		}
-	}
-
-	// Adoption (design/05 Stage 4): defined by the direct child exiting
-	// while the workload stays observable — wrappers on ANY mode cross
-	// exactly the boundary where injected args/env can be lost.
-	adopted := controller.DirectChildExited()
-	result.Adopted = adopted
-
-	_, defaultGABPTimeout := s.starter.GetTimeouts()
-	totalGABPTimeout := startupGABPTimeout
-	if totalGABPTimeout <= 0 {
-		totalGABPTimeout = defaultGABPTimeout
-	}
-	newPID := resolveRuntimeGamePID(game, controller)
-	wasStarting := false
-	promoted, err := process.FencedTransitionWithCredit(game.ID, s.configDir, launchID, opID, func(st *process.RuntimeState) error {
-		wasStarting = st.Phase == process.PhaseStarting
-		st.Status = process.RuntimeStateStatusRunning
-		st.Phase = process.PhaseActive
-		st.GamePID = newPID
-		if fp, ferr := process.ProcessStartTime(newPID); ferr == nil {
-			st.PIDStartTime = fp
-		}
-		st.Adopted = adopted
-		st.Operation = nil
-		st.ProcessStartDeadline = time.Time{}
-		*st = process.RefreshRuntimeOwnerLease(*st, os.Getpid(), s.instanceID, s.runtimeOwnerLeaseForOperation(totalGABPTimeout), time.Now().UTC())
-		return nil
-	}, func(st *process.RuntimeState) error {
-		// Stage 4 verified: credit workloadStarts++ BEFORE the flip commits
-		// (round 11 P1-2; round 14 F5), only when this transition actually
-		// promoted a starting claim, so the four promotion paths record once.
-		// Record-first + launchID-idempotent: a history-write failure aborts
-		// the promote (surfaced below as a stable refusal) and a retry credits
-		// exactly once.
-		if wasStarting {
-			return s.applyPinnedWorkloadStart(game.ID, st)
-		}
-		return nil
-	})
-	if err != nil {
-		cleanupRuntimeState = false
-		if errors.Is(err, process.ErrFencingViolation) || errors.Is(err, process.ErrNoRuntimeClaim) {
-			return result, s.supersededStartRefusal(game.ID)
-		}
-		// A started_* outcome is emitted only after the promote transition
-		// lands: the claim stays occupied (operation in place) and the
-		// caller gets a stable blocked_unknown_state, not an unclassified
-		// error (review round 9).
-		return result, occupiedClaimRefusal(game.ID, "the running state could not be persisted", err)
-	} else if promoted != nil {
-		runtimeState = *promoted
-	}
-	cleanupRuntimeState = false
-
-	// Stage 4 verified was recorded INSIDE the promote fence above, BEFORE the
-	// runtime save (round 11 P1-2; round 14 F5), so the passive promotion paths
-	// (status, attachment, recovery) never double-count (launchID idempotency)
-	// and no crash window can lose the credit: a crash before the save replays
-	// the promotion, a history-write failure aborts the promote for a retry.
 
 	s.mu.Lock()
 	s.games[game.ID] = controller

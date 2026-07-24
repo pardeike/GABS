@@ -168,7 +168,7 @@ func TestEditNoticeFiresOncePerEdit(t *testing.T) {
 	// The config changed (new args → new hash): the notice fires once.
 	_ = g
 	editedHash := process.ContextHash(&launch.BaseContext{Target: "/opt/game", Mode: "DirectPath", Args: []string{"-v2"}})
-	hc := historyContext{profile: "", contextHash: editedHash}
+	hc := historyContext{Profile: "", ContextHash: editedHash}
 	n1 := s.editNoticeFor("adv", hc)
 	if n1 == "" || !strings.Contains(n1, "environment-class failure") {
 		t.Fatalf("the edit notice must fire after a proven+non-config-failure edit: %q", n1)
@@ -189,7 +189,7 @@ func TestEditNoticeDoesNotFireForAdditiveEdit(t *testing.T) {
 	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(dir)
 	// Adding profile B leaves A's hash unchanged: no notice for A.
-	hc := historyContext{profile: "a", contextHash: hashA}
+	hc := historyContext{Profile: "a", ContextHash: hashA}
 	if n := s.editNoticeFor("adv", hc); n != "" {
 		t.Fatalf("an additive edit must not fire the notice for an unchanged context: %q", n)
 	}

@@ -54,8 +54,8 @@ func Classify(code string, ctx ClassifyContext) Classification {
 	// a verified stop, a connected or pending start must never acquire a
 	// causeClass, or they would hit the environment default. Callers attach
 	// causeClass only when Class is non-empty.
-	case "terminated", "started_connected", "started_bridge_pending",
-		"started_attachment_deferred":
+	case "terminated", OutcomeStartedConnected, OutcomeStartedBridgePending,
+		OutcomeStartedAttachmentDeferred:
 		return Classification{}
 
 	// state — GABS runtime state must be resolved first. A stop that

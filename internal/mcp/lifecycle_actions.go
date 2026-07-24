@@ -4,10 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"runtime"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/pardeike/gabs/internal/config"
@@ -404,7 +402,7 @@ func (s *Server) lifecycleActionResult(game config.GameConfig, action, configRev
 		// attribution with the pinned context's track record; no history write.
 		structured := map[string]interface{}{"code": "blocked_unknown_state", "gameId": game.ID, "action": action}
 		s.attachStructuredFailureAttribution(structured, game, "blocked_unknown_state",
-			historyContext{profile: stopProfile, contextHash: stopHash})
+			historyContext{Profile: stopProfile, ContextHash: stopHash})
 		return &ToolResult{
 			Content:           []Content{{Type: "text", Text: fmt.Sprintf("Failed to %s '%s': %v", action, game.ID, err)}},
 			IsError:           true,
@@ -686,153 +684,6 @@ func attachStatusEvidence(statusItem map[string]interface{}, ev *process.Livenes
 	}
 }
 
-// historyContext carries everything the track-record store needs for one
-// launch: the launch identity (for fencing), the input-free context hash,
-// the COMPLETE last-known-good snapshot, and the supplied-input bucket
-// coordinates (design/08). launchID is filled once the claim is created.
-type historyContext struct {
-	launchID    string
-	profile     string
-	contextHash string
-	snapshot    process.ContextSnapshot
-	bucket      process.SuccessBucket
-	inputNames  []string
-}
-
-// buildHistoryContext composes the track-record coordinates for a launch.
-// The context hash comes from the resolver's input-free base context (never
-// the post-input Resolved, never a second merge); the value digest is keyed
-// with the per-game bucket key so supplied values never persist in the
-// clear (design/08, design/20).
-// computeHistoryContext derives the input-free context coordinates and the
-// bucket IDENTITY with ZERO history mutation (round 11 P1-1/P1-2): the hash,
-// the last-good snapshot, and the per-input declaration identity. It performs
-// NO key creation and NO bucket invalidation, so it is safe on a pre-accept
-// failure path (launch_spec_unresolvable, resolver/call-class errors) where a
-// caller typo must not persist a per-game bucket key or drop buckets. The
-// value digest is left empty — it needs the per-game key and belongs only to
-// the accepted-start path.
-func (s *Server) computeHistoryContext(snap *config.Snapshot, game config.GameConfig, resolved *launch.Resolved, inputs map[string]interface{}) historyContext {
-	profile := ""
-	var inputNames []string
-	if resolved != nil {
-		profile = resolved.Profile
-		inputNames = append([]string(nil), resolved.AppliedInputs...)
-	}
-	hc := historyContext{profile: profile, inputNames: inputNames}
-
-	base, berr := launch.ResolveBaseContext(snap, game.ID, profile, launch.Options{
-		InheritedEnv:       os.Environ(),
-		CaseInsensitiveEnv: runtime.GOOS == "windows",
-	})
-	if berr == nil {
-		hc.contextHash = process.ContextHash(base)
-		hc.snapshot = process.ContextSnapshot{
-			Target:         base.Target,
-			Mode:           base.Mode,
-			Args:           base.Args,
-			ConfigEnv:      base.ConfigEnv,
-			AbsentEnvNames: base.AbsentEnvNames,
-			WorkingDir:     base.WorkingDir,
-			Lifecycle:      base.Lifecycle,
-		}
-	}
-
-	if len(inputNames) > 0 {
-		hc.bucket.InputNames = inputNames
-		hc.bucket.DeclHash = process.InputDeclHash(game, inputNames)
-		hc.bucket.PerInputDecl = perInputDeclHashes(game, inputNames)
-		// Compute the value digest READ-ONLY when a bucket key already exists
-		// (round 12 F8), so a pre-accept failure (launch_spec_unresolvable) on
-		// a previously proven exact input combination is recognized as proven
-		// rather than always "first run". If no key exists, the combination is
-		// genuinely unproven and the digest stays empty — no key is minted.
-		if key := process.BucketKeyIfExists(game.ID, s.configDir); key != "" {
-			hc.bucket.ValueDigest = process.BucketValueDigest(key, appliedInputValues(inputNames, inputs))
-		}
-	}
-	return hc
-}
-
-// appliedInputValues maps supplied input names to their string values for the
-// per-game-keyed value digest (values never persist in the clear).
-func appliedInputValues(inputNames []string, inputs map[string]interface{}) map[string]string {
-	applied := map[string]string{}
-	for _, n := range inputNames {
-		if v, ok := inputs[n]; ok {
-			applied[n] = fmt.Sprintf("%v", v)
-		}
-	}
-	return applied
-}
-
-// buildHistoryContext is the ACCEPTED-START context: the pure coordinates plus
-// the two mutations only a resolved, accepted attempt may perform — dropping
-// buckets whose input declaration changed (reload safety) and creating/reading
-// the per-game bucket key to compute this launch's value digest.
-func (s *Server) buildHistoryContext(snap *config.Snapshot, game config.GameConfig, resolved *launch.Resolved, inputs map[string]interface{}) historyContext {
-	hc := s.computeHistoryContext(snap, game, resolved, inputs)
-
-	// Reload safety (design/08): drop any input-combination bucket whose
-	// per-input declaration changed — or was REMOVED — since it was recorded;
-	// a value that "worked" under an old declaration is not proof under the
-	// new one. Runs even when every input was removed (empty current map), so
-	// a re-added declaration never resurrects stale proof (round 11 P2-4).
-	currentDecls := make(map[string]string, len(game.LaunchInputs))
-	for name := range game.LaunchInputs {
-		currentDecls[name] = process.InputDeclHash(game, []string{name})
-	}
-	if err := process.InvalidateChangedInputDeclarations(game.ID, s.configDir, hc.profile, currentDecls); err != nil {
-		s.log.Warnw("failed to invalidate changed input declarations", "gameId", game.ID, "error", err)
-	}
-
-	if len(hc.inputNames) > 0 {
-		if key, err := process.EnsureBucketKey(game.ID, s.configDir); err == nil {
-			hc.bucket.ValueDigest = process.BucketValueDigest(key, appliedInputValues(hc.inputNames, inputs))
-		}
-	}
-	return hc
-}
-
-func perInputDeclHashes(game config.GameConfig, names []string) map[string]string {
-	out := map[string]string{}
-	for _, n := range names {
-		out[n] = process.InputDeclHash(game, []string{n})
-	}
-	return out
-}
-
-// applyPinnedWorkloadStart records this launch's Stage 4 verified start from
-// the identity PINNED in the claim (round 11 P1-2), using an already-held
-// runtime-state transition lock — so every promotion path (synchronous start,
-// passive status observation, attachment, recovery) credits the start exactly
-// once, atomically with the phase flip, from the claim alone. No-op for a
-// claim without a pinned identity (legacy/external claims). The caller MUST
-// invoke this only when the transition actually flips starting→active.
-func (s *Server) applyPinnedWorkloadStart(gameID string, st *process.RuntimeState) error {
-	return process.ApplyPinnedWorkloadStartLocked(gameID, s.configDir, st, time.Now().UTC())
-}
-
-// recordTerminalStartFailure writes a terminal accepted-attempt failure to
-// history while the claim is still alive (called from startGame before the
-// deferred claim release), fenced to the launch (design/08, design/20;
-// round 10). Returns the classification so the caller can carry it to the
-// render step. Only design-eligible codes write; the pure classification is
-// always returned for rendering.
-func (s *Server) recordTerminalStartFailure(game config.GameConfig, hc historyContext, code string) process.Classification {
-	cls := process.Classify(code, process.ClassifyContext{
-		Proven:                s.contextProven(game.ID, hc),
-		InputCombinationFresh: !s.inputComboProven(game.ID, hc),
-		SuppliedInputs:        hc.inputNames,
-	})
-	if writeEligibleStartFailure(code) && hc.contextHash != "" && hc.launchID != "" {
-		if err := process.RecordFailure(game.ID, s.configDir, hc.launchID, hc.profile, hc.contextHash, code, cls.Class, hc.inputNames, time.Now().UTC()); err != nil {
-			s.log.Warnw("failed to record start failure in history", "gameId", game.ID, "error", err)
-		}
-	}
-	return cls
-}
-
 // finalizeStartFailure RENDERS a start failure's attribution — causeClass,
 // track record, class-keyed actions, edit notice — reading the history the
 // record step (in startGame, while the claim was alive) already wrote. It
@@ -842,23 +693,9 @@ func (s *Server) finalizeStartFailure(structured map[string]interface{}, game co
 	cls := process.Classify(code, process.ClassifyContext{
 		Proven:                s.contextProven(game.ID, hc),
 		InputCombinationFresh: !s.inputComboProven(game.ID, hc),
-		SuppliedInputs:        hc.inputNames,
+		SuppliedInputs:        hc.InputNames,
 	})
 	s.attachFailureAttribution(structured, game, hc, cls.Class, cls.SecondaryNote)
-}
-
-// writeEligibleStartFailure reports whether a start-failure code is a
-// terminal failure of an accepted attempt with a resolved context — the
-// only failures that mutate history (design/08, design/20). Pre-accept
-// codes (call-class, config_invalid, Stage 2 refusals) render but never
-// write.
-func writeEligibleStartFailure(code string) bool {
-	switch code {
-	case "exited_during_start", "spawn_failed", "endpoint_unavailable", "spec_too_large":
-		return true
-	default:
-		return false
-	}
 }
 
 // coreManagementTools are the GABS core game-management tools — the ones that
@@ -960,9 +797,9 @@ func (s *Server) gabsCallToolFailure(gameID, message, class string) *ToolResult 
 // timeout_out_of_range) degrades to the code's class with no track line.
 func (s *Server) attachStructuredFailureAttribution(structured map[string]interface{}, game config.GameConfig, code string, hc historyContext) {
 	cls := process.Classify(code, process.ClassifyContext{
-		Proven:                hc.contextHash != "" && s.contextProven(game.ID, hc),
-		InputCombinationFresh: hc.contextHash != "" && !s.inputComboProven(game.ID, hc),
-		SuppliedInputs:        hc.inputNames,
+		Proven:                hc.ContextHash != "" && s.contextProven(game.ID, hc),
+		InputCombinationFresh: hc.ContextHash != "" && !s.inputComboProven(game.ID, hc),
+		SuppliedInputs:        hc.InputNames,
 	})
 	s.attachFailureAttribution(structured, game, hc, cls.Class, cls.SecondaryNote)
 }
@@ -981,9 +818,9 @@ func (s *Server) attachFailureAttribution(structured map[string]interface{}, gam
 		structured["candidateInputNote"] = secondaryNote
 	}
 	var entry *process.HistoryEntry
-	if hc.contextHash != "" {
+	if hc.ContextHash != "" {
 		if h, err := process.LoadHistory(game.ID, s.configDir); err == nil {
-			if e := h.Profiles[hc.profile]; e != nil && e.ContextHash == hc.contextHash {
+			if e := h.Profiles[hc.Profile]; e != nil && e.ContextHash == hc.ContextHash {
 				entry = e
 			}
 		}
@@ -1032,113 +869,11 @@ func failureNextActions(gameID, class string) []map[string]interface{} {
 // editNoticeFor returns the one-line edit-visibility notice for this game's
 // current context, or "" — firing once per edit (design/08).
 func (s *Server) editNoticeFor(gameID string, hc historyContext) string {
-	notice, err := process.EditNotice(gameID, s.configDir, hc.profile, hc.contextHash)
+	notice, err := process.EditNotice(gameID, s.configDir, hc.Profile, hc.ContextHash)
 	if err != nil {
 		return ""
 	}
 	return notice
-}
-
-func (s *Server) contextProven(gameID string, hc historyContext) bool {
-	h, err := process.LoadHistory(gameID, s.configDir)
-	if err != nil {
-		return false
-	}
-	e := h.Profiles[hc.profile]
-	return e != nil && e.ContextHash == hc.contextHash && e.WorkloadStarts > 0
-}
-
-func (s *Server) inputComboProven(gameID string, hc historyContext) bool {
-	h, err := process.LoadHistory(gameID, s.configDir)
-	if err != nil {
-		return false
-	}
-	e := h.Profiles[hc.profile]
-	if e == nil || e.ContextHash != hc.contextHash {
-		return false
-	}
-	return e.HasBucket(hc.bucket.DeclHash, hc.bucket.ValueDigest)
-}
-
-// computeSpawnDigests pins the expected launch context from the fully
-// materialized spawn state (design/03): the argv payload is the resolved
-// argument list (argv[0] excluded by construction), the cwd is the
-// effective working directory, and the env values are exactly the names
-// the wrapper contract forwards (GABS_FORWARD_ENV, falling back to the
-// managed GABS_*/GABP_* variables for legacy specs).
-func computeSpawnDigests(spec process.LaunchSpec, controller process.ControllerInterface) *process.RuntimeContextDigests {
-	finalEnv := map[string]string{}
-	for _, kv := range controller.FinalEnvironment() {
-		if i := strings.IndexByte(kv, '='); i > 0 {
-			finalEnv[kv[:i]] = kv[i+1:]
-		}
-	}
-
-	// Channel membership is decided HERE, from the resolved spec — the
-	// config-declared context keys are the contextEnv channel; every other
-	// forwarded name (GABS_*/GABP_*, SteamAppId/SteamGameId, SystemRoot)
-	// is the managed layer (review round 9: prefix guessing is not a
-	// persistable contract).
-	contextKeys := map[string]bool{}
-	for _, k := range spec.ContextEnvKeys {
-		contextKeys[k] = true
-	}
-	managedEnv := map[string]string{}
-	contextEnv := map[string]string{}
-	classify := func(n, v string) {
-		if contextKeys[n] {
-			contextEnv[n] = v
-		} else {
-			managedEnv[n] = v
-		}
-	}
-	if names := strings.TrimSpace(finalEnv["GABS_FORWARD_ENV"]); names != "" {
-		for _, n := range strings.Split(names, ",") {
-			n = strings.TrimSpace(n)
-			if n == "" {
-				continue
-			}
-			if v, ok := finalEnv[n]; ok {
-				classify(n, v)
-			}
-		}
-	} else {
-		for k, v := range finalEnv {
-			if strings.HasPrefix(k, "GABS_") || strings.HasPrefix(k, "GABP_") {
-				classify(k, v)
-			}
-		}
-	}
-
-	var absent []string
-	if names := strings.TrimSpace(finalEnv["GABS_ABSENT_ENV"]); names != "" {
-		for _, n := range strings.Split(names, ",") {
-			if n = strings.TrimSpace(n); n != "" {
-				absent = append(absent, n)
-			}
-		}
-	}
-
-	cwd := spec.WorkingDir
-	unverifiable := false
-	switch {
-	case cwd == "":
-		if wd, err := os.Getwd(); err == nil {
-			cwd = wd
-		} else {
-			unverifiable = true
-		}
-	case !filepath.IsAbs(cwd):
-		// The legacy relative workingDir: incomparable by contract
-		// (design/03) — unverifiable, never a guessed digest.
-		unverifiable = true
-	}
-
-	digests, err := process.ComputeContextDigests(process.ArgvPayloadForDigest(spec.PathOrId, spec.Args), cwd, unverifiable, managedEnv, contextEnv, absent)
-	if err != nil {
-		return nil
-	}
-	return digests
 }
 
 // recordContextDelivery evaluates the welcome-time observation against the
@@ -1179,55 +914,6 @@ func (s *Server) recordContextDelivery(gameID string, ref bridgeAttachmentRef, o
 	if err := process.ReconcilePendingCredits(gameID, s.configDir, ref.launchID); err != nil {
 		s.log.Warnw("delivery credit deferred to status reconciliation", "gameId", gameID, "error", err)
 	}
-}
-
-// supersededStartRefusal re-evaluates the CURRENT claim after a start lost
-// its fence and returns the applicable existing stable outcome (design/10;
-// review round 9): a successor in flight is operation_in_progress, an
-// active successor is already_running, anything else is
-// blocked_unknown_state — never an unclassified error.
-func (s *Server) supersededStartRefusal(gameID string) error {
-	cur, err := process.LoadRuntimeState(gameID, s.configDir)
-	if err != nil || cur == nil {
-		return &startRefusalError{refusal: &process.StartRefusal{
-			Code:    process.RefusalOperationInFlight,
-			Message: fmt.Sprintf("the launch of '%s' was superseded during startup and the successor has since finished; re-check games_status", gameID),
-		}}
-	}
-	if process.OperationInFlight(cur.Operation, time.Now().UTC()) {
-		op := *cur.Operation
-		return &startRefusalError{refusal: &process.StartRefusal{
-			Code:          process.RefusalOperationInFlight,
-			Message:       fmt.Sprintf("the launch of '%s' was superseded during startup; a successor %s operation is in progress (deadline %s)", gameID, op.Action, op.Deadline.Format(time.RFC3339)),
-			Phase:         cur.Phase,
-			ActiveProfile: process.EffectiveClaimProfile(cur),
-			Operation:     &op,
-		}}
-	}
-	if cur.Phase == process.PhaseActive {
-		return &startRefusalError{refusal: &process.StartRefusal{
-			Code:          process.RefusalAlreadyRunning,
-			Message:       fmt.Sprintf("the launch of '%s' was superseded during startup; a successor launch is active", gameID),
-			Phase:         cur.Phase,
-			ActiveProfile: process.EffectiveClaimProfile(cur),
-		}}
-	}
-	return &startRefusalError{refusal: &process.StartRefusal{
-		Code:    process.RefusalBlockedUnknown,
-		Message: fmt.Sprintf("the launch of '%s' was superseded during startup; a successor claim exists in phase %s — re-check games_status", gameID, cur.Phase),
-		Phase:   cur.Phase,
-	}}
-}
-
-// occupiedClaimRefusal is the stable outcome for a Stage 4 persistence
-// failure: the claim remains occupied (the operation stays in place) and
-// uncertainty blocks — blocked_unknown_state, per the exhaustive
-// terminal-branch rule (design/10).
-func occupiedClaimRefusal(gameID, what string, err error) error {
-	return &startRefusalError{refusal: &process.StartRefusal{
-		Code:    process.RefusalBlockedUnknown,
-		Message: fmt.Sprintf("%s for '%s': %v — the claim remains occupied; re-check games_status and retry", what, gameID, err),
-	}}
 }
 
 // attachStartContextDelivery reloads the exact claim and attaches its

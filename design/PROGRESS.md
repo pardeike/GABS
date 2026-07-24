@@ -912,8 +912,21 @@ contract, not a scratchpad.
 
 ## Milestone 3 — CLI + docs + skill
 
-- [ ] M3.1 CLI start/status/stop/kill on the shared lifecycle manager +
+- [~] M3.1 CLI start/status/stop/kill on the shared lifecycle manager +
       started_attachment_deferred — spec: 11; tests: T-CLI
+      (architecture B — in progress. Step 1: extracted the Stage 1–4 start
+      pipeline + its frontend-agnostic helpers into a new internal/lifecycle
+      package with a typed Manager. The MCP server frontend is now a thin
+      adapter: Server.startGame calls s.lifecycle().Start (Stages 1–4) then
+      does Stage 5 (bridge attach) itself; the pipeline reaches the server's
+      live-bridge evidence and in-process registry only through nil-safe
+      BridgeBound/CheckInProcessActive policy callbacks — a CLI passes nil and
+      the persisted attachment lease + owner fingerprint is the authoritative
+      cross-process liveness (design/04). Outcome identity, fencing, history
+      credit, and warnings all live in the shared layer. Verified: mcp suite
+      byte-identical (oracle), build+vet+config/process -race green. Remaining:
+      CLI adapters (start→started_attachment_deferred; status/stop/kill from
+      the snapshot) + Manager.Stop/Kill/Status, then the T-CLI cells.)
 - [ ] M3.2 Profile-aware doctor + --show-last-good + track-record
       display + conflation lint — spec: 11, 08; tests: T-CLI
 - [ ] M3.3 User docs (README, CONFIGURATION, INTEGRATION,
