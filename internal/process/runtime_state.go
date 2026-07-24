@@ -543,17 +543,15 @@ func LoadRuntimeState(gameID, configDir string) (*RuntimeState, error) {
 			}
 			return nil, fmt.Errorf("failed to read runtime state: %w", rerr)
 		}
-		if fi, statErr := os.Stat(path); statErr == nil && fi.Mode().Perm()&0o077 != 0 {
-			if chmodErr := os.Chmod(path, 0o600); chmodErr != nil {
-				if errors.Is(chmodErr, os.ErrNotExist) {
-					return nil, nil
-				}
-				if isTransientClaimReadError(chmodErr) && attempt < maxClaimReadAttempts {
-					time.Sleep(claimReadRetryDelay)
-					continue
-				}
-				return nil, fmt.Errorf("runtime state %s has loose permissions (%v) that cannot be tightened: %w", path, fi.Mode().Perm(), chmodErr)
+		if terr := tightenLegacyClaimPermissions(path); terr != nil {
+			if errors.Is(terr, os.ErrNotExist) {
+				return nil, nil
 			}
+			if isTransientClaimReadError(terr) && attempt < maxClaimReadAttempts {
+				time.Sleep(claimReadRetryDelay)
+				continue
+			}
+			return nil, terr
 		}
 		break
 	}

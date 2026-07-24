@@ -18,3 +18,11 @@ func isTransientClaimReadError(err error) bool {
 	)
 	return errors.Is(err, errorSharingViolation) || errors.Is(err, errorLockViolation)
 }
+
+// tightenLegacyClaimPermissions is a no-op on Windows: os.Stat reports every
+// file as 0666 (Windows has no unix permission bits), so the legacy 0644→0600
+// tighten would run on every read, is meaningless, and — under the concurrent
+// writer that holds the file — fails with "Access is denied". The per-launch
+// token is protected by the NTFS ACLs inherited from the private %USERPROFILE%\
+// .gabs directory, not by unix permission bits.
+func tightenLegacyClaimPermissions(string) error { return nil }
