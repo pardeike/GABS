@@ -967,6 +967,21 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			// Check specific game
 			game, resolveFail := resolveGameResult(gamesConfig, gameIdOrTarget)
 			if resolveFail != nil {
+				// A game removed from config but still holding a runtime claim
+				// stays addressable by ID (design/07:62): report the claim's
+				// status instead of not-found, so a fresh agent can stop it.
+				if process.RuntimeClaimExists(gameIdOrTarget, s.configDir) {
+					item := s.runtimeOnlyStatusItem(gameIdOrTarget)
+					item["currentConfigRevision"] = configRevision
+					text := fmt.Sprintf("**%s** (unconfigured): %v\n", gameIdOrTarget, item["statusDescription"])
+					if diagnosticMessage := gameStateDiagnosticMessage(item); diagnosticMessage != "" {
+						text += fmt.Sprintf("\nDiagnosis: %s\n", diagnosticMessage)
+					}
+					return &ToolResult{
+						Content:           []Content{{Type: "text", Text: text}},
+						StructuredContent: item,
+					}, nil
+				}
 				return resolveFail, nil
 			}
 
@@ -1040,12 +1055,36 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 
 			statusItems := make([]map[string]interface{}, 0, len(games))
 			for i, game := range games {
+				rows[i].item["configured"] = true
 				if diagnosticMessage := gameStateDiagnosticMessage(rows[i].item); diagnosticMessage != "" {
 					content.WriteString(fmt.Sprintf("• **%s**: %s — %s\n", game.ID, rows[i].desc, diagnosticMessage))
 				} else {
 					content.WriteString(fmt.Sprintf("• **%s**: %s\n", game.ID, rows[i].desc))
 				}
 				statusItems = append(statusItems, rows[i].item)
+			}
+
+			// Union in persisted claims whose config entry was edited away
+			// (design/07): a removed-but-claimed launch stays discoverable so a
+			// fresh agent can stop it. A scan failure is non-fatal — the
+			// configured summary still returns.
+			configured := map[string]bool{}
+			for _, g := range games {
+				configured[g.ID] = true
+			}
+			if claimIDs, scanErr := process.ListRuntimeClaimIDs(s.configDir); scanErr == nil {
+				for _, id := range claimIDs {
+					if configured[id] {
+						continue
+					}
+					item := s.runtimeOnlyStatusItem(id)
+					if diagnosticMessage := gameStateDiagnosticMessage(item); diagnosticMessage != "" {
+						content.WriteString(fmt.Sprintf("• **%s** (unconfigured): %v — %s\n", id, item["statusDescription"], diagnosticMessage))
+					} else {
+						content.WriteString(fmt.Sprintf("• **%s** (unconfigured): %v\n", id, item["statusDescription"]))
+					}
+					statusItems = append(statusItems, item)
+				}
 			}
 
 			structuredAll := map[string]interface{}{
@@ -3461,6 +3500,35 @@ func (s *Server) gameStatusStructured(game config.GameConfig, status string) map
 	}
 	if warnings := gameValidationWarnings(game); len(warnings) > 0 {
 		item["validationWarnings"] = warnings
+	}
+	return item
+}
+
+// runtimeOnlyStatusItem builds a games_status item for a game that holds a
+// persisted runtime claim but is no longer in config (design/07): configured:
+// false, the persisted phase, and stop/kill next actions so a fresh agent can
+// end a launch whose config entry was edited away. Status is resolved from the
+// claim + liveness, never from config (there is none).
+func (s *Server) runtimeOnlyStatusItem(gameID string) map[string]interface{} {
+	status, ev := s.checkGameStatusObserved(gameID)
+	synthetic := config.GameConfig{ID: gameID, Name: gameID}
+	item := map[string]interface{}{
+		"gameId":            gameID,
+		"name":              gameID,
+		"status":            status,
+		"statusDescription": s.getStatusDescriptionFromStatus(status, &synthetic),
+		"configured":        false,
+		"nextActions": []map[string]interface{}{
+			mcpNextAction("games_stop", map[string]interface{}{"gameId": gameID}, "Stop this launch; its config entry was removed but the runtime claim persists."),
+			mcpNextAction("games_kill", map[string]interface{}{"gameId": gameID}, "Force terminate if stop does not end it."),
+		},
+	}
+	attachStatusEvidence(item, ev)
+	if rs, err := process.LoadRuntimeState(gameID, s.configDir); err == nil && rs != nil {
+		if rs.ConfigRevision != "" {
+			item["activeConfigRevision"] = rs.ConfigRevision
+		}
+		attachRuntimeLifecycle(item, rs)
 	}
 	return item
 }

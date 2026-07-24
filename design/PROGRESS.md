@@ -798,8 +798,15 @@ contract, not a scratchpad.
       is reproduced with targeted `set`; Windows filtering-full is the
       existing forwarding-wrapper cell, and the verdict logic itself is
       unit-tested cross-platform in context_delivery_test.go)
-- [ ] M2.13 repair --forget-runtime + no-arg games_status union of
+- [~] M2.13 repair --forget-runtime + no-arg games_status union of
       runtime-only claims — spec: 07, 10; tests: T-RT
+      (status surface landed: process.ListRuntimeClaimIDs enumerates persisted
+      claims; no-arg games_status unions configured entries with runtime-only
+      claims (configured:false + persisted phase, stop/kill next actions), and a
+      removed-but-claimed game stays addressable by ID for single-ID status —
+      both via a claim-based runtimeOnlyStatusItem, status resolved from the
+      claim + liveness, never config. Remaining: stop/kill addressability for a
+      removed-but-claimed game, and the CLI repair --forget-runtime escape hatch.)
 - [ ] M2.14 Remove M1 lifecycle feature gate — spec: 21; tests: T-VAL
       update
 - [ ] M2.15 EnsureClientRunning demoted to bounded best-effort warning —

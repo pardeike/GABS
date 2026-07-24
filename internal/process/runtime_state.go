@@ -8,11 +8,56 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/pardeike/gabs/internal/config"
 	"github.com/pardeike/gabs/internal/launch"
 )
+
+// RuntimeClaimExists reports whether a runtime.json is present for gameID —
+// true even for a corrupt/unreadable claim, so a removed-but-claimed game stays
+// addressable by ID (design/07) and can still be forgotten via repair.
+func RuntimeClaimExists(gameID, configDir string) bool {
+	cp, err := config.NewConfigPaths(configDir)
+	if err != nil {
+		return false
+	}
+	_, statErr := os.Stat(cp.GetRuntimeStatePath(gameID))
+	return statErr == nil
+}
+
+// ListRuntimeClaimIDs returns, sorted, every game ID that has a persisted
+// runtime.json under configDir — the runtime surface that no-argument
+// games_status unions with the configured entries (design/07): a game removed
+// from config but still holding a claim must remain discoverable. An unreadable
+// individual entry is skipped, never failing the whole scan, so a corrupt claim
+// still surfaces (its status resolves to unknown, with the repair path); only a
+// failure to scan the base directory itself is returned.
+func ListRuntimeClaimIDs(configDir string) ([]string, error) {
+	cp, err := config.NewConfigPaths(configDir)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(cp.GetBaseDir())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var ids []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, statErr := os.Stat(cp.GetRuntimeStatePath(e.Name())); statErr == nil {
+			ids = append(ids, e.Name())
+		}
+	}
+	sort.Strings(ids)
+	return ids, nil
+}
 
 // linkRuntimeState and renameRuntimeState are injectable so tests can force
 // the link-less claim fallback and its failure cleanup.
