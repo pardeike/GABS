@@ -28,8 +28,9 @@ unknown key surfaces in global configWarnings via MCP; duplicate JSON
 members anywhere → config_invalid with path, including duplicates that
 struct decoding would silently collapse; static resolvability errors with
 both JSON path and filesystem path; JSON-path accuracy; Windows
-non-executable hook command rejection; M1 lifecycle feature gate rejects
-`lifecycle` fields until milestone 2.
+non-executable hook command rejection; the M1 lifecycle feature gate is
+removed (M2.14) — `lifecycle` fields now validate and execute rather than
+being rejected as "not yet supported".
 
 ## T-RES — Resolver
 

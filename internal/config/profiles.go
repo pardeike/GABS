@@ -100,12 +100,10 @@ func (e *ValidationError) Error() string {
 	return "invalid configuration:\n" + strings.Join(parts, "\n")
 }
 
-// ValidationOptions controls extension validation.
+// ValidationOptions controls extension validation. The milestone-1 lifecycle
+// feature gate is gone (M2.14): the lifecycle runtime executes, so lifecycle
+// fields always validate.
 type ValidationOptions struct {
-	// AllowLifecycle lifts the milestone-1 feature gate. Until the lifecycle
-	// runtime lands, configs must not validate against semantics that do not
-	// execute yet.
-	AllowLifecycle bool
 	// CaseInsensitiveEnv rejects env keys that collide after ASCII case
 	// folding (Windows environment semantics).
 	CaseInsensitiveEnv bool
@@ -114,7 +112,6 @@ type ValidationOptions struct {
 // DefaultValidationOptions returns the options used on the load path.
 func DefaultValidationOptions() ValidationOptions {
 	return ValidationOptions{
-		AllowLifecycle:     false,
 		CaseInsensitiveEnv: runtime.GOOS == "windows",
 	}
 }
@@ -181,7 +178,7 @@ func ValidateGameExtensions(gameID string, g *GameConfig, opts ValidationOptions
 		// One observation/control mechanism stays mandatory for URL modes:
 		// the URL-opener helper PID proves nothing about the workload. Hooks
 		// (status + stop-or-kill) may satisfy it in place of stopProcessName.
-		if opts.AllowLifecycle && g.StopProcessName == "" && !g.hasURLHookAlternative() {
+		if g.StopProcessName == "" && !g.hasURLHookAlternative() {
 			addErr(base, g.LaunchMode+" games must declare stopProcessName, or a game-level status hook plus a stop or kill hook")
 		}
 		return errs, warns
@@ -480,12 +477,6 @@ func validateInputEnvConflicts(base string, inputs map[string]LaunchInputConfig,
 func validateLifecycleSlot(base string, lc *LifecycleConfig, hasProfiles bool, opts ValidationOptions) []ConfigIssue {
 	if lc == nil {
 		return nil
-	}
-	if !opts.AllowLifecycle {
-		return []ConfigIssue{{
-			Path:    base + "/lifecycle",
-			Message: "lifecycle hooks are not yet supported by this build",
-		}}
 	}
 	var issues []ConfigIssue
 	if lc.Status != nil {

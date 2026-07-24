@@ -831,8 +831,21 @@ contract, not a scratchpad.
       concurrent status pool (3 slow-hook claims ~2s, not ~6s), and a corrupt
       claim renders unknown + the repair command, not silent-unknown + stop/kill.
       Stays [~] until adjudicated; M2.14/M2.15 proceed meanwhile.)
-- [ ] M2.14 Remove M1 lifecycle feature gate — spec: 21; tests: T-VAL
+- [x] M2.14 Remove M1 lifecycle feature gate — spec: 21; tests: T-VAL
       update
+      (the M2 lifecycle runtime executes, so the gate that rejected `lifecycle`
+      config fields as "not yet supported" is gone: removed
+      ValidationOptions.AllowLifecycle and the rejection in validateLifecycleSlot,
+      so lifecycle validates + executes on the default load path. The URL-mode
+      observation/control check (stopProcessName OR a status + stop/kill hook,
+      T-VAL) was gated on AllowLifecycle; it is now unconditional — the hook
+      alternative is always available. games.go's stopProcessName message dropped
+      its stale "once lifecycle hooks are supported" clause. T-VAL updated:
+      TestLifecycleGateRemoved + TestLoadAcceptsLifecycle assert lifecycle now
+      validates/loads (reproduce-first: both failed on the pre-removal gate); the
+      AllowLifecycle test literals became plain ValidationOptions{}. Full config
+      and mcp suites green — no existing config regressed from the stricter
+      load-path URL-mode check.)
 - [ ] M2.15 EnsureClientRunning demoted to bounded best-effort warning —
       spec: 05 Stage 2, 20; tests: T-START (Steam advisory)
 

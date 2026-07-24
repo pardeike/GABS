@@ -345,7 +345,7 @@ func (g *GameConfig) Validate() error {
 	// tracked like DirectPath while still using the Steam app id for discovery.
 	if g.LaunchMode == "SteamAppId" || g.LaunchMode == "EpicAppId" {
 		if g.StopProcessName == "" && !g.hasURLHookAlternative() {
-			return fmt.Errorf("stopProcessName is required for %s games to enable proper game termination (or, once lifecycle hooks are supported, a game-level status hook plus a stop or kill hook). Without it, GABS can only stop the launcher process, not the actual game", g.LaunchMode)
+			return fmt.Errorf("stopProcessName is required for %s games to enable proper game termination (or a game-level status hook plus a stop or kill hook). Without it, GABS can only stop the launcher process, not the actual game", g.LaunchMode)
 		}
 	}
 

@@ -278,21 +278,35 @@ func TestURLModesRejectContext(t *testing.T) {
 	requireIssue(t, errs, "/launchInputs", "SteamAppId")
 }
 
-// --- lifecycle feature gate (M1) ---
+// --- M1 lifecycle feature gate REMOVED (M2.14) ---
 
-func TestLifecycleFeatureGate(t *testing.T) {
+// The M2 lifecycle runtime executes, so the M1 gate is gone: lifecycle fields
+// validate on the default load path instead of being rejected as
+// "not yet supported" (design/21).
+func TestLifecycleGateRemoved(t *testing.T) {
 	g := profiledGame()
-	g.Lifecycle = &LifecycleConfig{Status: &HookConfig{Command: "adventure-status", Args: []string{"${profile}"}}}
-	errs, _ := validateGame(t, g, ValidationOptions{AllowLifecycle: false})
-	requireIssue(t, errs, "/lifecycle", "not yet supported")
+	g.Lifecycle = &LifecycleConfig{
+		Status: &HookConfig{Command: "adventure-status", Args: []string{"${profile}"}},
+		Stop:   &HookConfig{Command: "adventure-stop"},
+	}
+	errs, _ := validateGame(t, g, DefaultValidationOptions())
+	for _, e := range errs {
+		if strings.Contains(e.Message, "not yet supported") {
+			t.Fatalf("the M1 lifecycle gate must be removed; lifecycle must validate on the load path: %+v", errs)
+		}
+	}
 
-	// profile-level lifecycle is gated too
+	// profile-level lifecycle validates too.
 	g = profiledGame()
 	p := g.Profiles["vanilla"]
-	p.Lifecycle = &LifecycleConfig{Stop: &HookConfig{Command: "stopper"}}
+	p.Lifecycle = &LifecycleConfig{Status: &HookConfig{Command: "s"}, Stop: &HookConfig{Command: "stopper"}}
 	g.Profiles["vanilla"] = p
-	errs, _ = validateGame(t, g, ValidationOptions{AllowLifecycle: false})
-	requireIssue(t, errs, "/profiles/vanilla/lifecycle", "not yet supported")
+	errs, _ = validateGame(t, g, DefaultValidationOptions())
+	for _, e := range errs {
+		if strings.Contains(e.Message, "not yet supported") {
+			t.Fatalf("profile-level lifecycle must validate on the load path: %+v", errs)
+		}
+	}
 }
 
 // --- lifecycle validation (unit-level, gate lifted) ---
@@ -312,7 +326,7 @@ func TestHookValidation(t *testing.T) {
 		g.Lifecycle = lc
 		return g
 	}
-	opts := ValidationOptions{AllowLifecycle: true}
+	opts := ValidationOptions{}
 
 	// valid status hook with placeholders
 	errs, _ := validateGame(t, mk(HookConfig{Command: "checker", Args: []string{"${gameId}", "${profile}"}}, "status"), opts)
@@ -384,11 +398,11 @@ func TestAddGameRunsExtensionValidation(t *testing.T) {
 func TestHookWorkingDirRelativeWithPlaceholder(t *testing.T) {
 	g := profiledGame()
 	g.Lifecycle = &LifecycleConfig{Stop: &HookConfig{Command: "c", WorkingDir: "relative/${profile}"}}
-	errs, _ := validateGame(t, g, ValidationOptions{AllowLifecycle: true})
+	errs, _ := validateGame(t, g, ValidationOptions{})
 	requireIssue(t, errs, "/lifecycle/stop/workingDir", "absolute")
 	// absolute literal with placeholder suffix stays valid
 	g.Lifecycle = &LifecycleConfig{Stop: &HookConfig{Command: "c", WorkingDir: "/srv/${profile}"}}
-	errs, _ = validateGame(t, g, ValidationOptions{AllowLifecycle: true})
+	errs, _ = validateGame(t, g, ValidationOptions{})
 	requireNoErrors(t, errs)
 }
 
@@ -407,7 +421,7 @@ func TestURLModeHookRelaxation(t *testing.T) {
 		return GameConfig{ID: "u", Name: "U", LaunchMode: "SteamAppId", Target: "1",
 			StopProcessName: stopName, Lifecycle: lc}
 	}
-	opts := ValidationOptions{AllowLifecycle: true}
+	opts := ValidationOptions{}
 	status := &HookConfig{Command: "checker"}
 	stop := &HookConfig{Command: "stopper"}
 
@@ -457,17 +471,17 @@ func TestWindowsScriptHooksRejected(t *testing.T) {
 
 	g := profiledGame()
 	g.Lifecycle = &LifecycleConfig{Status: &HookConfig{Command: `C:\tools\status.bat`}}
-	errs, _ := validateGame(t, g, ValidationOptions{AllowLifecycle: true})
+	errs, _ := validateGame(t, g, ValidationOptions{})
 	requireIssue(t, errs, "/lifecycle/status/command", "cmd.exe")
 
 	// explicit interpreter form is the supported spelling
 	g.Lifecycle = &LifecycleConfig{Status: &HookConfig{Command: "cmd.exe", Args: []string{"/c", `C:\tools\status.bat`}}}
-	errs, _ = validateGame(t, g, ValidationOptions{AllowLifecycle: true})
+	errs, _ = validateGame(t, g, ValidationOptions{})
 	requireNoErrors(t, errs)
 
 	// non-Windows platforms run scripts directly; no rejection
 	hookValidationGOOS = "linux"
 	g.Lifecycle = &LifecycleConfig{Status: &HookConfig{Command: "/opt/tools/status.sh"}}
-	errs, _ = validateGame(t, g, ValidationOptions{AllowLifecycle: true})
+	errs, _ = validateGame(t, g, ValidationOptions{})
 	requireNoErrors(t, errs)
 }

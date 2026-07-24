@@ -113,11 +113,12 @@ func TestLoadValidatesNewFields(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsLifecycleUnderM1Gate(t *testing.T) {
-	p := writeTemp(t, `{"version":"1.0","games":{"a":{"id":"a","name":"A","launchMode":"DirectPath","target":"/x","lifecycle":{"status":{"command":"c"}}}}}`)
-	_, err := LoadGamesConfigFromPath(p)
-	if err == nil || !strings.Contains(err.Error(), "not yet supported") {
-		t.Fatalf("expected lifecycle gate error, got %v", err)
+// The M1 lifecycle feature gate is removed (M2.14): a config declaring
+// lifecycle hooks now LOADS instead of being rejected as "not yet supported".
+func TestLoadAcceptsLifecycle(t *testing.T) {
+	p := writeTemp(t, `{"version":"1.0","games":{"a":{"id":"a","name":"A","launchMode":"DirectPath","target":"/x","lifecycle":{"status":{"command":"c"},"stop":{"command":"s"}}}}}`)
+	if _, err := LoadGamesConfigFromPath(p); err != nil {
+		t.Fatalf("a lifecycle config must load once the M1 gate is removed, got: %v", err)
 	}
 }
 
