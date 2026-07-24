@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -43,21 +44,35 @@ func ListRuntimeClaimIDs(configDir string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	entries, err := os.ReadDir(cp.GetBaseDir())
-	if err != nil {
-		if os.IsNotExist(err) {
+	base := cp.GetBaseDir()
+	var ids []string
+	// A nested `/` game ID maps to a nested directory, so discovery walks the
+	// tree for runtime.json at any depth and decodes the storage key — the
+	// runtime.json's parent directory relative to base, normalized to `/` — back
+	// to the exact game ID. A single unreadable subtree is skipped, never failing
+	// the whole scan (the corrupt-claim repair path).
+	walkErr := filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if d != nil && d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() || d.Name() != "runtime.json" {
+			return nil
+		}
+		rel, relErr := filepath.Rel(base, filepath.Dir(path))
+		if relErr != nil || rel == "." {
+			return nil
+		}
+		ids = append(ids, filepath.ToSlash(rel))
+		return nil
+	})
+	if walkErr != nil {
+		if os.IsNotExist(walkErr) {
 			return nil, nil
 		}
-		return nil, err
-	}
-	var ids []string
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		if _, statErr := os.Stat(cp.GetRuntimeStatePath(e.Name())); statErr == nil {
-			ids = append(ids, e.Name())
-		}
+		return nil, walkErr
 	}
 	sort.Strings(ids)
 	return ids, nil

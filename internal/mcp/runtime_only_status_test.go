@@ -120,6 +120,32 @@ func TestSingleIDStatusAddressesRuntimeOnlyClaim(t *testing.T) {
 	}
 }
 
+// A slash-containing game ID (design-legal) must survive the whole runtime-only
+// arc: no-arg discovery, single-ID status, and stop addressability — the storage
+// key decodes back to the exact ID (round-19 P1 regression fix).
+func TestRuntimeOnlySlashIDLifecycle(t *testing.T) {
+	tmpDir := t.TempDir()
+	seedRuntimeOnlyClaim(t, tmpDir, "factory/old")
+
+	gamesConfig := &config.GamesConfig{Games: map[string]config.GameConfig{}}
+	server := NewServerForTesting(t, util.NewLogger("error"))
+	server.SetConfigDir(tmpDir)
+	server.RegisterGameManagementTools(gamesConfig, 10*time.Millisecond, 20*time.Millisecond)
+
+	statusAll := marshalMessage(t, server.HandleMessage(noArgStatusMessage("all")))
+	if !strings.Contains(statusAll, "factory/old") {
+		t.Fatalf("no-arg status must discover the slash-ID runtime-only claim: %s", statusAll)
+	}
+	statusOne := marshalMessage(t, server.HandleMessage(toolCallMessage("one", "games.status", "factory/old")))
+	if strings.Contains(statusOne, "not found") || strings.Contains(statusOne, `"isError":true`) {
+		t.Fatalf("a slash ID must be addressable for status: %s", statusOne)
+	}
+	stopText := marshalMessage(t, server.HandleMessage(toolCallMessage("stop", "games.stop", "factory/old")))
+	if strings.Contains(stopText, "not found") {
+		t.Fatalf("a slash ID must be addressable for stop: %s", stopText)
+	}
+}
+
 // Runtime-only claims must go through the SAME concurrent status pool as
 // configured games (design/10, round-19 P2): three removed claims with slow
 // pinned status hooks must total ~one probe interval, not the serial sum.

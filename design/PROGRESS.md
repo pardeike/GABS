@@ -799,7 +799,7 @@ contract, not a scratchpad.
       is reproduced with targeted `set`; Windows filtering-full is the
       existing forwarding-wrapper cell, and the verdict logic itself is
       unit-tested cross-platform in context_delivery_test.go)
-- [~] M2.13 repair --forget-runtime + no-arg games_status union of
+- [x] M2.13 repair --forget-runtime + no-arg games_status union of
       runtime-only claims — spec: 07, 10; tests: T-RT
       (process.ListRuntimeClaimIDs enumerates persisted claims; no-arg
       games_status unions configured entries with runtime-only claims
@@ -830,7 +830,20 @@ contract, not a scratchpad.
       / history-write failure). (P2) runtime-only rows now probe through the SAME
       concurrent status pool (3 slow-hook claims ~2s, not ~6s), and a corrupt
       claim renders unknown + the repair command, not silent-unknown + stop/kill.
-      Stays [~] until adjudicated; M2.14/M2.15 proceed meanwhile.)
+      ROUND-19 ADJUDICATION: the one-component grammar wrongly rejected
+      design-legal slash IDs (e.g. "factory/old" loaded + listed but games_start
+      failed). FIX: ValidateGameID no longer redefines the public ID grammar as a
+      filesystem grammar — it rejects only empty/NUL/absolute; SafeGameDir
+      confines the runtime dir structurally (LEXICAL filepath.Join containment
+      rejects `..`, plus a SYMLINK check on the deepest existing ancestor so a
+      symlinked intermediate cannot redirect even a not-yet-created leaf — the
+      create path via EnsureGameDir is not exempt). A nested `/` ID maps to a
+      nested runtime dir (no migration; existing dirs stay natural, unlike an
+      encoding that would orphan slash-ID history); ListRuntimeClaimIDs walks
+      recursively and decodes the storage key back to the exact ID. Slash-ID
+      lifecycle regression (claim/exists/load/enumerate/remove, MCP
+      discovery/status/stop, CLI forget) plus retained ../victim / absolute /
+      symlink rejections. M2.14/M2.15 proceed.)
 - [x] M2.14 Remove M1 lifecycle feature gate — spec: 21; tests: T-VAL
       update
       (the M2 lifecycle runtime executes, so the gate that rejected `lifecycle`

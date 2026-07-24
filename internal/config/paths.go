@@ -8,46 +8,69 @@ import (
 	"strings"
 )
 
-// ValidateGameID enforces the one-component game-ID grammar that keeps a raw
-// MCP/CLI identifier from escaping the config base (design/07): a game ID is a
-// single path component — never empty, "." / "..", or containing a path
-// separator or NUL. With this, filepath.Join(base, id) is LEXICALLY always a
-// direct child of base, so no traversal component can reach a filesystem op.
+// ValidateGameID rejects only the identifiers that can never be a runtime path:
+// empty, a NUL byte, or an ABSOLUTE path (leading separator or a Windows drive).
+// Game IDs are otherwise arbitrary public strings (design/01: "existing configs
+// remain valid, untouched"; RFC 6901 attribution supports `/` and `~`), so a
+// nested `/` ID is legal and maps to a nested runtime directory. Traversal and
+// containment are enforced structurally by SafeGameDir, never by a character
+// grammar — redefining the ID grammar as a filesystem grammar breaks accepted
+// configs (round-19 regression).
 func ValidateGameID(gameID string) error {
-	switch {
-	case gameID == "":
+	if gameID == "" {
 		return fmt.Errorf("game ID is required")
-	case gameID == "." || gameID == "..":
-		return fmt.Errorf("invalid game ID %q", gameID)
-	case strings.ContainsAny(gameID, `/\`):
-		return fmt.Errorf("game ID %q must not contain a path separator", gameID)
-	case strings.ContainsRune(gameID, 0):
+	}
+	if strings.ContainsRune(gameID, 0) {
 		return fmt.Errorf("game ID %q must not contain a NUL byte", gameID)
+	}
+	if isAbsoluteID(gameID) {
+		return fmt.Errorf("game ID %q must not be an absolute path", gameID)
 	}
 	return nil
 }
 
-// SafeGameDir validates gameID and returns its game directory, proving the
-// directory — when it already exists — resolves through any symlink beneath the
-// canonical config base (design/07): a symlinked game dir must never redirect a
-// read/lock/removal outside the base. A not-yet-existing dir passes on the
-// grammar alone (the create path), since EvalSymlinks cannot resolve it and the
-// grammar already guarantees a direct child.
+// isAbsoluteID reports whether the ID is an absolute path on any platform — a
+// leading separator, or a Windows drive prefix like "C:" — which would escape
+// the config base under filepath.Join on that platform.
+func isAbsoluteID(id string) bool {
+	if strings.HasPrefix(id, "/") || strings.HasPrefix(id, `\`) {
+		return true
+	}
+	if len(id) >= 2 && id[1] == ':' &&
+		((id[0] >= 'A' && id[0] <= 'Z') || (id[0] >= 'a' && id[0] <= 'z')) {
+		return true
+	}
+	return false
+}
+
+// SafeGameDir validates gameID and returns its runtime directory, proving it
+// stays beneath the canonical config base (design/07) through two layers:
+//   - LEXICAL: filepath.Join cleans the ID, so a `..` traversal escapes the base
+//     and is rejected before any filesystem op; a plain nested `/` ID stays a
+//     descendant (base/factory/old).
+//   - SYMLINK: the deepest EXISTING ancestor of the directory is resolved and
+//     must lie within the resolved base, so a symlinked intermediate cannot
+//     redirect a read/write/lock/removal outside the base even when the leaf does
+//     not exist yet (the create path is not exempt).
 func (cp *ConfigPaths) SafeGameDir(gameID string) (string, error) {
 	if err := ValidateGameID(gameID); err != nil {
 		return "", err
 	}
-	dir := cp.GetGameDir(gameID)
-	resolvedDir, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		return dir, nil // does not exist yet: grammar alone confines it
+	dir := filepath.Join(cp.baseDir, gameID)
+	if !pathStrictlyWithinBase(filepath.Clean(cp.baseDir), dir) {
+		return "", fmt.Errorf("game ID %q resolves outside the config base", gameID)
 	}
-	resolvedBase, err := filepath.EvalSymlinks(cp.baseDir)
-	if err != nil {
+	// Resolve base and the dir's deepest existing ancestor the SAME way, so a
+	// not-yet-created base (or a macOS /var → /private/var base) does not read as
+	// an escape.
+	resolvedBase, ok := deepestExistingResolved(cp.baseDir)
+	if !ok {
 		resolvedBase = filepath.Clean(cp.baseDir)
 	}
-	if !pathWithinBase(resolvedBase, resolvedDir) {
-		return "", fmt.Errorf("game ID %q resolves outside the config base", gameID)
+	if resolvedAncestor, ok := deepestExistingResolved(dir); ok {
+		if !pathWithinBase(resolvedBase, resolvedAncestor) {
+			return "", fmt.Errorf("game ID %q resolves through a symlink outside the config base", gameID)
+		}
 	}
 	return dir, nil
 }
@@ -61,8 +84,25 @@ func (cp *ConfigPaths) SafeRuntimeStatePath(gameID string) (string, error) {
 	return filepath.Join(dir, "runtime.json"), nil
 }
 
-// pathWithinBase reports whether target is base or a descendant, in the
-// platform's canonical form (case-folded on Windows).
+// deepestExistingResolved resolves the symlinks of the deepest existing ancestor
+// of p (p itself when it exists), so a not-yet-existing leaf cannot defeat the
+// symlink containment check.
+func deepestExistingResolved(p string) (string, bool) {
+	for {
+		if resolved, err := filepath.EvalSymlinks(p); err == nil {
+			return resolved, true
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return "", false
+		}
+		p = parent
+	}
+}
+
+// pathWithinBase reports whether target is base or a descendant (case-folded on
+// Windows) — used for the symlink-ancestor check, where base itself is a valid
+// ancestor of a not-yet-created dir.
 func pathWithinBase(base, target string) bool {
 	if runtime.GOOS == "windows" {
 		base = strings.ToLower(base)
@@ -73,6 +113,20 @@ func pathWithinBase(base, target string) bool {
 		return false
 	}
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+// pathStrictlyWithinBase is pathWithinBase but requires a PROPER descendant
+// (never base itself) — a game directory must be under base, not base.
+func pathStrictlyWithinBase(base, target string) bool {
+	if runtime.GOOS == "windows" {
+		base = strings.ToLower(base)
+		target = strings.ToLower(target)
+	}
+	rel, err := filepath.Rel(base, target)
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // ConfigPaths provides centralized configuration directory and path resolution
@@ -133,7 +187,10 @@ func (cp *ConfigPaths) GetHistoryPath(gameID string) string {
 // so it is private (0700) and pre-existing looser modes are tightened —
 // failure to tighten is an error, never silently ignored (design/07).
 func (cp *ConfigPaths) EnsureGameDir(gameID string) error {
-	gameDir := cp.GetGameDir(gameID)
+	gameDir, err := cp.SafeGameDir(gameID)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(gameDir, 0o700); err != nil {
 		return err
 	}
