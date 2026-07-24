@@ -1020,71 +1020,79 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				StructuredContent: statusItem,
 			}, nil
 		} else {
-			// Check all games. Probes run concurrently, each bounded by its
-			// own hook timeout (design/10): one game's slow pinned status
-			// hook must not serialize the whole summary. checkGameStatus
-			// holds no server lock while probing, so workers are safe.
-			games := gamesConfig.ListGames()
+			// Check all games — configured entries UNIONED with persisted
+			// runtime-only claims whose config entry was edited away (design/07).
+			// EVERY row probes through ONE bounded worker pool (design/10): a
+			// removed claim's slow pinned status hook must not serialize the
+			// summary any more than a configured game's. checkGameStatus holds no
+			// server lock while probing, so workers are safe. A scan failure is
+			// non-fatal — the configured summary still returns.
 			content.WriteString("Game Status Summary:\n\n")
+			games := gamesConfig.ListGames()
+			type rowSpec struct {
+				gameID     string
+				configured *config.GameConfig // nil for a runtime-only claim
+			}
+			specs := make([]rowSpec, 0, len(games))
+			seen := map[string]bool{}
+			for i := range games {
+				specs = append(specs, rowSpec{gameID: games[i].ID, configured: &games[i]})
+				seen[games[i].ID] = true
+			}
+			if claimIDs, scanErr := process.ListRuntimeClaimIDs(s.configDir); scanErr == nil {
+				for _, id := range claimIDs {
+					if !seen[id] {
+						specs = append(specs, rowSpec{gameID: id})
+					}
+				}
+			}
+
 			type gameStatusRow struct {
 				desc string
 				item map[string]interface{}
 			}
-			rows := make([]gameStatusRow, len(games))
+			rows := make([]gameStatusRow, len(specs))
 			sem := make(chan struct{}, 8)
 			var wg sync.WaitGroup
-			for i := range games {
+			for i := range specs {
 				wg.Add(1)
-				go func(i int, game config.GameConfig) {
+				go func(i int, sp rowSpec) {
 					defer wg.Done()
 					sem <- struct{}{}
 					defer func() { <-sem }()
-					status, statusEv := s.checkGameStatusObserved(game.ID)
-					statusItem := s.gameStatusStructured(game, status)
-					attachStatusEvidence(statusItem, statusEv)
-					if rs, rsErr := process.LoadRuntimeState(game.ID, s.configDir); rsErr == nil && rs != nil {
-						if rs.ConfigRevision != "" {
-							statusItem["activeConfigRevision"] = rs.ConfigRevision
+					if sp.configured != nil {
+						game := *sp.configured
+						status, statusEv := s.checkGameStatusObserved(game.ID)
+						statusItem := s.gameStatusStructured(game, status)
+						statusItem["configured"] = true
+						attachStatusEvidence(statusItem, statusEv)
+						if rs, rsErr := process.LoadRuntimeState(game.ID, s.configDir); rsErr == nil && rs != nil {
+							if rs.ConfigRevision != "" {
+								statusItem["activeConfigRevision"] = rs.ConfigRevision
+							}
+							attachRuntimeLifecycle(statusItem, rs)
 						}
-						attachRuntimeLifecycle(statusItem, rs)
+						rows[i] = gameStatusRow{desc: s.getStatusDescriptionFromStatus(status, &game), item: statusItem}
+						return
 					}
-					rows[i] = gameStatusRow{desc: s.getStatusDescriptionFromStatus(status, &game), item: statusItem}
-				}(i, games[i])
+					item := s.runtimeOnlyStatusItem(sp.gameID)
+					rows[i] = gameStatusRow{desc: fmt.Sprintf("%v", item["statusDescription"]), item: item}
+				}(i, specs[i])
 			}
 			wg.Wait()
 
-			statusItems := make([]map[string]interface{}, 0, len(games))
-			for i, game := range games {
-				rows[i].item["configured"] = true
+			statusItems := make([]map[string]interface{}, 0, len(specs))
+			for i, sp := range specs {
+				prefix := "• **" + sp.gameID + "**"
+				if sp.configured == nil {
+					prefix = "• **" + sp.gameID + "** (unconfigured)"
+				}
 				if diagnosticMessage := gameStateDiagnosticMessage(rows[i].item); diagnosticMessage != "" {
-					content.WriteString(fmt.Sprintf("• **%s**: %s — %s\n", game.ID, rows[i].desc, diagnosticMessage))
+					content.WriteString(fmt.Sprintf("%s: %s — %s\n", prefix, rows[i].desc, diagnosticMessage))
 				} else {
-					content.WriteString(fmt.Sprintf("• **%s**: %s\n", game.ID, rows[i].desc))
+					content.WriteString(fmt.Sprintf("%s: %s\n", prefix, rows[i].desc))
 				}
 				statusItems = append(statusItems, rows[i].item)
-			}
-
-			// Union in persisted claims whose config entry was edited away
-			// (design/07): a removed-but-claimed launch stays discoverable so a
-			// fresh agent can stop it. A scan failure is non-fatal — the
-			// configured summary still returns.
-			configured := map[string]bool{}
-			for _, g := range games {
-				configured[g.ID] = true
-			}
-			if claimIDs, scanErr := process.ListRuntimeClaimIDs(s.configDir); scanErr == nil {
-				for _, id := range claimIDs {
-					if configured[id] {
-						continue
-					}
-					item := s.runtimeOnlyStatusItem(id)
-					if diagnosticMessage := gameStateDiagnosticMessage(item); diagnosticMessage != "" {
-						content.WriteString(fmt.Sprintf("• **%s** (unconfigured): %v — %s\n", id, item["statusDescription"], diagnosticMessage))
-					} else {
-						content.WriteString(fmt.Sprintf("• **%s** (unconfigured): %v\n", id, item["statusDescription"]))
-					}
-					statusItems = append(statusItems, item)
-				}
 			}
 
 			structuredAll := map[string]interface{}{
@@ -3523,21 +3531,37 @@ func (s *Server) gameStatusStructured(game config.GameConfig, status string) map
 // end a launch whose config entry was edited away. Status is resolved from the
 // claim + liveness, never from config (there is none).
 func (s *Server) runtimeOnlyStatusItem(gameID string) map[string]interface{} {
-	status, ev := s.checkGameStatusObserved(gameID)
 	synthetic := config.GameConfig{ID: gameID, Name: gameID}
 	item := map[string]interface{}{
-		"gameId":            gameID,
-		"name":              gameID,
-		"status":            status,
-		"statusDescription": s.getStatusDescriptionFromStatus(status, &synthetic),
-		"configured":        false,
-		"nextActions": []map[string]interface{}{
-			mcpNextAction("games_stop", map[string]interface{}{"gameId": gameID}, "Stop this launch; its config entry was removed but the runtime claim persists."),
-			mcpNextAction("games_kill", map[string]interface{}{"gameId": gameID}, "Force terminate if stop does not end it."),
-		},
+		"gameId":     gameID,
+		"name":       gameID,
+		"configured": false,
+	}
+
+	rs, loadErr := process.LoadRuntimeState(gameID, s.configDir)
+	if loadErr != nil {
+		// Corrupt/unreadable claim: T-RT requires unknown + the repair path.
+		// stop/kill would only return blocked_unknown_state, so surface the CLI
+		// forget command and the unreadable evidence directly instead.
+		item["status"] = "unknown"
+		item["statusDescription"] = "unreadable runtime claim (corrupt); resolve with repair --forget-runtime if the launch is provably gone"
+		item["unreadable"] = loadErr.Error()
+		item["repairCommand"] = fmt.Sprintf("gabs games repair %s --forget-runtime", gameID)
+		item["nextActions"] = []map[string]interface{}{
+			mcpNextAction("games_status", map[string]interface{}{"gameId": gameID}, "Re-read; a transient read error may clear. If it persists, the claim is corrupt — use the repair command above."),
+		}
+		return item
+	}
+
+	status, ev := s.checkGameStatusObserved(gameID)
+	item["status"] = status
+	item["statusDescription"] = s.getStatusDescriptionFromStatus(status, &synthetic)
+	item["nextActions"] = []map[string]interface{}{
+		mcpNextAction("games_stop", map[string]interface{}{"gameId": gameID}, "Stop this launch; its config entry was removed but the runtime claim persists."),
+		mcpNextAction("games_kill", map[string]interface{}{"gameId": gameID}, "Force terminate if stop does not end it."),
 	}
 	attachStatusEvidence(item, ev)
-	if rs, err := process.LoadRuntimeState(gameID, s.configDir); err == nil && rs != nil {
+	if rs != nil {
 		if rs.ConfigRevision != "" {
 			item["activeConfigRevision"] = rs.ConfigRevision
 		}

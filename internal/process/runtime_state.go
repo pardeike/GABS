@@ -23,7 +23,11 @@ func RuntimeClaimExists(gameID, configDir string) bool {
 	if err != nil {
 		return false
 	}
-	_, statErr := os.Stat(cp.GetRuntimeStatePath(gameID))
+	path, err := cp.SafeRuntimeStatePath(gameID)
+	if err != nil {
+		return false // an unsafe ID has no addressable claim
+	}
+	_, statErr := os.Stat(path)
 	return statErr == nil
 }
 
@@ -345,6 +349,9 @@ func NewFencingID() string {
 
 // ClaimRuntimeState creates the shared runtime state file if it does not yet exist.
 func ClaimRuntimeState(gameID, configDir string, state RuntimeState) error {
+	if err := config.ValidateGameID(gameID); err != nil {
+		return err // never create a game dir for a traversal ID
+	}
 	cp, err := config.NewConfigPaths(configDir)
 	if err != nil {
 		return fmt.Errorf("failed to create config paths: %w", err)
@@ -442,6 +449,9 @@ func SaveRuntimeState(gameID, configDir string, state RuntimeState) error {
 			return err
 		}
 	}
+	if err := config.ValidateGameID(gameID); err != nil {
+		return err // never create a game dir for a traversal ID
+	}
 	cp, err := config.NewConfigPaths(configDir)
 	if err != nil {
 		return fmt.Errorf("failed to create config paths: %w", err)
@@ -486,7 +496,10 @@ func LoadRuntimeState(gameID, configDir string) (*RuntimeState, error) {
 		return nil, fmt.Errorf("failed to create config paths: %w", err)
 	}
 
-	path := cp.GetRuntimeStatePath(gameID)
+	path, err := cp.SafeRuntimeStatePath(gameID)
+	if err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -563,7 +576,10 @@ func RemoveRuntimeState(gameID, configDir string) error {
 		return fmt.Errorf("failed to create config paths: %w", err)
 	}
 
-	path := cp.GetRuntimeStatePath(gameID)
+	path, err := cp.SafeRuntimeStatePath(gameID)
+	if err != nil {
+		return err
+	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("failed to remove runtime state: %w", err)
 	}

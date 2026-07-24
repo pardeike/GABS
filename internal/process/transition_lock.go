@@ -32,7 +32,10 @@ func AcquireTransitionLock(gameID, configDir string, timeout time.Duration) (*Tr
 	if err != nil {
 		return nil, fmt.Errorf("failed to create config paths: %w", err)
 	}
-	gameDir := cp.GetGameDir(gameID)
+	gameDir, err := cp.SafeGameDir(gameID)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(gameDir, 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create game dir for transition lock: %w", err)
 	}
@@ -63,7 +66,11 @@ func AcquireTransitionLockIfPresent(gameID, configDir string, timeout time.Durat
 	if err != nil {
 		return nil, fmt.Errorf("failed to create config paths: %w", err)
 	}
-	path := filepath.Join(cp.GetGameDir(gameID), "transition.lock")
+	gameDir, err := cp.SafeGameDir(gameID)
+	if err != nil {
+		return nil, err
+	}
+	path := filepath.Join(gameDir, "transition.lock")
 
 	deadline := time.Now().Add(timeout)
 	for {

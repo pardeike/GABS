@@ -4,7 +4,76 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 )
+
+// ValidateGameID enforces the one-component game-ID grammar that keeps a raw
+// MCP/CLI identifier from escaping the config base (design/07): a game ID is a
+// single path component — never empty, "." / "..", or containing a path
+// separator or NUL. With this, filepath.Join(base, id) is LEXICALLY always a
+// direct child of base, so no traversal component can reach a filesystem op.
+func ValidateGameID(gameID string) error {
+	switch {
+	case gameID == "":
+		return fmt.Errorf("game ID is required")
+	case gameID == "." || gameID == "..":
+		return fmt.Errorf("invalid game ID %q", gameID)
+	case strings.ContainsAny(gameID, `/\`):
+		return fmt.Errorf("game ID %q must not contain a path separator", gameID)
+	case strings.ContainsRune(gameID, 0):
+		return fmt.Errorf("game ID %q must not contain a NUL byte", gameID)
+	}
+	return nil
+}
+
+// SafeGameDir validates gameID and returns its game directory, proving the
+// directory — when it already exists — resolves through any symlink beneath the
+// canonical config base (design/07): a symlinked game dir must never redirect a
+// read/lock/removal outside the base. A not-yet-existing dir passes on the
+// grammar alone (the create path), since EvalSymlinks cannot resolve it and the
+// grammar already guarantees a direct child.
+func (cp *ConfigPaths) SafeGameDir(gameID string) (string, error) {
+	if err := ValidateGameID(gameID); err != nil {
+		return "", err
+	}
+	dir := cp.GetGameDir(gameID)
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return dir, nil // does not exist yet: grammar alone confines it
+	}
+	resolvedBase, err := filepath.EvalSymlinks(cp.baseDir)
+	if err != nil {
+		resolvedBase = filepath.Clean(cp.baseDir)
+	}
+	if !pathWithinBase(resolvedBase, resolvedDir) {
+		return "", fmt.Errorf("game ID %q resolves outside the config base", gameID)
+	}
+	return dir, nil
+}
+
+// SafeRuntimeStatePath is SafeGameDir joined with runtime.json.
+func (cp *ConfigPaths) SafeRuntimeStatePath(gameID string) (string, error) {
+	dir, err := cp.SafeGameDir(gameID)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "runtime.json"), nil
+}
+
+// pathWithinBase reports whether target is base or a descendant, in the
+// platform's canonical form (case-folded on Windows).
+func pathWithinBase(base, target string) bool {
+	if runtime.GOOS == "windows" {
+		base = strings.ToLower(base)
+		target = strings.ToLower(target)
+	}
+	rel, err := filepath.Rel(base, target)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
 
 // ConfigPaths provides centralized configuration directory and path resolution
 type ConfigPaths struct {

@@ -9,6 +9,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -629,15 +630,23 @@ func doctorGame(log util.Logger, gameID string, configDir string) int {
 // reconcile pending history credits — forget exists precisely to clear a claim
 // that fenced removal will not, and a corrupt claim cannot be reconciled.
 func forgetRuntimeClaim(gameID, configDir string, assumeYes bool, in io.Reader, out io.Writer) int {
-	if !process.RuntimeClaimExists(gameID, configDir) {
+	// Read the exact bytes ONCE: the evidence shown and the identity confirmed
+	// are the same bytes, so a successor published mid-prompt cannot be deleted
+	// unseen (round-19 P1).
+	data, digest, found, err := process.ReadRuntimeClaim(gameID, configDir)
+	if err != nil {
+		fmt.Fprintf(out, "Cannot access a runtime claim for '%s': %v\n", gameID, err)
+		return 1
+	}
+	if !found {
 		fmt.Fprintf(out, "No runtime claim for '%s'; nothing to forget.\n", gameID)
 		return 0
 	}
 
-	claim, loadErr := process.LoadRuntimeState(gameID, configDir)
+	claim, parseErr := process.ParseRuntimeClaim(data)
 	fmt.Fprintf(out, "Runtime claim for '%s':\n", gameID)
-	if loadErr != nil || claim == nil {
-		fmt.Fprintf(out, "  (unreadable/corrupt claim: %v)\n", loadErr)
+	if parseErr != nil || claim == nil {
+		fmt.Fprintf(out, "  (unreadable/corrupt claim: %v)\n", parseErr)
 	} else {
 		fmt.Fprintf(out, "  phase:       %s\n", claim.Phase)
 		fmt.Fprintf(out, "  status:      %s\n", claim.Status)
@@ -655,29 +664,55 @@ func forgetRuntimeClaim(gameID, configDir string, assumeYes bool, in io.Reader, 
 	fmt.Fprintf(out, "\nForgetting removes the claim WITHOUT verifying the process is gone.\n")
 	fmt.Fprintf(out, "Only do this if the launch is provably gone.\n")
 
+	reader := bufio.NewReader(in)
 	if !assumeYes {
 		fmt.Fprintf(out, "Forget this runtime claim? [y/N] ")
-		line, _ := bufio.NewReader(in).ReadString('\n')
-		if resp := strings.ToLower(strings.TrimSpace(line)); resp != "y" && resp != "yes" {
+		if !readYes(reader) {
 			fmt.Fprintf(out, "Aborted; the runtime claim was not removed.\n")
 			return 1
 		}
 	}
 
-	// The cross-process (flock) transition lock fences a concurrent server
-	// operation; forget then bypasses the liveness/fencing gates on purpose.
-	lock, err := process.AcquireTransitionLock(gameID, configDir, 5*time.Second)
-	if err != nil {
-		fmt.Fprintf(out, "Could not acquire the transition lock for '%s': %v\n", gameID, err)
+	// The primitive takes the transition lock, verifies the digest still matches,
+	// and reconciles pending credits before removal.
+	err = process.ForceForgetRuntimeClaim(gameID, configDir, digest, false)
+	switch {
+	case err == nil:
+		fmt.Fprintf(out, "Removed the runtime claim for '%s'.\n", gameID)
+		return 0
+	case errors.Is(err, process.ErrForgetClaimChanged):
+		fmt.Fprintf(out, "The runtime claim changed since its evidence was shown (a new launch was published). Re-run to review the current claim.\n")
 		return 1
-	}
-	defer lock.Release()
-	if err := process.RemoveRuntimeState(gameID, configDir); err != nil {
+	case errors.Is(err, process.ErrForgetPendingUnreconciled), errors.Is(err, process.ErrForgetCorruptClaim):
+		fmt.Fprintf(out, "\nWARNING: %v.\n", err)
+		fmt.Fprintf(out, "Removing now DISCARDS any pending history credits (clean stops / verified deliveries) for this claim.\n")
+		if !assumeYes {
+			fmt.Fprintf(out, "Discard pending credits and remove anyway? [y/N] ")
+			if !readYes(reader) {
+				fmt.Fprintf(out, "Aborted; the runtime claim was not removed.\n")
+				return 1
+			}
+		}
+		if derr := process.ForceForgetRuntimeClaim(gameID, configDir, digest, true); derr != nil {
+			if errors.Is(derr, process.ErrForgetClaimChanged) {
+				fmt.Fprintf(out, "The runtime claim changed again; re-run to review it.\n")
+				return 1
+			}
+			fmt.Fprintf(out, "Failed to remove the runtime claim for '%s': %v\n", gameID, derr)
+			return 1
+		}
+		fmt.Fprintf(out, "Removed the runtime claim for '%s' (pending credits discarded).\n", gameID)
+		return 0
+	default:
 		fmt.Fprintf(out, "Failed to remove the runtime claim for '%s': %v\n", gameID, err)
 		return 1
 	}
-	fmt.Fprintf(out, "Removed the runtime claim for '%s'.\n", gameID)
-	return 0
+}
+
+func readYes(r *bufio.Reader) bool {
+	line, _ := r.ReadString('\n')
+	resp := strings.ToLower(strings.TrimSpace(line))
+	return resp == "y" || resp == "yes"
 }
 
 func repairGame(log util.Logger, gameID string, configDir string) int {

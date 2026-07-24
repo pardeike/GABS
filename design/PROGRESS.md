@@ -792,13 +792,14 @@ contract, not a scratchpad.
       PROBE_OUTPUT_FILE across as the test's own reporting channel,
       independent of the GABS channels under test. Windows cmd.exe variants
       (conformance_windows_test.go: for-loop unset of GABS_FORWARD_ENV,
-      `set CONTENT_SET=`, `set HOST_OVERRIDE=`, `start /b`) are
-      observation-only and written-but-unexecuted until the M2.3
+      `set CONTENT_SET=`, `set HOST_OVERRIDE=`, `start /b`) NOW COMPUTE the
+      production verdict (round-18 ArgvPayloadForDigest makes the cmd.exe /c
+      wrapper argv verify) and are written-but-unexecuted until the M2.3
       windows-latest lane runs them — cmd.exe has no `env -i`, so each shape
       is reproduced with targeted `set`; Windows filtering-full is the
       existing forwarding-wrapper cell, and the verdict logic itself is
       unit-tested cross-platform in context_delivery_test.go)
-- [x] M2.13 repair --forget-runtime + no-arg games_status union of
+- [~] M2.13 repair --forget-runtime + no-arg games_status union of
       runtime-only claims — spec: 07, 10; tests: T-RT
       (process.ListRuntimeClaimIDs enumerates persisted claims; no-arg
       games_status unions configured entries with runtime-only claims
@@ -809,12 +810,27 @@ contract, not a scratchpad.
       from the claim + liveness, never config. CLI `gabs games repair <id>
       --forget-runtime` prints the claim's evidence and removes it after
       confirmation (or --yes), operating on the CLAIM not config so a game
-      already edited out — and a corrupt/unreadable claim — is still forgettable;
-      it takes the cross-process transition lock but deliberately bypasses
-      liveness/fencing and does not reconcile pending credits (the escape hatch
-      exists precisely for a claim fenced removal cannot clear). CLI-only — no
-      MCP tool forgets state (design/07:100). Reproduce-first tests for union,
-      single-ID + stop addressability, and forget confirm/abort/corrupt.)
+      already edited out — and a corrupt/unreadable claim — is still forgettable.
+      CLI-only — no MCP tool forgets state (design/07:100).
+      REOPENED round-19, three bounded fixes: (P1 security) the runtime-only /
+      forget / status / stop / kill paths passed a RAW identifier through
+      filepath.Join, so `../victim` and a symlinked game dir escaped the config
+      base (reproduced: forget deleted a sibling). Centralized in
+      config.ValidateGameID (one-component grammar) + ConfigPaths.SafeGameDir
+      (symlink-contain if the dir exists), wired into LoadRuntimeState /
+      RemoveRuntimeState / RuntimeClaimExists / AcquireTransitionLock and the
+      create path; CLI + MCP traversal + symlink regressions. (P1 forget) the CLI
+      removed whatever runtime.json existed AFTER an unbounded prompt and skipped
+      F5 reconciliation — a successor B could be deleted unseen, and a healthy
+      claim's pending credits were silently discarded. Now a process-layer
+      ForceForgetRuntimeClaim binds a raw-bytes digest captured with the shown
+      evidence (ErrForgetClaimChanged on mismatch), reconciles pending credits
+      (creditPendingThenRemoveLocked) for a readable claim, and only discards on
+      an explicit second confirmation when reconciliation is impossible (corrupt
+      / history-write failure). (P2) runtime-only rows now probe through the SAME
+      concurrent status pool (3 slow-hook claims ~2s, not ~6s), and a corrupt
+      claim renders unknown + the repair command, not silent-unknown + stop/kill.
+      Stays [~] until adjudicated; M2.14/M2.15 proceed meanwhile.)
 - [ ] M2.14 Remove M1 lifecycle feature gate — spec: 21; tests: T-VAL
       update
 - [ ] M2.15 EnsureClientRunning demoted to bounded best-effort warning —
