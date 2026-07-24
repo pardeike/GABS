@@ -13,10 +13,13 @@ import (
 // Windows), so a read/tighten should retry rather than fail.
 func isTransientClaimReadError(err error) bool {
 	const (
-		errorSharingViolation = syscall.Errno(32)
+		errorAccessDenied     = syscall.Errno(5)  // a delete-pending file: opens are denied until the delete completes
+		errorSharingViolation = syscall.Errno(32) // a concurrent writer's rename briefly holds it without read-sharing
 		errorLockViolation    = syscall.Errno(33)
 	)
-	return errors.Is(err, errorSharingViolation) || errors.Is(err, errorLockViolation)
+	return errors.Is(err, errorAccessDenied) ||
+		errors.Is(err, errorSharingViolation) ||
+		errors.Is(err, errorLockViolation)
 }
 
 // tightenLegacyClaimPermissions is a no-op on Windows: os.Stat reports every
