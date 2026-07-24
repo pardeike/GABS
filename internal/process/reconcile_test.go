@@ -48,6 +48,65 @@ func TestPendingCleanStopReplayNoDoubleCreditBeyondCap(t *testing.T) {
 	}
 }
 
+// TestInterveningReconcileDoesNotReplayStopCredit is the round-17 F5 P1 (final)
+// reproduction: a stop completion's credit is committed to history but its claim
+// removal fails, so the stop event is durable in history yet was never written
+// to runtime.json. An UNRELATED reconcile of another pending event must not
+// garbage-collect that stop's marker — else the still-current completion,
+// retried, credits the same clean stop twice. The GC must run only after the
+// runtime transition (prune/removal) that de-references the event is durable.
+func TestInterveningReconcileDoesNotReplayStopCredit(t *testing.T) {
+	dir := t.TempDir()
+	const hash = "sha256:ctx"
+	opA := NewFencingID()
+	connB := NewFencingID()
+
+	st := NewRuntimeState(m2Spec("g1"), RuntimeStateStatusRunning)
+	st.Phase = PhaseStopping
+	st.SpawnState = SpawnStateSpawned
+	st.HistoryContextHash = hash
+	st.PendingDeliveries = []PendingCredit{{ID: connB, Profile: "combat", ContextHash: hash}}
+	st.Operation = &RuntimeOperation{
+		OperationID: opA, Action: OperationActionStop,
+		ExecutorPID: os.Getpid(), ExecutorPIDStartTime: 1,
+		AttemptStartedAt: time.Now().UTC(), Deadline: time.Now().UTC().Add(time.Minute),
+	}
+	launchID := st.LaunchID
+	if err := ClaimRuntimeState("g1", dir, st); err != nil {
+		t.Fatal(err)
+	}
+	req := StopRequest{GameID: "g1", ConfigDir: dir, InstanceID: "inst", HistoryProfile: "combat", HistoryContextHash: hash}
+
+	// (1-2) Complete stop A; the removal fails, so A's credit is durable in
+	// history while the durable claim still lists only delivery B.
+	restore := SetRemoveRuntimeStateFailHookForTesting(func() error { return errors.New("unlink down") })
+	err := removeRuntimeStateForStopCompletion(req, launchID, opA)
+	restore()
+	if err == nil {
+		t.Fatal("expected the removal to fail after the credit committed")
+	}
+	if got := cleanStops(t, dir, "g1", "combat"); got != 1 {
+		t.Fatalf("stop A must credit once: got %d", got)
+	}
+	c, _ := LoadRuntimeState("g1", dir)
+	if c == nil || len(c.PendingDeliveries) != 1 {
+		t.Fatalf("the durable claim must still list delivery B: %+v", c)
+	}
+
+	// (3) An unrelated reconcile of delivery B must NOT drop stop A's marker.
+	if err := ReconcilePendingCredits("g1", dir, launchID); err != nil {
+		t.Fatal(err)
+	}
+
+	// (4) Retry the still-current fenced completion A: it must credit nothing.
+	if err := removeRuntimeStateForStopCompletion(req, launchID, opA); err != nil {
+		t.Fatalf("retry must succeed: %v", err)
+	}
+	if got := cleanStops(t, dir, "g1", "combat"); got != 1 {
+		t.Fatalf("intervening reconciliation made the stop credit replay: got %d, want 1", got)
+	}
+}
+
 // TestPendingCleanStopDeleterReplayNoDoubleCredit pins exactly-once on the
 // DELETER path (a verified stop completion): the credit commits inside the lock,
 // then RemoveRuntimeState fails, so the claim survives already-credited — a

@@ -551,7 +551,7 @@ contract, not a scratchpad.
       operation_in_progress/blocked_unknown_state; occupied persistence
       failure is blocked_unknown_state), and the detach s.mu/
       transition-lock inversion is removed)
-- [!] M2.10 History store + classifier + input-combination buckets +
+- [x] M2.10 History store + classifier + input-combination buckets +
       edit notice + causeClass/track-record rendering — spec: 08; tests:
       T-TRACK
       (round 13 reopened. F2: attribution is now a SINGLE central completion
@@ -589,11 +589,11 @@ contract, not a scratchpad.
       event identity — self-contained pending clean-stop/delivery events
       reconciled by every deleter and by games_status, independent of the
       claim's current Operation/Attachment, with a lifetime-coupled dedup that
-      cannot outlive its pending record and a non-dropping append at saturation —
-      see the F5 Deviations entry. M2.10
-      stays [!] pending reviewer sign-off of the round-17 F5 correction (protocol
-      §18: a deviation stays [!] until the adjudicator signs off, not when the
-      implementer believes it resolved))
+      cannot outlive its pending record, a non-dropping append at saturation, and
+      marker GC gated behind (and scoped to) the durable runtime transition so an
+      unrelated reconcile can never drop a not-yet-durable event's marker — see
+      the F5 Deviations entry. F5 signed off by the adjudicator round 17
+      conditional on the green build/vet/full/race gates (protocol §18))
       (F6 RESOLVED by reviewer adjudication: exited_during_start is `game` by
       the evidence-based default — a post-spawn exit is attributed to the
       workload because GABS observes only the first process it created and
@@ -916,9 +916,32 @@ contract, not a scratchpad.
   lifetime through removeRuntimeStateForStopCompletion, not the live reconcile).
   All teeth-checked: a simulated 32-cap eviction reproduces the reviewer's 66/33
   double-credit and 82/41 on the deleter path. Dead ApplyDeliveryVerifiedLocked
-  removed (reconcile inlines the credit). M2.10
-  stays [!] pending reviewer sign-off. Per
-  protocol §18 a deviation stays [!] until the adjudicator signs off.
+  removed (reconcile inlines the credit). ROUND 17 (final F5 finding): the
+  lifetime-coupled dedup was right, but the GC ran in the SAME history write as
+  the credit — a global "retain-live" sweep against the durable claim's pending
+  ids. A stop completion appends its clean-stop event only to the in-memory
+  claim, credits it, then removes the claim; if the removal (or a crash) leaves
+  the event durable in history but NOT in runtime.json, an unrelated reconcile of
+  another pending event rebuilds live from the on-disk claim and drops the stop's
+  marker — the retried, still-current completion then credits the same clean stop
+  twice (reproduced: intervening reconcile -> got 2, want 1). FIX: GC is moved
+  BEHIND the durable runtime transition and SCOPED to the exact records that
+  transition drained — never a global retain-live sweep. creditPendingEventsLocked
+  only credits; ReconcilePendingCredits prunes+saves runtime and THEN GCs only the
+  pruned markers (gcPendingCreditMarkersLocked / dropPendingCreditMarkers); every
+  deleter credits, removes the claim, and THEN GCs only that claim's markers
+  (creditPendingThenRemoveLocked, replacing the three duplicated
+  reconcile-before-remove tails). So a marker for an event that is durable in
+  history but not yet pruned from its own runtime state always survives, and a
+  marker is forgotten only once its record is durably de-referenced. A stale
+  marker left by a crash or a GC-write failure is harmless (event ids are random,
+  never colliding). Permanent regression added:
+  TestInterveningReconcileDoesNotReplayStopCredit (the reviewer's exact 6-step
+  sequence, asserting cleanStops == 1). The reviewer set this as the FINAL F5
+  acceptance condition and pre-authorized closure: with this regression passing
+  and the build/vet/full/race gates green, M2.10 -> [x] in the same commit as the
+  fix (protocol §18 sign-off granted by the adjudicator, conditional on exactly
+  these gates, which are green).
 - 2026-07-22, M2.10, round 12 F3, design/10:37 (authorized codes): two codes
   invented in round 11 were removed. Malformed profile/launchInputs CONTAINER
   arguments (wrong JSON type) now return a plain protocol-level invalid-params

@@ -495,16 +495,11 @@ func removeRuntimeStateGuarded(gameID, configDir, instanceID, launchID, operatio
 		cur.PendingCleanStops = appendPendingCredit(cur.PendingCleanStops,
 			pendingCleanStopEvent(completion.operationID, completion.profile, completion.contextHash, time.Now().UTC()))
 	}
-	if rerr := reconcilePendingBeforeRemoval(gameID, configDir, cur); rerr != nil {
-		// A credit write failed: persist the pending lists (credited entries
-		// already pruned) under THIS lock so a later deleter/status retries; the
-		// save error is surfaced, never discarded (round 16 F5).
-		if serr := SaveRuntimeState(gameID, configDir, *cur); serr != nil {
-			return fmt.Errorf("clean-stop credit failed (%v) and the pending marker could not be persisted: %w", rerr, serr)
-		}
-		return rerr
-	}
-	return RemoveRuntimeState(gameID, configDir)
+	// Credit every pending event, remove the claim, then GC the markers — GC is
+	// gated behind the durable removal so an intervening reconcile can never drop
+	// a marker whose removal has not committed (round 17 F5 P1). A credit failure
+	// persists the pending lists and aborts; a removal failure keeps the markers.
+	return creditPendingThenRemoveLocked(gameID, configDir, cur)
 }
 
 // attachmentBlocksRemoval is the tri-state final-deletion guard (design/04):
@@ -580,18 +575,12 @@ func RemoveRuntimeStateIfCurrent(gameID, configDir, instanceID, launchID string,
 	if attachmentBlocksRemoval(cur.Attachment, instanceID, selfLive) {
 		return ErrFencingViolation
 	}
-	// The status funnel removes a stopped/stale active claim here: reconcile
-	// every pending history event (verified deliveries, clean stops) before
-	// removal so none is lost with the claim (round 16 F5). A credit-write
-	// failure persists the pending lists and aborts, leaving the claim for a
-	// later status retry.
-	if rerr := reconcilePendingBeforeRemoval(gameID, configDir, cur); rerr != nil {
-		if serr := SaveRuntimeState(gameID, configDir, *cur); serr != nil {
-			return fmt.Errorf("pending credit failed (%v) and could not be persisted: %w", rerr, serr)
-		}
-		return rerr
-	}
-	return RemoveRuntimeState(gameID, configDir)
+	// The status funnel removes a stopped/stale active claim here: credit every
+	// pending history event (verified deliveries, clean stops), remove the claim,
+	// then GC the markers behind the durable removal so none is lost with the
+	// claim and none replays (round 16/17 F5). A credit-write failure persists the
+	// pending lists and aborts, leaving the claim for a later status retry.
+	return creditPendingThenRemoveLocked(gameID, configDir, cur)
 }
 
 // runBuiltinAction executes the pinned built-in fallback: the verified

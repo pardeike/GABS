@@ -1,6 +1,9 @@
 package process
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Round-16 F5: verified history events (clean stops, verified deliveries) whose
 // credit failed once are recorded as SELF-CONTAINED pending events on the claim,
@@ -30,16 +33,16 @@ func appendPendingCredit(list []PendingCredit, e PendingCredit) []PendingCredit 
 
 // creditPendingEventsLocked credits every pending clean-stop and delivery on cur
 // in ONE history write (round 17 F5): each is credited by its own self-contained
-// coordinates, idempotent by a lifetime-coupled marker (CreditedPendingEvents)
-// that is GC'd against the claim's current pending ids in the SAME write — so
-// the dedup identity is durable exactly as long as the pending record it guards,
-// never dropped by an LRU while the record can still replay. Does NOT prune
-// cur's pending lists: the caller prunes them and persists runtime AFTER this
-// (or removes the claim); until that prune is durable the markers keep the
-// credit idempotent, and are GC'd once the pending records are gone. MUST hold
-// the per-game transition lock.
+// coordinates, idempotent by a lifetime-coupled marker (CreditedPendingEvents).
+// It does NOT garbage-collect markers and does NOT prune cur's pending lists —
+// the caller must first make the runtime transition durable (prune+save, or
+// claim removal) and only THEN GC the drained markers via
+// gcPendingCreditMarkersLocked. Crediting-then-GCing in one write is the round-17
+// P1 bug: a just-credited event that is not yet durable in runtime (an appended
+// completion whose removal has not committed) would have its marker dropped by an
+// unrelated reconcile, letting the still-current event replay. MUST hold the
+// per-game transition lock.
 func creditPendingEventsLocked(gameID, configDir string, cur *RuntimeState) error {
-	live := livePendingMarkers(cur)
 	return applyHistoryLocked(gameID, configDir, func(h *GameHistory) {
 		for _, p := range cur.PendingDeliveries {
 			e := h.entryForContext(p.Profile, p.ContextHash)
@@ -53,35 +56,67 @@ func creditPendingEventsLocked(gameID, configDir string, cur *RuntimeState) erro
 				e.CleanStops++
 			}
 		}
-		// GC: a marker whose pending record is no longer on the claim is durably
-		// unreplayable and safe to forget, keeping the marker set a bounded
-		// subset of the current pending ids.
+	})
+}
+
+// pendingMarkerKeys is the "kind:id" marker set for the claim's CURRENT pending
+// records — the exact set a prune/removal of cur DE-REFERENCES, and therefore the
+// only markers a following GC may drop.
+func pendingMarkerKeys(cur *RuntimeState) map[string]bool {
+	keys := make(map[string]bool, len(cur.PendingDeliveries)+len(cur.PendingCleanStops))
+	for _, p := range cur.PendingDeliveries {
+		keys["delivery:"+p.ID] = true
+	}
+	for _, p := range cur.PendingCleanStops {
+		keys["stop:"+p.ID] = true
+	}
+	return keys
+}
+
+// gcPendingCreditMarkersLocked drops exactly the credited-event markers named in
+// drained — the records a just-committed prune/removal made durably unreferenced
+// (round 17 P1). It is SCOPED: it never touches a marker outside drained, so a
+// pending event on another path (durable in history but not yet in this claim's
+// runtime state) keeps its marker. Run ONLY after the runtime transition is
+// durable. MUST hold the transition lock.
+func gcPendingCreditMarkersLocked(gameID, configDir string, drained map[string]bool) error {
+	if len(drained) == 0 {
+		return nil
+	}
+	return applyHistoryLocked(gameID, configDir, func(h *GameHistory) {
 		for _, e := range h.Profiles {
-			e.retainPendingCreditMarkers(live)
+			e.dropPendingCreditMarkers(drained)
 		}
 	})
 }
 
-// livePendingMarkers is the "kind:id" marker set for the claim's CURRENT pending
-// records — the markers whose credit could still replay.
-func livePendingMarkers(cur *RuntimeState) map[string]bool {
-	live := make(map[string]bool, len(cur.PendingDeliveries)+len(cur.PendingCleanStops))
-	for _, p := range cur.PendingDeliveries {
-		live["delivery:"+p.ID] = true
+// creditPendingThenRemoveLocked credits every pending history event on cur, then
+// removes the claim, then GCs those markers — in that DURABLE order (round 17
+// F5 P1). GC runs only AFTER the removal is durable, so an intervening reconcile
+// of an unrelated claim can never drop a marker whose runtime transition has not
+// committed (a premature GC lets the still-current event replay and double-count).
+// A credit-write failure persists the pending lists and ABORTS removal, leaving
+// the claim + its durable pending records for a later retry — nothing is lost
+// with the deleted claim. A removal failure leaves the credited markers intact
+// (a stale marker is harmless — event ids are random — but a premature GC is
+// not). MUST hold the transition lock; cur is the loaded claim, with any
+// completion event already appended.
+func creditPendingThenRemoveLocked(gameID, configDir string, cur *RuntimeState) error {
+	drained := pendingMarkerKeys(cur)
+	if rerr := creditPendingEventsLocked(gameID, configDir, cur); rerr != nil {
+		if serr := SaveRuntimeState(gameID, configDir, *cur); serr != nil {
+			return fmt.Errorf("pending credit failed (%v) and could not be persisted: %w", rerr, serr)
+		}
+		return rerr
 	}
-	for _, p := range cur.PendingCleanStops {
-		live["stop:"+p.ID] = true
+	if err := RemoveRuntimeState(gameID, configDir); err != nil {
+		return err // credited markers retained; a stale marker after a failed removal is harmless
 	}
-	return live
-}
-
-// reconcilePendingBeforeRemoval credits every pending event on cur under the
-// transition lock immediately BEFORE the claim is removed (round 16 F5). If the
-// credit write fails it returns the error so the caller ABORTS removal, leaving
-// the claim + its durable pending records for a later retry — no verified event
-// is ever lost with the deleted claim. cur is loaded under the lock.
-func reconcilePendingBeforeRemoval(gameID, configDir string, cur *RuntimeState) error {
-	return creditPendingEventsLocked(gameID, configDir, cur)
+	// The removal is durable: the claim no longer references these events, so
+	// their markers are safe to forget. A GC-write failure only leaves harmless
+	// stale markers, so it must not fail the already-durable removal.
+	_ = gcPendingCreditMarkersLocked(gameID, configDir, drained)
+	return nil
 }
 
 // pendingDeliveryEvent builds a self-contained pending delivery credit for a
@@ -126,6 +161,7 @@ func ReconcilePendingCredits(gameID, configDir, launchID string) error {
 	if len(cur.PendingCleanStops) == 0 && len(cur.PendingDeliveries) == 0 {
 		return nil
 	}
+	drained := pendingMarkerKeys(cur)
 	if err := creditPendingEventsLocked(gameID, configDir, cur); err != nil {
 		return err
 	}
@@ -135,7 +171,16 @@ func ReconcilePendingCredits(gameID, configDir, launchID string) error {
 	// re-credits nothing).
 	cur.PendingDeliveries = nil
 	cur.PendingCleanStops = nil
-	return SaveRuntimeState(gameID, configDir, *cur)
+	if err := SaveRuntimeState(gameID, configDir, *cur); err != nil {
+		return err
+	}
+	// The prune is durable: these events are gone from runtime state, so GC only
+	// THEIR markers. A scoped drop (not a global retain-live sweep) is essential —
+	// a marker for an event on another path that is durable in history but not yet
+	// pruned from its own claim must survive (round 17 P1). A GC-write failure
+	// only leaves harmless stale markers.
+	_ = gcPendingCreditMarkersLocked(gameID, configDir, drained)
+	return nil
 }
 
 // AppendPendingDelivery evaluates the welcome report against the claim's PINNED

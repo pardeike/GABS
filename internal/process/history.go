@@ -103,17 +103,16 @@ type HistoryEntry struct {
 	// CreditedPendingEvents are the delivery/clean-stop events already counted
 	// whose replay source is a DURABLE pending record on the claim (round 17
 	// F5). Keyed "delivery:connectionID" / "stop:operationID". This set is NOT
-	// LRU-capped: it is lifetime-coupled to the pending records. Reconciliation
-	// GCs a marker exactly when its pending record is durably gone (every
-	// reconcile prunes ALL entries against the current claim's live ids), so a
-	// marker can never be evicted while the record it guards can still replay —
-	// the invariant an LRU would break. A just-credited batch's markers persist
-	// until the next reconcile of this entry prunes them (bounded by one claim's
-	// events, and dropped on the next launch's first reconcile); they cannot
-	// suppress a future credit because every id is a fresh 128-bit random
-	// (NewFencingID) that a parked marker can never collide with. That is the
-	// per-pending-record "credited" bit, stored history-side for atomicity with
-	// the counter.
+	// LRU-capped: it is lifetime-coupled to the pending records. A marker is
+	// dropped (gcPendingCreditMarkersLocked) only AFTER the runtime transition
+	// that de-references its record — a prune+save or a claim removal — is
+	// durable, and only for the exact records that transition drained. So a
+	// marker can never be evicted while the record it guards can still replay,
+	// and an unrelated reconcile can never drop a marker whose runtime transition
+	// has not yet committed (round 17 P1). A stale marker left by a GC-write
+	// failure is harmless: every id is a fresh 128-bit random (NewFencingID) that
+	// a future event can never collide with. That is the per-pending-record
+	// "credited" bit, stored history-side for atomicity with the counter.
 	CreditedPendingEvents []string `json:"creditedPendingEvents,omitempty"`
 }
 
@@ -138,8 +137,9 @@ func (e *HistoryEntry) creditEventOnce(key string) bool {
 
 // markPendingCreditOnce reports whether key is a NEW pending-event credit for
 // this entry, recording it WITHOUT an LRU cap (round 17 F5): the marker is
-// GC'd by retainPendingCreditMarkers when its pending record is durably gone, so
-// it must never be dropped by recency while the record can still replay.
+// GC'd by dropPendingCreditMarkers only after its pending record's runtime
+// transition is durable, so it must never be dropped by recency while the record
+// can still replay.
 func (e *HistoryEntry) markPendingCreditOnce(key string) bool {
 	if key == "" {
 		return true
@@ -153,17 +153,19 @@ func (e *HistoryEntry) markPendingCreditOnce(key string) bool {
 	return true
 }
 
-// retainPendingCreditMarkers drops every pending-credit marker whose id is not
-// in live — those pending records are durably gone, so their credit can never
-// replay and the marker is safe to forget (round 17 F5). This keeps the marker
-// set a bounded subset of the claim's current pending ids.
-func (e *HistoryEntry) retainPendingCreditMarkers(live map[string]bool) {
+// dropPendingCreditMarkers removes exactly the markers named in drained — the
+// pending records a just-committed prune/removal made durably unreferenced
+// (round 17 F5 P1). It is SCOPED, never a retain-live sweep: a marker outside
+// drained belongs to an event on another path that may be durable in history but
+// not yet pruned from its own claim, and dropping it early would let that event
+// replay and double-count.
+func (e *HistoryEntry) dropPendingCreditMarkers(drained map[string]bool) {
 	if len(e.CreditedPendingEvents) == 0 {
 		return
 	}
 	kept := e.CreditedPendingEvents[:0]
 	for _, k := range e.CreditedPendingEvents {
-		if live[k] {
+		if !drained[k] {
 			kept = append(kept, k)
 		}
 	}

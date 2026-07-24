@@ -128,14 +128,25 @@ func TestPendingDeliveryNeverCreditsSuccessorConnection(t *testing.T) {
 	if err := ReconcilePendingCredits("g1", dir, lid); err != nil {
 		t.Fatal(err)
 	}
+	// Exactly A's pending delivery credits — the credit is keyed by the pending
+	// record's own connection id (conn-A), never the current attachment (conn-B),
+	// so B can never be credited from A's verdict. The counter is the durable
+	// proof; A's marker is GC'd behind the durable prune (round 17 P1 ordering).
 	if got := deliveriesVerified(t, dir, "g1", ""); got != 1 {
 		t.Fatalf("exactly A's delivery must credit, got %d", got)
 	}
-	if !creditedDelivery(t, dir, "g1", "", "conn-A") {
-		t.Fatal("delivery:conn-A must be credited")
-	}
 	if creditedDelivery(t, dir, "g1", "", "conn-B") {
 		t.Fatal("delivery:conn-B must NEVER be credited from A's verdict")
+	}
+	if creditedDelivery(t, dir, "g1", "", "conn-A") {
+		t.Fatal("A's marker must be GC'd after its record is durably pruned")
+	}
+	// Idempotent: a replay finds the record pruned and re-credits nothing.
+	if err := ReconcilePendingCredits("g1", dir, lid); err != nil {
+		t.Fatal(err)
+	}
+	if got := deliveriesVerified(t, dir, "g1", ""); got != 1 {
+		t.Fatalf("replay must not double-credit A, got %d", got)
 	}
 }
 
