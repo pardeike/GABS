@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pardeike/gabs/internal/launch"
 )
@@ -290,6 +291,70 @@ func TestConformanceAppBundleExecutesInnerBinary(t *testing.T) {
 	d := digestsForProbe(t, c, spec)
 	if v := EvaluateContextDelivery(d, observedFromReport(report, d)); v.Overall != DeliveryVerified {
 		t.Fatalf("delivery through the .app inner binary must verify: %s (%v)", v.Overall, v.Channels)
+	}
+}
+
+// Detached chain (double-fork) with a pinned status hook (design/03, T-DELIV):
+// the launcher backgrounds the workload and exits, so the direct child is
+// reaped; the injected context still arrives, and the production liveness rule
+// (EvaluateLiveness — the Stage-4 status path) keeps the workload alive via the
+// status-hook tier even though the direct child's PID is gone. This is the
+// "status-hook liveness continues after the direct child exits" case the first
+// pass omitted.
+func TestConformanceDetachedStatusHookLivenessContinues(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sh double-fork wrapper; the cmd.exe start variant runs on the Windows CI lane")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	wrapper := filepath.Join(dir, "wrapper.sh")
+	if err := os.WriteFile(wrapper, []byte("#!/bin/sh\n\"$REAL_TARGET\" \"$@\" &\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec := resolvedProbeSpec(t, wrapper, dir, map[string]string{"REAL_TARGET": exe})
+	c := NewController()
+	if err := c.Configure(spec); err != nil {
+		t.Fatal(err)
+	}
+	c.SetBridgeInfo(43210, "test-token")
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	report := waitForProbeReport(t, filepath.Join(dir, "probe.json"))
+	if report.Env["CONTENT_SET"] != "combat" || report.Env["GABS_PROFILE"] != "combat" {
+		t.Fatalf("a detached workload must still receive the injected context: %v", report.Env)
+	}
+
+	// The detaching launcher (the direct child) exits; wait for it to be reaped.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && !c.DirectChildExited() {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !c.DirectChildExited() {
+		t.Fatal("the detaching launcher (direct child) must exit")
+	}
+
+	// A pinned status hook that reports running (exit 0) is now the only live
+	// evidence: EvaluateLiveness must keep the workload running via the hook tier,
+	// not report stopped because the direct child's PID is gone.
+	hook := filepath.Join(dir, "status.sh")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	claim := NewRuntimeState(spec, RuntimeStateStatusRunning)
+	claim.GamePID = c.GetPID() // the now-reaped direct child
+	claim.PIDStartTime = 1
+	ev := EvaluateLiveness(LivenessInput{
+		Claim:            &claim,
+		StatusHook:       &launch.ResolvedHook{Command: hook, RunningExitCodes: []int{0}, StoppedExitCodes: []int{1}},
+		GameID:           "probe-game",
+		CallerInstanceID: "me",
+	})
+	if ev.Verdict != StatusRunning || ev.Source != LivenessSourceStatusHook {
+		t.Fatalf("the pinned status hook must keep the detached workload alive after the direct child exits: %+v", ev)
 	}
 }
 
