@@ -901,16 +901,22 @@ contract, not a scratchpad.
   cap DROPPED it — but the welcome report was already consumed (TakeObservedContext)
   and the clean stop already executed, so a drop is permanent loss, not a loud
   refusal. FIX: appendPendingCredit NEVER drops (dedup by id, no cap); unbounded
-  growth is unreachable because the reconcile after every append drains the list,
-  and a history-write outage that blocks draining also fails the runtime write
-  that stores the pending record (same filesystem) — the list cannot grow while
-  it cannot drain. Reconcile now credits + GCs + prunes in one history write, then
+  growth stays unreachable in normal operation because the reconcile after every
+  append drains the list; only a sustained history-SPECIFIC write outage could
+  grow it, and non-dropping is deliberately correct there (a bounded replayable
+  backlog beats losing an event that already happened). Reconcile now credits +
+  GCs + prunes in one history write, then
   one runtime save; a save failure leaves both the records and their markers, so a
   replay re-credits nothing. Permanent regressions added: the 33/40-event
   runtime-save-failure replay (delivery AND clean-stop, asserting exactly-once
-  beyond the old LRU cap), and the full-list one-shot saturation tests (delivery
-  and clean-stop, asserting the next verified event is preserved not dropped).
-  Dead ApplyDeliveryVerifiedLocked removed (reconcile inlines the credit). M2.10
+  beyond the old LRU cap), the full-list one-shot saturation tests (delivery
+  and clean-stop, asserting the next verified event is preserved not dropped),
+  and a DELETER-path replay (a stop completion whose credit commits but whose
+  RemoveRuntimeState then fails must re-credit nothing on retry — the same
+  lifetime through removeRuntimeStateForStopCompletion, not the live reconcile).
+  All teeth-checked: a simulated 32-cap eviction reproduces the reviewer's 66/33
+  double-credit and 82/41 on the deleter path. Dead ApplyDeliveryVerifiedLocked
+  removed (reconcile inlines the credit). M2.10
   stays [!] pending reviewer sign-off. Per
   protocol §18 a deviation stays [!] until the adjudicator signs off.
 - 2026-07-22, M2.10, round 12 F3, design/10:37 (authorized codes): two codes

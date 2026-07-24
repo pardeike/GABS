@@ -48,6 +48,61 @@ func TestPendingCleanStopReplayNoDoubleCreditBeyondCap(t *testing.T) {
 	}
 }
 
+// TestPendingCleanStopDeleterReplayNoDoubleCredit pins exactly-once on the
+// DELETER path (a verified stop completion): the credit commits inside the lock,
+// then RemoveRuntimeState fails, so the claim survives already-credited — a
+// retry of the completion must re-credit nothing. This exercises the round-17
+// P1 lifetime through stop_gate's removeRuntimeStateForStopCompletion rather
+// than the live ReconcilePendingCredits path.
+func TestPendingCleanStopDeleterReplayNoDoubleCredit(t *testing.T) {
+	dir := t.TempDir()
+	const hash = "sha256:ctx"
+	opID := NewFencingID()
+
+	st := NewRuntimeState(m2Spec("g1"), RuntimeStateStatusRunning)
+	st.Phase = PhaseStopping
+	st.SpawnState = SpawnStateSpawned
+	st.HistoryContextHash = hash
+	for i := 0; i < 40; i++ { // beyond the old LRU cap
+		st.PendingCleanStops = append(st.PendingCleanStops, PendingCredit{ID: fmt.Sprintf("old-%03d", i), Profile: "combat", ContextHash: hash})
+	}
+	st.Operation = &RuntimeOperation{
+		OperationID: opID, Action: OperationActionStop,
+		ExecutorPID: os.Getpid(), ExecutorPIDStartTime: 1,
+		AttemptStartedAt: time.Now().UTC(), Deadline: time.Now().UTC().Add(time.Minute),
+	}
+	launchID := st.LaunchID
+	if err := ClaimRuntimeState("g1", dir, st); err != nil {
+		t.Fatal(err)
+	}
+	req := StopRequest{GameID: "g1", ConfigDir: dir, InstanceID: "inst", HistoryProfile: "combat", HistoryContextHash: hash}
+
+	// Credit commits, but the file removal fails -> the claim survives credited.
+	restore := SetRemoveRuntimeStateFailHookForTesting(func() error { return errors.New("unlink down") })
+	err := removeRuntimeStateForStopCompletion(req, launchID, opID)
+	restore()
+	if err == nil {
+		t.Fatal("expected the removal to fail after the credit committed")
+	}
+	if got := cleanStops(t, dir, "g1", "combat"); got != 41 {
+		t.Fatalf("first pass must credit all 41 clean stops once: got %d", got)
+	}
+	if c, _ := LoadRuntimeState("g1", dir); c == nil {
+		t.Fatal("the claim must survive a removal failure for a later retry")
+	}
+
+	// Retry the same completion: nothing may credit twice, and the claim clears.
+	if err := removeRuntimeStateForStopCompletion(req, launchID, opID); err != nil {
+		t.Fatalf("retry must succeed: %v", err)
+	}
+	if got := cleanStops(t, dir, "g1", "combat"); got != 41 {
+		t.Fatalf("deleter-path replay must not double-credit: got %d, want 41", got)
+	}
+	if c, _ := LoadRuntimeState("g1", dir); c != nil {
+		t.Fatalf("the claim must be removed after the retry: %+v", c)
+	}
+}
+
 // TestPendingCleanStopPreservedAtSaturation is the round-17 F5 P2 reproduction:
 // a verified-termination clean stop must be recorded even when the pending list
 // is already full — the action already executed, so a drop would be permanent
