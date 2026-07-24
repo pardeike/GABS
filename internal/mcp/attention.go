@@ -339,7 +339,7 @@ func buildAttentionBlockedToolResult(gameID string, toolName string, attention *
 	return &ToolResult{
 		Content: []Content{{
 			Type: "text",
-			Text: fmt.Sprintf("Tool call '%s' for game '%s' was not executed because important game information requires acknowledgement.%s Review it with games_get_attention, acknowledge it with games_ack_attention, then retry the original call.", toolName, gameID, summary),
+			Text: fmt.Sprintf("Tool call %q for game %q was not executed because important game information requires acknowledgement.%s Review it with games_get_attention, acknowledge it with games_ack_attention, then retry the original call.", toolName, gameID, summary),
 		}},
 		StructuredContent: map[string]interface{}{
 			"executed":  false,

@@ -191,7 +191,11 @@ contract, not a scratchpad.
       first real run: LoadRuntimeState now retries transient sharing/lock/
       delete-pending (access-denied) violations and the legacy-permission
       tighten is unix-only (Windows protects the token via NTFS ACLs on the
-      private ~/.gabs dir, not unix bits).)
+      private ~/.gabs dir, not unix bits). Round-21 cleared the PR's CodeQL
+      aggregate check (was red): the three json.Number cursor/limit parsers now
+      ParseInt with bitSize 0 so out-of-range values are rejected instead of
+      silently truncated on 32-bit int, three hand-quoted tool-result messages
+      use %q, and test.yml declares permissions: contents: read.)
 - [x] M2.4 Liveness rule incl. attachment lease record, inspection-
       failure=unknown, URL helper PID exclusion — spec: 04; tests:
       T-LIFE, T-FENCE (attachment evidence)

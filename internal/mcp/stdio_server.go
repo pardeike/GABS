@@ -456,7 +456,7 @@ func parseOptionalPositiveIntValue(raw interface{}, key string) (int, bool, *Too
 	var value int
 	switch typed := raw.(type) {
 	case json.Number:
-		parsed, err := strconv.ParseInt(typed.String(), 10, 64)
+		parsed, err := strconv.ParseInt(typed.String(), 10, 0)
 		if err != nil {
 			return 0, false, &ToolResult{
 				Content: []Content{{Type: "text", Text: fmt.Sprintf("Argument '%s' must be an integer", key)}},
@@ -1677,7 +1677,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		var value int
 		switch typed := raw.(type) {
 		case json.Number:
-			parsed, err := strconv.ParseInt(typed.String(), 10, 64)
+			parsed, err := strconv.ParseInt(typed.String(), 10, 0)
 			if err != nil {
 				return 0, false, &ToolResult{
 					Content: []Content{{Type: "text", Text: fmt.Sprintf("Argument '%s' must be an integer", key)}},
@@ -1734,7 +1734,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		var cursor int
 		switch typed := rawCursor.(type) {
 		case json.Number:
-			parsed, err := strconv.ParseInt(typed.String(), 10, 64)
+			parsed, err := strconv.ParseInt(typed.String(), 10, 0)
 			if err != nil {
 				return 0, &ToolResult{
 					Content: []Content{{Type: "text", Text: "Argument 'cursor' must be an integer offset or string cursor"}},
@@ -3823,7 +3823,7 @@ func (s *Server) callDirectGABPTool(gamesConfig *config.GamesConfig, gameIDArg s
 		return nil, false
 	}
 
-	if blocked := s.ensureRuntimeOwnershipForGameCall(gameID, fmt.Sprintf("direct tool '%s'", requested), timeout); blocked != nil {
+	if blocked := s.ensureRuntimeOwnershipForGameCall(gameID, fmt.Sprintf("direct tool %q", requested), timeout); blocked != nil {
 		return blocked, true
 	}
 
@@ -3941,7 +3941,7 @@ func (s *Server) resolveDirectGABPToolGame(gamesConfig *config.GamesConfig, game
 	if len(matches) > 1 {
 		sort.Strings(matches)
 		// GABS-owned caller error: ambiguous tool reference (round 14 F2, CauseCall).
-		return "", s.gabsCallToolFailure("", fmt.Sprintf("Tool '%s' matched multiple connected games (%s). Include gameId.", requested, strings.Join(matches, ", ")), process.CauseCall), true
+		return "", s.gabsCallToolFailure("", fmt.Sprintf("Tool %q matched multiple connected games (%s). Include gameId.", requested, strings.Join(matches, ", ")), process.CauseCall), true
 	}
 
 	if len(connectedGameIDs) == 1 {
