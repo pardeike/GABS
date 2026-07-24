@@ -114,7 +114,21 @@ func LibraryFolders() ([]string, error) {
 	return nil, nil
 }
 
-func EnsureClientRunning() error {
+// ClientRunning reports whether a Steam client process is observable — the
+// store-launcher advisory scan (design/05). Injectable for tests via
+// SetClientControlForTesting.
+func ClientRunning() bool { return clientRunning() }
+
+// EnsureClientRunningWithin is bounded best-effort assistance to bring the Steam
+// client up (design/05, M2.15). It NEVER waits past budget — the caller charges
+// it against the persisted operation deadline so the accepted operation cannot
+// expire before spawn (the single-budget rule). Its failure or timeout is
+// advisory: the caller renders the single Stage-2 warning, never a start failure.
+func EnsureClientRunningWithin(budget time.Duration) error {
+	if budget <= 0 {
+		return fmt.Errorf("no time budget for Steam client assistance")
+	}
+	deadline := time.Now().Add(budget)
 	wasRunning := clientRunning()
 	cmdName, args, err := startClientCommand()
 	if err != nil {
@@ -124,18 +138,29 @@ func EnsureClientRunning() error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start Steam client: %w", err)
 	}
-	go func() {
-		_ = cmd.Wait()
-	}()
+	// Reap the started client so it does not zombie. In production Steam is
+	// long-lived and this waiter runs until it exits; tests inject a
+	// fast-exiting start command so nothing leaks past the test.
+	go func() { _ = cmd.Wait() }()
 	if wasRunning {
-		time.Sleep(warmStartReadyDelay)
+		sleepUntil(deadline, warmStartReadyDelay)
 		return nil
 	}
-	if err := waitForClientRunning(30 * time.Second); err != nil {
+	if err := waitForClientRunning(time.Until(deadline)); err != nil {
 		return err
 	}
-	time.Sleep(coldStartReadyDelay)
+	sleepUntil(deadline, coldStartReadyDelay)
 	return nil
+}
+
+// sleepUntil sleeps for d, clamped so it never passes deadline.
+func sleepUntil(deadline time.Time, d time.Duration) {
+	if remaining := time.Until(deadline); d > remaining {
+		d = remaining
+	}
+	if d > 0 {
+		time.Sleep(d)
+	}
 }
 
 func EnsureAppIDFile(app App) error {

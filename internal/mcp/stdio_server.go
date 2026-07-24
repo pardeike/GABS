@@ -20,6 +20,7 @@ import (
 	"github.com/pardeike/gabs/internal/gabp"
 	"github.com/pardeike/gabs/internal/launch"
 	"github.com/pardeike/gabs/internal/process"
+	"github.com/pardeike/gabs/internal/steam"
 	"github.com/pardeike/gabs/internal/util"
 	"github.com/pardeike/gabs/internal/version"
 )
@@ -5164,6 +5165,19 @@ func (s *Server) startBudgetFor(mode string) time.Duration {
 
 func isURLMode(mode string) bool { return mode == "SteamAppId" || mode == "EpicAppId" }
 
+// isSteamMode is true for both Steam launch modes — both get the store-launcher
+// advisory scan (design/05, M2.15), though only SteamManaged runs assistance.
+func isSteamMode(mode string) bool { return mode == "SteamAppId" || mode == "SteamManaged" }
+
+// steamNotRunningAdvisory is the single Stage-2 warning when the Steam client is
+// not observable at start (design/05).
+const steamNotRunningAdvisory = "Steam does not appear to be running; the launch may stall at login/startup or the game may relaunch itself through Steam"
+
+// steamAssistSpawnHeadroom is reserved out of the operation deadline for the
+// spawn itself, so bounded Steam-client assistance cannot let the accepted
+// operation expire before cmd.Start.
+const steamAssistSpawnHeadroom = 2 * time.Second
+
 func (s *Server) hasLiveGABPClient(gameID string) bool {
 	// GABP evidence requires a claim-bound client (review round 8): a live
 	// socket alone — possibly belonging to an earlier launch — is never
@@ -5221,6 +5235,24 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	opID := runtimeState.Operation.OperationID
 	startWarnings := gateRes.Warnings
 	hc.launchID = launchID
+
+	// Stage 2 store-launcher advisory (design/05, M2.15): for Steam modes, scan
+	// once; if the Steam client is not observable, record the single advisory
+	// warning — and for SteamManaged only, run bounded best-effort assistance
+	// charged against THIS operation's persisted deadline so it cannot expire
+	// before spawn (the single-budget rule). The warning records the observed
+	// preflight condition and stays even if assistance then succeeds; assistance
+	// failure/timeout is advisory, never a start failure.
+	if isSteamMode(game.LaunchMode) && !steam.ClientRunning() {
+		startWarnings = append(startWarnings, steamNotRunningAdvisory)
+		if game.LaunchMode == "SteamManaged" {
+			if budget := time.Until(runtimeState.Operation.Deadline) - steamAssistSpawnHeadroom; budget > 0 {
+				if err := steam.EnsureClientRunningWithin(budget); err != nil {
+					s.log.Debugw("steam client assistance did not complete within budget", "gameId", game.ID, "error", err)
+				}
+			}
+		}
+	}
 
 	cleanupRuntimeState := true
 	// Terminal accepted-attempt failures must be written to history while the

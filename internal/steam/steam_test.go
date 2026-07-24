@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseVDFLibraryFolders(t *testing.T) {
@@ -242,11 +243,38 @@ func TestEnsureClientRunningWaitsForColdStartVisibility(t *testing.T) {
 	)
 	t.Cleanup(restore)
 
-	if err := EnsureClientRunning(); err != nil {
-		t.Fatalf("EnsureClientRunning failed: %v", err)
+	if err := EnsureClientRunningWithin(30 * time.Second); err != nil {
+		t.Fatalf("EnsureClientRunningWithin failed: %v", err)
 	}
 	if runningChecks < 2 {
 		t.Fatalf("expected cold start path to wait for client visibility, got %d checks", runningChecks)
+	}
+}
+
+// EnsureClientRunningWithin must never wait past its budget even when the client
+// never becomes visible — the bound that keeps assistance from expiring the
+// operation deadline (M2.15).
+func TestEnsureClientRunningWithinRespectsBudget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses current test binary as helper command")
+	}
+	restore := SetClientControlForTesting(
+		func() (string, []string, error) {
+			return os.Args[0], []string{"-test.run=TestSteamClientHelper", "--"}, nil
+		},
+		func() bool { return false }, // never becomes visible
+		time.Hour, time.Hour, // large delays that must be clamped to the budget
+	)
+	t.Cleanup(restore)
+
+	start := time.Now()
+	err := EnsureClientRunningWithin(200 * time.Millisecond)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("assistance that never sees the client must return the timeout error")
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("assistance must return within its budget, took %v", elapsed)
 	}
 }
 

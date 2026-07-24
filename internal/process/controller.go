@@ -176,13 +176,10 @@ func (c *Controller) Start() error {
 				c.spec.WorkingDir = app.WorkingDir
 			}
 		}
-		if err := steam.EnsureClientRunning(); err != nil {
-			return &ProcessError{
-				Type:    ProcessErrorTypeStart,
-				Context: fmt.Sprintf("failed to prepare Steam client for %s", c.spec.GameId),
-				Err:     err,
-			}
-		}
+		// EnsureClientRunning is deliberately NOT called here (M2.15): the
+		// Steam-client store-launcher assistance is best-effort Stage-2 work in
+		// the start manager, charged against the operation deadline — never a
+		// spawn-time step that could fail the launch or run twice (design/05).
 		if err := steam.EnsureAppIDFile(*app); err != nil {
 			return &ProcessError{
 				Type:    ProcessErrorTypeConfiguration,

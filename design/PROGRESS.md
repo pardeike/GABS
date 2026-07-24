@@ -859,8 +859,25 @@ contract, not a scratchpad.
       AllowLifecycle test literals became plain ValidationOptions{}. Full config
       and mcp suites green — no existing config regressed from the stricter
       load-path URL-mode check.)
-- [ ] M2.15 EnsureClientRunning demoted to bounded best-effort warning —
+- [x] M2.15 EnsureClientRunning demoted to bounded best-effort warning —
       spec: 05 Stage 2, 20; tests: T-START (Steam advisory)
+      (Controller.Start no longer calls EnsureClientRunning — it could turn
+      assistance failure into spawn_failed or run twice. The store-launcher
+      advisory is now Stage-2 work in the start manager (after GateStart): a
+      Steam mode scans once via steam.ClientRunning() and, if the client is not
+      observable, records exactly one advisory warning; SteamManaged additionally
+      runs steam.EnsureClientRunningWithin(budget) best-effort while SteamAppId
+      does not. CRITICAL timing (reviewer): the assistance is charged against the
+      accepted operation's PERSISTED deadline (time.Until(Operation.Deadline)
+      minus a 2s spawn headroom, skipped if <= 0), never a fresh 30s+20s wait, so
+      it cannot let the operation expire before cmd.Start — reopening the
+      supersession/fencing hole. The warning records the observed preflight
+      condition and stays even if assistance then succeeds; failure/timeout is
+      advisory, never a start failure. Tests: EnsureClientRunningWithin returns
+      within budget on timeout; Controller.Start invokes no assistance;
+      SteamManaged-absent → advisory once + assistance attempted;
+      SteamManaged-present → neither; SteamAppId-absent → advisory but no managed
+      ensure.)
 
 ## Milestone 3 — CLI + docs + skill
 
