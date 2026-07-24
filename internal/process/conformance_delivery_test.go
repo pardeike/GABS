@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/pardeike/gabs/internal/launch"
 )
 
 // M2.12 conformance cells (design/03, T-DELIV): the remaining chain shapes from
@@ -224,6 +226,70 @@ func TestConformanceDetachedWrapper(t *testing.T) {
 	v := EvaluateContextDelivery(d, observedFromReport(report, d))
 	if v.Overall != DeliveryVerified {
 		t.Fatalf("delivery must survive detachment: %s (channels %v; reasons %v)", v.Overall, v.Channels, v.Reasons)
+	}
+}
+
+// Executable .app bundle (design/03 platform rule, T-DELIV): a macOS bundle
+// target resolves to its inner executable (Contents/MacOS, per
+// CFBundleExecutable) via the production resolver and is exec'd directly, so
+// argv+env arrive and delivery verifies — proving actual execution, not just
+// target-string resolution.
+func TestConformanceAppBundleExecutesInnerBinary(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS .app bundle cell")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	app := filepath.Join(dir, "Probe.app")
+	macOS := filepath.Join(app, "Contents", "MacOS")
+	if err := os.MkdirAll(macOS, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inner := filepath.Join(macOS, "probe-inner")
+	if err := os.Symlink(exe, inner); err != nil { // inner binary is the probe
+		t.Fatal(err)
+	}
+	plist := `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>CFBundleExecutable</key><string>probe-inner</string></dict></plist>`
+	if err := os.WriteFile(filepath.Join(app, "Contents", "Info.plist"), []byte(plist), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Production bundle resolution: the .app resolves to its inner executable.
+	resolved := launch.EffectiveDirectPathTarget(app)
+	if resolved != inner {
+		t.Fatalf("bundle resolution = %q, want inner binary %q", resolved, inner)
+	}
+
+	spec := resolvedProbeSpec(t, resolved, dir, nil)
+	c := NewController()
+	if err := c.Configure(spec); err != nil {
+		t.Fatal(err)
+	}
+	c.SetBridgeInfo(43210, "test-token")
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	report := waitForProbeReport(t, filepath.Join(dir, "probe.json"))
+
+	found := false
+	for _, a := range report.Argv {
+		if a == "--data-root" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("argv did not arrive through the .app inner binary: %v", report.Argv)
+	}
+	if report.Env["CONTENT_SET"] != "combat" || report.Env["GABS_PROFILE"] != "combat" {
+		t.Fatalf("env did not arrive through the .app inner binary: %v", report.Env)
+	}
+	d := digestsForProbe(t, c, spec)
+	if v := EvaluateContextDelivery(d, observedFromReport(report, d)); v.Overall != DeliveryVerified {
+		t.Fatalf("delivery through the .app inner binary must verify: %s (%v)", v.Overall, v.Channels)
 	}
 }
 
