@@ -165,7 +165,7 @@ contract, not a scratchpad.
       (rollback restores ownership fields only, never a whole stale
       snapshot, and never deletes or recreates over a current-schema
       claim))
-- [~] M2.3 Hook runner (tree-kill, output capture, Windows Job Objects,
+- [x] M2.3 Hook runner (tree-kill, output capture, Windows Job Objects,
       exit-code contract) — spec: 01; tests: T-LIFE
       (RunStatusHook/RunActionHook in internal/process/hookrunner.go:
       unclassified/timeout/exec-failure = unknown never stopped; Setpgid
@@ -185,9 +185,13 @@ contract, not a scratchpad.
       where all Windows lifecycle code lives, with unix-only tests
       (unix binaries, POSIX mode bits, chmod-0000 semantics) gated by
       GOOS skips; the wider suite's unix-pathed fixtures are future
-      porting work; flip to [x] when the lane is green — unix cells
-      verified locally, Windows cells are written-but-unexecuted until
-      CI runs)
+      porting work. CLOSED: the windows-latest lane is GREEN (PR #67, run
+      30120986500) — the Windows behavioral cells executed and passed. Round-20
+      also fixed the newly-exercised Windows claim-read races surfaced by the
+      first real run: LoadRuntimeState now retries transient sharing/lock/
+      delete-pending (access-denied) violations and the legacy-permission
+      tighten is unix-only (Windows protects the token via NTFS ACLs on the
+      private ~/.gabs dir, not unix bits).)
 - [x] M2.4 Liveness rule incl. attachment lease record, inspection-
       failure=unknown, URL helper PID exclusion — spec: 04; tests:
       T-LIFE, T-FENCE (attachment evidence)
@@ -756,7 +760,7 @@ contract, not a scratchpad.
       constructor, framework-owned temp dirs, tb.Cleanup shutdown registration,
       and synchronized task admission close both the leak and the
       WaitGroup.Add/Wait race → [x])
-- [~] M2.12 Remaining conformance cells (env-dropping, filtering,
+- [x] M2.12 Remaining conformance cells (env-dropping, filtering,
       absent-env reintroduction, detached) — spec: 03; tests: T-DELIV
       (REOPENED round-18: the first pass proved delivery observation +
       verdict per wrapper shape but (1) bypassed the Stage-4 lifecycle so
@@ -798,7 +802,9 @@ contract, not a scratchpad.
       windows-latest lane runs them — cmd.exe has no `env -i`, so each shape
       is reproduced with targeted `set`; Windows filtering-full is the
       existing forwarding-wrapper cell, and the verdict logic itself is
-      unit-tested cross-platform in context_delivery_test.go)
+      unit-tested cross-platform in context_delivery_test.go).
+      CLOSED: the windows-latest lane is GREEN (PR #67, run 30120986500) — the
+      cmd.exe conformance cells executed and their production verdicts passed.)
 - [x] M2.13 repair --forget-runtime + no-arg games_status union of
       runtime-only claims — spec: 07, 10; tests: T-RT
       (process.ListRuntimeClaimIDs enumerates persisted claims; no-arg
