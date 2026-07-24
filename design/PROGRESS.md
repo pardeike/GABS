@@ -764,9 +764,18 @@ contract, not a scratchpad.
       liveness cases were absent, (2) declared the Windows cells
       observation-only over a real production argv gap (the cmd.exe /c
       prefix is digested), and (3) was flipped to [x] on compiled-not-run
-      Windows cells + no executable macOS .app fixture. Correcting all three
-      in one bounded round; stays [~] until the windows-latest lane actually
-      runs, per the adjudicator.)
+      Windows cells + no executable macOS .app fixture. Round-18 correction
+      landed all three: (1) production-path lifecycle cells — an env-scrubbing
+      launcher that exits with its workload observable by name yields an ADOPTED
+      result through the real games.start manager (teeth-checked: no survivor →
+      exited_during_start, not adopted), and a detached double-fork chain whose
+      pinned status hook keeps EvaluateLiveness running after the direct child is
+      reaped; (2) ArgvPayloadForDigest so the documented cmd.exe /c wrapper argv
+      VERIFIES (the Windows cells now compute the production verdict, not
+      observation-only); (3) an executable Probe.app whose inner binary runs via
+      the production resolver, proving argv/env arrival. Unix + macOS cells run
+      locally; the Windows cells' green is the windows-latest lane's to confirm.
+      STAYS [~] until that lane actually runs, per the adjudicator.)
       (conformance_delivery_test.go: each cell spawns the probe through a
       real sh wrapper and evaluates what actually arrived against the
       spawn-pinned digests with the production EvaluateContextDelivery, so
