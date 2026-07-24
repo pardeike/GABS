@@ -78,6 +78,13 @@ func ListRuntimeClaimIDs(configDir string) ([]string, error) {
 	return ids, nil
 }
 
+// Bounded retry for a claim read racing a concurrent write/remove — the write
+// window is one tmp+rename, so a few dozen short retries (~200ms) cover it.
+const (
+	maxClaimReadAttempts = 40
+	claimReadRetryDelay  = 5 * time.Millisecond
+)
+
 // linkRuntimeState and renameRuntimeState are injectable so tests can force
 // the link-less claim fallback and its failure cleanup.
 var (
@@ -515,27 +522,40 @@ func LoadRuntimeState(gameID, configDir string) (*RuntimeState, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("failed to read runtime state: %w", err)
-	}
-	// The claim carries the per-launch token: tighten legacy 0644 files.
-	// Failure to tighten surfaces — the token must not stay world-readable.
-	if fi, statErr := os.Stat(path); statErr == nil && fi.Mode().Perm()&0o077 != 0 {
-		if chmodErr := os.Chmod(path, 0o600); chmodErr != nil {
-			if errors.Is(chmodErr, os.ErrNotExist) {
-				// The file was removed between the read and the tighten (a stop or
-				// a superseding start replaced the claim). The token it held is
-				// gone, so there is nothing to protect and nothing to return —
-				// report no claim, not a spurious hard error. On Windows this
-				// races more often than on unix, where rename is fully atomic.
+	// Read + tighten under a bounded retry: on Windows a concurrent writer's
+	// rename/replace briefly holds runtime.json without read-sharing (a sharing
+	// violation), and a stop/superseding start can remove it between the read and
+	// the tighten. Both are transient — the write window is a single tmp+rename —
+	// so retry rather than surface a spurious hard error. A removed file is no
+	// claim; a legitimate loose-permission file that cannot be tightened still
+	// surfaces (the token must not stay world-readable).
+	var data []byte
+	for attempt := 0; ; attempt++ {
+		var rerr error
+		data, rerr = os.ReadFile(path)
+		if rerr != nil {
+			if errors.Is(rerr, os.ErrNotExist) {
 				return nil, nil
 			}
-			return nil, fmt.Errorf("runtime state %s has loose permissions (%v) that cannot be tightened: %w", path, fi.Mode().Perm(), chmodErr)
+			if isTransientClaimReadError(rerr) && attempt < maxClaimReadAttempts {
+				time.Sleep(claimReadRetryDelay)
+				continue
+			}
+			return nil, fmt.Errorf("failed to read runtime state: %w", rerr)
 		}
+		if fi, statErr := os.Stat(path); statErr == nil && fi.Mode().Perm()&0o077 != 0 {
+			if chmodErr := os.Chmod(path, 0o600); chmodErr != nil {
+				if errors.Is(chmodErr, os.ErrNotExist) {
+					return nil, nil
+				}
+				if isTransientClaimReadError(chmodErr) && attempt < maxClaimReadAttempts {
+					time.Sleep(claimReadRetryDelay)
+					continue
+				}
+				return nil, fmt.Errorf("runtime state %s has loose permissions (%v) that cannot be tightened: %w", path, fi.Mode().Perm(), chmodErr)
+			}
+		}
+		break
 	}
 
 	state, perr := parseRuntimeState(data)
