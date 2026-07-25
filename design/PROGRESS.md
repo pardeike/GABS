@@ -943,8 +943,27 @@ contract, not a scratchpad.
       not change the persisted endpoint). Gate: build, vet, go test ./..., and
       -race on config/process/mcp all green; mcp suite byte-identical (oracle)
       across the extraction.)
-- [ ] M3.2 Profile-aware doctor + --show-last-good + track-record
+- [x] M3.2 Profile-aware doctor + --show-last-good + track-record
       display + conflation lint — spec: 11, 08; tests: T-CLI
+      (cmd/gabs/games_doctor.go. `gabs games doctor <id>` is now profile-aware
+      and, per the advisor's no-early-return structure, reports every diagnostic
+      it can before exiting once: loading the snapshot validates profile/input/
+      hook references (a ValidationError names the JSON path); it resolves every
+      launchable context (default + each named profile), prints resolved hook
+      commands + working dirs, runs the docker/podman stopped-vs-cannot-
+      determine conflation lint (advisory, basename-matched, design/01/20),
+      warns on broadly readable config/runtime files (unix-only — NTFS ACLs
+      govern on Windows), and prints the full per-profile track record
+      unconditionally (readable from history.json regardless of config state).
+      `doctor --show-last-good` prints the last-known-good context per profile
+      and flags when the current context was edited so a human can compare or
+      restore by hand (design/08). It stays CLI-local presentation over the
+      already-shared LoadHistory/launch.Resolve — no shared "diagnostics
+      manager". Tests: cmd/gabs/games_doctor_test.go (conflation unit + profile-
+      aware output + invalid-config-still-prints-track-record + broadly-readable
+      warning + track-record/last-good after a verified start). Gate: build,
+      vet, go test ./..., -race cmd/gabs green; M3.1's mcp oracle unaffected
+      (doctor touches no mcp/lifecycle/process code).)
 - [ ] M3.3 User docs (README, CONFIGURATION, INTEGRATION,
       TROUBLESHOOTING, example-config.json) — spec: 31; gates: genericity
       scan

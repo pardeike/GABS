@@ -333,7 +333,17 @@ func manageGames(ctx context.Context, log util.Logger, opts options, args []stri
 			fmt.Fprintf(os.Stderr, "games doctor requires a game ID\n")
 			return 2
 		}
-		return doctorGame(log, args[1], opts.configDir)
+		showLastGood := false
+		for _, a := range args[2:] {
+			switch a {
+			case "--show-last-good":
+				showLastGood = true
+			default:
+				fmt.Fprintf(os.Stderr, "unknown doctor flag: %s\n", a)
+				return 2
+			}
+		}
+		return runDoctor(log, args[1], opts.configDir, showLastGood)
 	case "repair":
 		if len(args) < 2 {
 			fmt.Fprintf(os.Stderr, "games repair requires a game ID\n")
@@ -578,77 +588,6 @@ func showGame(log util.Logger, gameID string, configDir string) int {
 	return 0
 }
 
-func doctorGame(log util.Logger, gameID string, configDir string) int {
-	gamesConfig, err := config.LoadGamesConfigFromDir(configDir)
-	if err != nil {
-		log.Errorw("failed to load games config", "error", err)
-		return 1
-	}
-
-	game, exists := gamesConfig.GetGame(gameID)
-	if !exists {
-		fmt.Printf("Game '%s' not found.\n", gameID)
-		return 1
-	}
-
-	fmt.Printf("Game: %s\n", game.ID)
-	fmt.Printf("Launch Mode: %s\n", game.LaunchMode)
-	if game.Target != "" {
-		fmt.Printf("Target: %s\n", game.Target)
-	}
-
-	if err := game.Validate(); err != nil {
-		fmt.Printf("Configuration: invalid (%v)\n", err)
-	} else {
-		fmt.Println("Configuration: valid")
-	}
-
-	switch game.LaunchMode {
-	case "SteamAppId":
-		fmt.Println("Steam launch: launcher URL mode")
-		fmt.Println("Bridge environment: not guaranteed on the real game process")
-		app, err := steam.ResolveApp(game.Target)
-		if err != nil {
-			fmt.Printf("Managed Steam readiness: failed (%v)\n", err)
-			return 1
-		}
-		printSteamAppResolution(app)
-		fmt.Printf("Recommended repair: gabs games repair %s\n", game.ID)
-	case "SteamManaged":
-		fmt.Println("Steam launch: managed executable mode")
-		app, err := steam.ResolveApp(game.Target)
-		if err != nil {
-			fmt.Printf("Managed Steam readiness: failed (%v)\n", err)
-			return 1
-		}
-		printSteamAppResolution(app)
-		ok, content, err := steam.CheckAppIDFile(app)
-		if err != nil {
-			fmt.Printf("Steam app id file: unreadable (%v)\n", err)
-			return 1
-		}
-		if ok {
-			fmt.Printf("Steam app id file: ready (%s)\n", app.AppIDFilePath)
-		} else if content == "" {
-			fmt.Printf("Steam app id file: missing (%s)\n", app.AppIDFilePath)
-			fmt.Printf("Recommended repair: gabs games repair %s\n", game.ID)
-		} else {
-			fmt.Printf("Steam app id file: wrong id %q at %s\n", content, app.AppIDFilePath)
-			return 1
-		}
-	default:
-		if game.Target != "" {
-			if _, err := os.Stat(game.Target); err != nil {
-				fmt.Printf("Target path: not found (%v)\n", err)
-				return 1
-			}
-			fmt.Println("Target path: found")
-		}
-	}
-
-	return 0
-}
-
 // forgetRuntimeClaim is the `repair <id> --forget-runtime` escape hatch
 // (design/07:99): it prints the claim's evidence and removes it after
 // confirmation, WITHOUT verifying the process is gone — the human is the gate.
@@ -798,7 +737,12 @@ func showGamesUsage() {
   gabs games add <id>           Add a new game configuration (interactive)
   gabs games remove <id>        Remove a game configuration
   gabs games show <id>          Show details for a game
-  gabs games doctor <id>        Diagnose one game configuration
+  gabs games doctor <id> [--show-last-good]
+                                Diagnose one game (profile-aware): config +
+                                launch target, resolved hooks + conflation
+                                lint, broadly-readable-file warnings, and the
+                                full track record; --show-last-good prints the
+                                last-known-good context for an edited game
   gabs games repair <id>        Apply safe repairs for one game configuration
   gabs games start <id> [--profile NAME] [--input NAME=VALUE]...
                                 Launch a game and verify it started; attachment
