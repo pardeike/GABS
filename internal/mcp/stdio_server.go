@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -499,7 +500,40 @@ func parseOptionalTimeoutSecondsArg(args map[string]interface{}, key string, def
 		return defaultValue, nil
 	}
 
-	return time.Duration(seconds) * time.Second, nil
+	return clampedSecondsToDuration(seconds), nil
+}
+
+// clampedSecondsToDuration / clampedMillisToDuration convert an accepted native
+// integer to a Duration, saturating at the largest representable Duration. A
+// caller can supply a positive integer that, multiplied by time.Second/
+// time.Millisecond, overflows int64 into a NEGATIVE (or unrelated) duration;
+// these keep the value positive and monotonic. addClampedDuration saturates a
+// sum the same way.
+func clampedSecondsToDuration(seconds int) time.Duration {
+	if seconds <= 0 {
+		return 0
+	}
+	if int64(seconds) > int64(math.MaxInt64)/int64(time.Second) {
+		return time.Duration(math.MaxInt64)
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func clampedMillisToDuration(ms int) time.Duration {
+	if ms <= 0 {
+		return 0
+	}
+	if int64(ms) > int64(math.MaxInt64)/int64(time.Millisecond) {
+		return time.Duration(math.MaxInt64)
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+func addClampedDuration(a, b time.Duration) time.Duration {
+	if b > 0 && a > time.Duration(math.MaxInt64)-b {
+		return time.Duration(math.MaxInt64)
+	}
+	return a + b
 }
 
 func deriveMirroredToolCallTimeout(args map[string]interface{}, defaultValue time.Duration) (time.Duration, *ToolResult) {
@@ -508,7 +542,7 @@ func deriveMirroredToolCallTimeout(args map[string]interface{}, defaultValue tim
 	if timeoutMs, hasValue, invalidArg := parseOptionalPositiveIntValue(args["timeoutMs"], "timeoutMs"); invalidArg != nil {
 		return defaultValue, invalidArg
 	} else if hasValue {
-		candidate := time.Duration(timeoutMs)*time.Millisecond + (5 * time.Second)
+		candidate := addClampedDuration(clampedMillisToDuration(timeoutMs), 5*time.Second)
 		if candidate > timeout {
 			timeout = candidate
 		}
@@ -517,7 +551,7 @@ func deriveMirroredToolCallTimeout(args map[string]interface{}, defaultValue tim
 	if timeoutSeconds, hasValue, invalidArg := parseOptionalPositiveIntValue(args["timeout"], "timeout"); invalidArg != nil {
 		return defaultValue, invalidArg
 	} else if hasValue {
-		candidate := time.Duration(timeoutSeconds) * time.Second
+		candidate := clampedSecondsToDuration(timeoutSeconds)
 		if candidate > timeout {
 			timeout = candidate
 		}
@@ -1873,8 +1907,11 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			return entries[cursor:], ""
 		}
 
+		// cursor+limit can overflow int when limit is a native-width extreme
+		// (e.g. MaxInt): the sum wraps negative and would panic at
+		// entries[cursor:end]. end < cursor detects the wrap; clamp to the end.
 		end := cursor + limit
-		if end > len(entries) {
+		if end < cursor || end > len(entries) {
 			end = len(entries)
 		}
 

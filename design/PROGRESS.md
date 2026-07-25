@@ -912,7 +912,7 @@ contract, not a scratchpad.
 
 ## Milestone 3 — CLI + docs + skill
 
-- [x] M3.1 CLI start/status/stop/kill on the shared lifecycle manager +
+- [~] M3.1 CLI start/status/stop/kill on the shared lifecycle manager +
       started_attachment_deferred — spec: 11; tests: T-CLI
       (architecture B. A new internal/lifecycle package holds the typed Manager
       that owns the Stage 1–4 start pipeline + stop/kill/status over the
@@ -954,7 +954,7 @@ contract, not a scratchpad.
       processes, so a claim written by one process is read and cleared by
       independent processes — the portable test-binary-as-game helper lets it
       run on Windows too.)
-- [x] M3.2 Profile-aware doctor + --show-last-good + track-record
+- [~] M3.2 Profile-aware doctor + --show-last-good + track-record
       display + conflation lint — spec: 11, 08; tests: T-CLI
       (cmd/gabs/games_doctor.go. `gabs games doctor <id>` is now profile-aware
       and, per the advisor's no-early-return structure, reports every diagnostic
@@ -975,7 +975,7 @@ contract, not a scratchpad.
       warning + track-record/last-good after a verified start). Gate: build,
       vet, go test ./..., -race cmd/gabs green; M3.1's mcp oracle unaffected
       (doctor touches no mcp/lifecycle/process code).)
-- [x] M3.3 User docs (README, CONFIGURATION, INTEGRATION,
+- [~] M3.3 User docs (README, CONFIGURATION, INTEGRATION,
       TROUBLESHOOTING, example-config.json) — spec: 31; gates: genericity
       scan
       (README: the user-level model + one discovery->start example (games_list
@@ -1021,7 +1021,7 @@ contract, not a scratchpad.
       / unknown — follow nextActions, never relaunch, switch profiles, or start
       a duplicate). Skill validation: frontmatter intact, genericity scan clean
       over skills/gabs-mcp, tool names verified against the code.)
-- [x] M3.5 Acceptance scenario end-to-end — tests: T-ACC
+- [~] M3.5 Acceptance scenario end-to-end — tests: T-ACC
       (cmd/gabs/acceptance_test.go drives the neutral end-to-end scenario
       through the CLI with real processes: (1) two profiles of ONE game launched
       sequentially isolate argv, env, AND cwd — asserted against what a recorder
@@ -1038,7 +1038,7 @@ contract, not a scratchpad.
       and hot-reload by TestDiscoveryUsesPerCallConfig/TestActiveConfigRevision
       Surfaced. Gate: build, vet, -race cmd/gabs green. Skips on Windows — the
       cmd acceptance tests run on the unix CI lanes, matching the M2 pattern.)
-- [x] M3.6 Final regression gate on all three OSes — tests: T-GATE
+- [~] M3.6 Final regression gate on all three OSes — tests: T-GATE
       (TRI-OS GREEN. macOS local gate: go build, go vet, go test ./..., go test
       -race ./..., make build, both genericity checks (in-suite
       TestPublicSurfacesStayGeneric + scripts/genericity-scan.sh, aligned to
