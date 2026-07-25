@@ -39,10 +39,13 @@ jobs:
       - name: Public-surface genericity scan
         run: ./scripts/genericity-scan.sh
 
-  # Windows runs vet/build plus the process package, where all the
-  # Windows-specific lifecycle code lives (Job Objects, LockFileEx,
-  # GetProcessTimes, cmd.exe hooks). The wider suite's fixtures are
-  # unix-pathed and not yet ported; widen this lane as they are.
+  # Windows runs vet/build plus the process, lifecycle, and CLI packages. The
+  # process package holds the Windows-specific lifecycle code (Job Objects,
+  # LockFileEx, GetProcessTimes, cmd.exe hooks); internal/lifecycle and the
+  # cmd/gabs CLI are exercised by their portable tests (the cross-process
+  # subprocess T-CLI uses the test binary itself as the game, so it runs here
+  # too), while unix-script-based cells t.Skip on Windows. The wider internal/mcp
+  # suite's fixtures are still unix-pathed and not yet ported to this lane.
   test-windows:
     runs-on: windows-latest
 
@@ -63,5 +66,5 @@ jobs:
       - name: Build
         run: go build ./...
 
-      - name: Run process lifecycle tests
-        run: go test -v ./internal/process/
+      - name: Run process, lifecycle, and CLI tests
+        run: go test -v ./internal/process/ ./internal/lifecycle/ ./cmd/gabs/

@@ -942,7 +942,18 @@ contract, not a scratchpad.
       now runs through the same lifecycle.Start (the nil-callback delta does
       not change the persisted endpoint). Gate: build, vet, go test ./..., and
       -race on config/process/mcp all green; mcp suite byte-identical (oracle)
-      across the extraction.)
+      across the extraction.
+      ROUND-2 CORRECTION (reviewer): reopened to add the direct tests the first
+      pass leaned on the oracle for. internal/lifecycle/lifecycle_test.go now
+      unit-tests the Manager directly (budget/lease, spec builders, error types,
+      Status over a live-PID claim + no-claim, LoadStopClaim, SupersededStart
+      Refusal by phase, ComputeHistoryContext + ContextProven with seeded
+      history, NewInstanceID). cmd/gabs/subprocess_cli_test.go replaces the
+      in-process T-CLI cell with a REAL cross-OS-process test: it builds the
+      gabs binary and runs `games start` / `status` / `stop` as three separate
+      processes, so a claim written by one process is read and cleared by
+      independent processes — the portable test-binary-as-game helper lets it
+      run on Windows too.)
 - [x] M3.2 Profile-aware doctor + --show-last-good + track-record
       display + conflation lint — spec: 11, 08; tests: T-CLI
       (cmd/gabs/games_doctor.go. `gabs games doctor <id>` is now profile-aware
@@ -989,7 +1000,12 @@ contract, not a scratchpad.
       Genericity gate: scripts/genericity-scan.sh (a genericity CI job in
       test.yml + a make target) rejects real game/studio trademarks on the
       public surface — it caught+fixed a stray `terraria` in DEPLOYMENT.md and
-      now runs clean. All docs use only neutral/fictional names.)
+      now runs clean. All docs use only neutral/fictional names.
+      ROUND-2 CORRECTION (reviewer): the INTEGRATION.md container-wrapper example
+      declared #!/bin/sh but used the bash-only ${GABS_FORWARD_ENV//,/ }, which
+      fails under POSIX sh (dash) with "Bad substitution" (exit 2) — exactly the
+      shell a minimal container base provides. Rewritten to POSIX word-splitting
+      (IFS=,; for v in $GABS_FORWARD_ENV; ...; unset IFS), verified in dash.)
 - [x] M3.4 skills/gabs-mcp update incl. the agent edit contract — spec:
       31; gates: skill validation
       (skills/gabs-mcp/SKILL.md gains three concise sections: "The Edit
@@ -1039,7 +1055,19 @@ contract, not a scratchpad.
       executor normalization, GABS_PROFILE-divergent status hooks, attached-
       bridge-vs-CLI-stop owner-fingerprint running-evidence, exhaustive Stage-1
       branch coverage) plus the M3.5 acceptance cells. This is the Milestone-3/
-      final-design hand-off boundary. PR #67 remains a DRAFT — not merged.)
+      final-design hand-off boundary. PR #67 remains a DRAFT — not merged.
+      ROUND-2 CORRECTION (reviewer): (1) integer arithmetic extremes were
+      untested — added internal/mcp/integer_boundary_test.go exercising the
+      ParseInt paths (timeout/limit/cursor) at overflow + boundary through BOTH
+      raw stdio (HandleMessage) and a real HTTP round-trip (httptest), asserting
+      overflow is rejected as "must be an integer", never truncated or a panic.
+      (2) The windows-latest lane now runs ./internal/lifecycle and ./cmd/gabs
+      in addition to ./internal/process, so the new lifecycle/CLI code has real
+      Windows test execution (incl. the cross-process subprocess T-CLI), not
+      just build+vet. (3) The final marker commit is PUSHED so PR #67 reflects
+      the completed state. Full re-gate: go build, go vet, go test ./...
+      -count=1, go test -race ./... -count=1, make build, genericity, skill
+      validation, clean tree — all green.)
 
 ## Deviations
 

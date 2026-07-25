@@ -134,11 +134,15 @@ correct when GABS or the config adds variables later:
 
 ```sh
 #!/bin/sh
-# container wrapper: re-inject every forwarded name inside the container
+# container wrapper: re-inject every forwarded name inside the container.
+# POSIX sh only (no bashisms): split the comma-separated list with IFS, then
+# restore IFS so the space-separated $args expands correctly.
 args=""
-for v in ${GABS_FORWARD_ENV//,/ }; do
+IFS=,
+for v in $GABS_FORWARD_ENV; do
   args="$args -e $v"
 done
+unset IFS
 exec docker run $args my-game-image "$@"
 ```
 
@@ -146,7 +150,9 @@ Passing `-e NAME` (name only, no value) tells the container runtime to read each
 variable's value from the wrapper's own environment, so the values never appear
 on the command line. The names are guaranteed to be portable identifiers — no
 commas, whitespace, or glob characters — so splitting on the comma is always
-safe.
+safe. Use POSIX word-splitting (`IFS=,`) rather than a bash-only
+`${GABS_FORWARD_ENV//,/ }` expansion, which fails under `/bin/sh` (dash) with
+"Bad substitution" — exactly the shell a minimal container base image provides.
 
 **3. Never reintroduce a name listed in `GABS_ABSENT_ENV`.**
 
