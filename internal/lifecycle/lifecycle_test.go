@@ -179,6 +179,118 @@ func TestStatusRemovesDefinitivelyStoppedClaim(t *testing.T) {
 	}
 }
 
+// Pending-credit reconciliation: a live claim carrying pending clean-stop /
+// delivery credits (a history write that failed earlier) is reconciled and
+// drained on observation.
+func TestStatusReconcilesPendingCredits(t *testing.T) {
+	dir := t.TempDir()
+	m := managerAt(dir, nil)
+
+	st := process.NewRuntimeState(process.LaunchSpec{GameId: "g", Mode: "DirectPath", PathOrId: "/bin/true"}, process.RuntimeStateStatusRunning)
+	st.LaunchID = "L1"
+	st.Phase = process.PhaseActive
+	st.HistoryContextHash = "ctx-1"
+	st.GamePID = os.Getpid()
+	if fp, ferr := process.ProcessStartTime(os.Getpid()); ferr == nil {
+		st.PIDStartTime = fp
+	}
+	st.PendingCleanStops = []process.PendingCredit{{ID: "evt-1", Profile: "", ContextHash: "ctx-1", At: time.Now().UTC()}}
+	if err := process.ClaimRuntimeState("g", dir, st); err != nil {
+		t.Fatal(err)
+	}
+
+	status, _, _, err := m.Status("g", false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != process.RuntimeStateStatusRunning {
+		t.Fatalf("status = %q, want running", status)
+	}
+	cur, _ := process.LoadRuntimeState("g", dir)
+	if cur == nil || len(cur.PendingCleanStops) != 0 {
+		t.Fatalf("observation must drain pending credits, got %+v", cur)
+	}
+}
+
+// Dead-executor recovery WITH an attachment: an expired operation plus a fresh
+// FOREIGN attachment lease (a still-alive owner in another process) reads
+// running via the lease and the dead operation is normalized away.
+func TestStatusRecoversDeadOperationWithAttachment(t *testing.T) {
+	dir := t.TempDir()
+	m := managerAt(dir, nil)
+
+	st := process.NewRuntimeState(process.LaunchSpec{GameId: "g", Mode: "DirectPath", PathOrId: "/bin/true"}, process.RuntimeStateStatusStarting)
+	st.LaunchID = "L1"
+	st.Phase = process.PhaseActive
+	st.GamePID = 0 // no workload PID: the attachment lease is the running-evidence
+	fp, _ := process.ProcessStartTime(os.Getpid())
+	st.Attachment = &process.RuntimeAttachment{
+		ConnectionID:      "c1",
+		OwnerInstanceID:   "other-instance", // FOREIGN owner
+		OwnerPID:          os.Getpid(),      // alive
+		OwnerPIDStartTime: fp,
+		ObservedAt:        time.Now().UTC(),
+		LeaseDeadline:     time.Now().Add(time.Hour), // fresh
+	}
+	st.Operation = &process.RuntimeOperation{
+		OperationID:      "op-1",
+		Action:           process.OperationActionStart,
+		ExecutorPID:      -1, // provably-gone executor
+		AttemptStartedAt: time.Now().Add(-time.Hour),
+		Deadline:         time.Now().Add(-time.Minute), // expired
+	}
+	if err := process.ClaimRuntimeState("g", dir, st); err != nil {
+		t.Fatal(err)
+	}
+	status, _, _, err := m.Status("g", false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != process.RuntimeStateStatusRunning {
+		t.Fatalf("a dead operation with a fresh foreign attachment lease must recover to running, got %q", status)
+	}
+	if cur, _ := process.LoadRuntimeState("g", dir); cur != nil && cur.Operation != nil {
+		t.Fatalf("recovery must clear the dead operation, got %+v", cur.Operation)
+	}
+}
+
+// Supersession during a slow probe: while the observed (in-memory) claim was
+// being judged, a successor replaced it on disk. The stale stopped verdict must
+// NOT delete the successor — the machine detects the lost fence and re-evaluates
+// the CURRENT claim.
+func TestStatusSupersededByOnDiskSuccessor(t *testing.T) {
+	dir := t.TempDir()
+	m := managerAt(dir, nil)
+
+	// The successor (B) is live on disk.
+	successor := process.NewRuntimeState(process.LaunchSpec{GameId: "g", Mode: "DirectPath", PathOrId: "/bin/true"}, process.RuntimeStateStatusRunning)
+	successor.LaunchID = "B"
+	successor.Phase = process.PhaseActive
+	successor.GamePID = os.Getpid()
+	if fp, ferr := process.ProcessStartTime(os.Getpid()); ferr == nil {
+		successor.PIDStartTime = fp
+	}
+	if err := process.ClaimRuntimeState("g", dir, successor); err != nil {
+		t.Fatal(err)
+	}
+
+	// The stale in-memory claim (A) that the probe was judging: a dead PID reads
+	// stopped, so the machine would try to remove it — but the on-disk claim is
+	// now B, so the fenced removal loses and it re-evaluates B.
+	stale := process.NewRuntimeState(process.LaunchSpec{GameId: "g", Mode: "DirectPath", PathOrId: "/bin/true", StopProcessName: "gabs-definitely-not-running-xyz"}, process.RuntimeStateStatusRunning)
+	stale.LaunchID = "A"
+	stale.Phase = process.PhaseActive
+	stale.GamePID = -1 // no PID + a name scan that finds nothing -> stopped verdict
+
+	status, _ := m.ObserveClaimStatus("g", &stale, false, nil)
+	if status != process.RuntimeStateStatusRunning {
+		t.Fatalf("supersession must re-evaluate the live successor to running, got %q", status)
+	}
+	if !process.RuntimeClaimExists("g", dir) {
+		t.Fatal("the stale stopped verdict must NOT delete the live successor claim")
+	}
+}
+
 // Dead-operation recovery: a claim with an expired operation is normalized on
 // observation and reported per its liveness, never as in-progress.
 func TestStatusRecoversDeadOperation(t *testing.T) {
