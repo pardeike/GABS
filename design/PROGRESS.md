@@ -912,7 +912,7 @@ contract, not a scratchpad.
 
 ## Milestone 3 — CLI + docs + skill
 
-- [~] M3.1 CLI start/status/stop/kill on the shared lifecycle manager +
+- [x] M3.1 CLI start/status/stop/kill on the shared lifecycle manager +
       started_attachment_deferred — spec: 11; tests: T-CLI
       (architecture B. A new internal/lifecycle package holds the typed Manager
       that owns the Stage 1–4 start pipeline + stop/kill/status over the
@@ -954,7 +954,7 @@ contract, not a scratchpad.
       processes, so a claim written by one process is read and cleared by
       independent processes — the portable test-binary-as-game helper lets it
       run on Windows too.)
-- [~] M3.2 Profile-aware doctor + --show-last-good + track-record
+- [x] M3.2 Profile-aware doctor + --show-last-good + track-record
       display + conflation lint — spec: 11, 08; tests: T-CLI
       (cmd/gabs/games_doctor.go. `gabs games doctor <id>` is now profile-aware
       and, per the advisor's no-early-return structure, reports every diagnostic
@@ -975,7 +975,7 @@ contract, not a scratchpad.
       warning + track-record/last-good after a verified start). Gate: build,
       vet, go test ./..., -race cmd/gabs green; M3.1's mcp oracle unaffected
       (doctor touches no mcp/lifecycle/process code).)
-- [~] M3.3 User docs (README, CONFIGURATION, INTEGRATION,
+- [x] M3.3 User docs (README, CONFIGURATION, INTEGRATION,
       TROUBLESHOOTING, example-config.json) — spec: 31; gates: genericity
       scan
       (README: the user-level model + one discovery->start example (games_list
@@ -1021,7 +1021,7 @@ contract, not a scratchpad.
       / unknown — follow nextActions, never relaunch, switch profiles, or start
       a duplicate). Skill validation: frontmatter intact, genericity scan clean
       over skills/gabs-mcp, tool names verified against the code.)
-- [~] M3.5 Acceptance scenario end-to-end — tests: T-ACC
+- [x] M3.5 Acceptance scenario end-to-end — tests: T-ACC
       (cmd/gabs/acceptance_test.go drives the neutral end-to-end scenario
       through the CLI with real processes: (1) two profiles of ONE game launched
       sequentially isolate argv, env, AND cwd — asserted against what a recorder
@@ -1038,7 +1038,7 @@ contract, not a scratchpad.
       and hot-reload by TestDiscoveryUsesPerCallConfig/TestActiveConfigRevision
       Surfaced. Gate: build, vet, -race cmd/gabs green. Skips on Windows — the
       cmd acceptance tests run on the unix CI lanes, matching the M2 pattern.)
-- [~] M3.6 Final regression gate on all three OSes — tests: T-GATE
+- [x] M3.6 Final regression gate on all three OSes — tests: T-GATE
       (TRI-OS GREEN. macOS local gate: go build, go vet, go test ./..., go test
       -race ./..., make build, both genericity checks (in-suite
       TestPublicSurfacesStayGeneric + scripts/genericity-scan.sh, aligned to
@@ -1067,7 +1067,25 @@ contract, not a scratchpad.
       just build+vet. (3) The final marker commit is PUSHED so PR #67 reflects
       the completed state. Full re-gate: go build, go vet, go test ./...
       -count=1, go test -race ./... -count=1, make build, genericity, skill
-      validation, clean tree — all green.)
+      validation, clean tree — all green.
+      ROUND-3 CORRECTION (reviewer, six groups): (F1/P1) checked pagination
+      (cursor+limit overflow panicked at entries[cursor:end]) and clamped
+      duration conversions (positive int -> negative timeout), with stdio+HTTP+
+      framed+overflow tests. (F2/P1) moved the ENTIRE claim-status state machine
+      into lifecycle.Manager (internal/lifecycle/status_machine.go) so both
+      frontends share one implementation — recovery / passive-promotion+credit /
+      reconciliation / fenced removal; CLI status now matches MCP; mcp oracle
+      byte-identical. (F3/P1) added the real cross-session T-CLI + hot-reload
+      composition test (CLI subprocess starts a GABP helper -> server-session
+      games_connect -> rename profile on disk -> renamed-profile launch through
+      the same live server). (F4/P2) CLI endpoint code -> endpoint_unavailable
+      (not the invented bridge_endpoint_in_use) and one pinned snapshot supplies
+      both stop mode AND revision for legacy normalization. (F5/P2) doctor
+      derives target findings from the Stage-1 resolver (no false os.Stat fail
+      on PATH/relative targets) + the macOS quarantine/translocation checks.
+      (F6/P2) fixed CONFIGURATION recovery wording (interrupted stop/kill is NOT
+      replayed) and unified the design/05 <-> TROUBLESHOOTING bad-case table with
+      an equality test. Re-gate all green; mcp oracle byte-identical.)
 
 ## Deviations
 
