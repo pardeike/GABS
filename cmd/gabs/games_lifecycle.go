@@ -197,12 +197,16 @@ func cliStartFailureText(err error, game config.GameConfig) (string, string) {
 	if errors.As(err, &active) {
 		return "already_running", active.ToolMessage(game)
 	}
-	var endpointInUse *config.BridgeEndpointInUseError
-	if errors.As(err, &endpointInUse) {
-		return "bridge_endpoint_in_use", err.Error()
-	}
 	var epErr *lifecycle.EndpointUnavailableError
 	if errors.As(err, &epErr) {
+		// The exhaustive code list has only endpoint_unavailable; a cache
+		// collision is that code with an endpoint_cache_in_use detail, matching
+		// MCP (not the invented "bridge_endpoint_in_use"). EndpointUnavailable
+		// Error unwraps to the underlying BridgeEndpointInUseError.
+		var inUse *config.BridgeEndpointInUseError
+		if errors.As(err, &inUse) {
+			return "endpoint_unavailable", fmt.Sprintf("GABS endpoint cache for '%s' uses port %d, but that port is already listening (endpoint_cache_in_use). Attach from a server session with games_connect, or restart with a reset only after confirming the cached endpoint should be rotated.", game.ID, inUse.Port)
+		}
 		return "endpoint_unavailable", epErr.Error()
 	}
 	var sizeIssue *launch.SpecSizeIssue
@@ -278,9 +282,16 @@ func printOneStatus(m *lifecycle.Manager, gameID string) int {
 func stopGameCLI(log util.Logger, gameID, configDir, action string) int {
 	m := cliClaimManager(log, configDir)
 
+	// Load ONE pinned snapshot for both the launch mode and the revision: when
+	// a stop/kill first-touches a schema-0 (legacy) claim, LoadStopClaim
+	// normalizes it and must stamp NormalizedFromLegacy with the ACTUAL
+	// snapshot revision, not an empty string (legacy-normalization contract,
+	// design/07). Best-effort: a removed game or currently-invalid config leaves
+	// both empty and the claim is still operated on.
 	launchMode, configRevision := "", ""
-	if gc, err := config.LoadGamesConfigFromDir(configDir); err == nil {
-		if g, ok := gc.GetGame(gameID); ok {
+	if snap, serr := loadCLISnapshot(configDir); serr == nil {
+		configRevision = snap.Revision
+		if g, ok := snap.Config.GetGame(gameID); ok {
 			launchMode = g.LaunchMode
 		}
 	}

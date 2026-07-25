@@ -538,10 +538,13 @@ the wrapper instead.
 ## The Idempotent-Hook Contract
 
 **Stop and kill hooks must be idempotent and self-contained.** GABS may run a
-hook again after a crash, a retry, or a second stop request — and after a
-GABS restart, recovery may re-issue the action. A stop hook must therefore be
-safe to run when the workload is **already stopped**: it should treat "nothing
-to stop" as success, not as an error. `containerctl stop name` that exits
+hook again after a crash, an explicit retry, or a second stop request. (A GABS
+restart does **not** replay an interrupted stop/kill: recovery records the
+attempt as `interrupted` and normalizes the claim under the transition lock; a
+later action runs only when you explicitly issue one — see design/07-runtime-
+state.md.) A stop hook must therefore be safe to run when the workload is
+**already stopped**: it should treat "nothing to stop" as success, not as an
+error. `containerctl stop name` that exits
 non-zero because the container is already gone will be read as a failed stop.
 Prefer commands that are naturally idempotent, or wrap them so an
 already-stopped workload exits `0`.
