@@ -5450,48 +5450,19 @@ func (s *Server) exposeGABPResources(client *gabp.Client, gameID string) error {
 	return nil
 }
 
+// launchSpecFromGame / launchSpecFromResolved / launchSpecWithRuntimeDir
+// forward to the shared spec builders so both frontends materialize identical
+// launch specs.
 func launchSpecFromGame(game config.GameConfig) process.LaunchSpec {
-	return process.LaunchSpec{
-		GameId:          game.ID,
-		Mode:            game.LaunchMode,
-		PathOrId:        game.Target,
-		Args:            game.Args,
-		WorkingDir:      game.WorkingDir,
-		StopProcessName: game.StopProcessName,
-	}
+	return lifecycle.LaunchSpecFromGame(game)
 }
 
 func (s *Server) launchSpecWithRuntimeDir(spec process.LaunchSpec) process.LaunchSpec {
-	if cp, err := config.NewConfigPaths(s.configDir); err == nil {
-		spec.RuntimeDir = cp.GetGameDir(spec.GameId)
-	}
-	return spec
+	return s.lifecycle().LaunchSpecWithRuntimeDir(spec)
 }
 
-// launchSpecFromResolved builds the process spec from the resolver output:
-// resolved args/env/cwd plus profile context, with macOS .app bundle targets
-// resolved to their inner executable for propagation-capable modes.
 func launchSpecFromResolved(game config.GameConfig, r *launch.Resolved) process.LaunchSpec {
-	spec := launchSpecFromGame(game)
-	// Bundle resolution applies to every propagation-capable path mode:
-	// Stage 1 checks the inner executable, so the spawn must exec the same
-	// effective target or a passing check would still spawn_fail.
-	if game.LaunchMode == "DirectPath" || game.LaunchMode == "" || game.LaunchMode == "CustomCommand" {
-		spec.PathOrId = launch.EffectiveDirectPathTarget(game.Target)
-	}
-	if r == nil {
-		return spec
-	}
-	spec.Args = append([]string(nil), r.Args...)
-	spec.WorkingDir = r.WorkingDir
-	spec.Profile = r.Profile
-	spec.Env = r.Env
-	spec.ContextEnvKeys = append([]string(nil), r.ContextEnvKeys...)
-	spec.AbsentEnvNames = append([]string(nil), r.AbsentEnvNames...)
-	spec.AppliedInputs = append([]string(nil), r.AppliedInputs...)
-	spec.ConfigRevision = r.ConfigRevision
-	spec.Lifecycle = r.Lifecycle
-	return spec
+	return lifecycle.LaunchSpecFromResolved(game, r)
 }
 
 // stopGame stops a game process gracefully or by force

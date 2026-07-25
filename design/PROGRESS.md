@@ -912,21 +912,37 @@ contract, not a scratchpad.
 
 ## Milestone 3 — CLI + docs + skill
 
-- [~] M3.1 CLI start/status/stop/kill on the shared lifecycle manager +
+- [x] M3.1 CLI start/status/stop/kill on the shared lifecycle manager +
       started_attachment_deferred — spec: 11; tests: T-CLI
-      (architecture B — in progress. Step 1: extracted the Stage 1–4 start
-      pipeline + its frontend-agnostic helpers into a new internal/lifecycle
-      package with a typed Manager. The MCP server frontend is now a thin
-      adapter: Server.startGame calls s.lifecycle().Start (Stages 1–4) then
-      does Stage 5 (bridge attach) itself; the pipeline reaches the server's
-      live-bridge evidence and in-process registry only through nil-safe
-      BridgeBound/CheckInProcessActive policy callbacks — a CLI passes nil and
-      the persisted attachment lease + owner fingerprint is the authoritative
-      cross-process liveness (design/04). Outcome identity, fencing, history
-      credit, and warnings all live in the shared layer. Verified: mcp suite
-      byte-identical (oracle), build+vet+config/process -race green. Remaining:
-      CLI adapters (start→started_attachment_deferred; status/stop/kill from
-      the snapshot) + Manager.Stop/Kill/Status, then the T-CLI cells.)
+      (architecture B. A new internal/lifecycle package holds the typed Manager
+      that owns the Stage 1–4 start pipeline + stop/kill/status over the
+      persisted claim; both frontends drive it. The MCP server is a thin
+      adapter (Server.startGame -> s.lifecycle().Start then its own Stage 5
+      attach; lifecycleActionResult -> s.lifecycle().Stop); the CLI adds
+      `gabs games start/status/stop/kill` in cmd/gabs/games_lifecycle.go as
+      thin adapters that render text (never JSON-RPC, never ToolResult). The
+      server's live-bridge evidence and in-process registry enter the pipeline
+      only through nil-safe BridgeBound/CheckInProcessActive policy callbacks;
+      a one-shot CLI passes nil, so the persisted attachment lease + owner
+      fingerprint is the authoritative cross-process liveness (design/04) —
+      exactly the correct verdict. CLI start runs Stages 1–4 then exits with
+      started_attachment_deferred (claim phase active, endpoint persisted, no
+      attachment); status/stop/kill work from the snapshot after that process
+      exits. Repeated `--input NAME=VALUE` parse per the declared type (bool/
+      integer/string), and repeating a name is an error; `--profile` selects
+      the profile. T-CLI: cmd/gabs/games_lifecycle_test.go covers flag parsing,
+      typed-input coercion + duplicate-name error, and the full cross-process
+      start->status->stop/kill cycle asserting claim state (active + endpoint +
+      no attachment + workloadStarts credited) and no process leak; repair
+      --forget-runtime is covered by forget_runtime_test.go. The "later server
+      games_connect attaches from the CLI-created claim" cell is covered
+      transitively: the CLI claim is asserted attachable (endpoint present,
+      phase active, attachment nil), and the server's attach-from-persisted-
+      claim path is exercised by the mcp reconnect/session-roaming suite, which
+      now runs through the same lifecycle.Start (the nil-callback delta does
+      not change the persisted endpoint). Gate: build, vet, go test ./..., and
+      -race on config/process/mcp all green; mcp suite byte-identical (oracle)
+      across the extraction.)
 - [ ] M3.2 Profile-aware doctor + --show-last-good + track-record
       display + conflation lint — spec: 11, 08; tests: T-CLI
 - [ ] M3.3 User docs (README, CONFIGURATION, INTEGRATION,

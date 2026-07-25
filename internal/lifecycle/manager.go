@@ -63,6 +63,13 @@ func NewManager(log util.Logger, configDir, instanceID string, gamesConfig *conf
 	}
 }
 
+// NewInstanceID mints a fresh fencing owner identity for a one-shot frontend (a
+// CLI process): each invocation is a distinct OS process, so pid + nanosecond
+// is unique enough to fence its own claim transitions.
+func NewInstanceID() string {
+	return fmt.Sprintf("cli-%d-%d", os.Getpid(), time.Now().UnixNano())
+}
+
 // ConfigDir is the config directory this manager operates against.
 func (m *Manager) ConfigDir() string { return m.configDir }
 

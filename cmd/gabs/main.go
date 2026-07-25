@@ -355,6 +355,35 @@ func manageGames(ctx context.Context, log util.Logger, opts options, args []stri
 			return forgetRuntimeClaim(args[1], opts.configDir, assumeYes, os.Stdin, os.Stdout)
 		}
 		return repairGame(log, args[1], opts.configDir)
+	case "start":
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "games start requires a game ID\n")
+			return 2
+		}
+		profile, rawInputs, perr := parseStartFlags(args[2:])
+		if perr != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", perr)
+			return 2
+		}
+		return startGameCLI(log, args[1], opts.configDir, profile, rawInputs)
+	case "status":
+		id := ""
+		if len(args) >= 2 {
+			id = args[1]
+		}
+		return statusGameCLI(log, id, opts.configDir)
+	case "stop":
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "games stop requires a game ID\n")
+			return 2
+		}
+		return stopGameCLI(log, args[1], opts.configDir, process.OperationActionStop)
+	case "kill":
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "games kill requires a game ID\n")
+			return 2
+		}
+		return stopGameCLI(log, args[1], opts.configDir, process.OperationActionKill)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown games action: %s\n", action)
 		return 2
@@ -771,6 +800,12 @@ func showGamesUsage() {
   gabs games show <id>          Show details for a game
   gabs games doctor <id>        Diagnose one game configuration
   gabs games repair <id>        Apply safe repairs for one game configuration
+  gabs games start <id> [--profile NAME] [--input NAME=VALUE]...
+                                Launch a game and verify it started; attachment
+                                is deferred to a later server games_connect
+  gabs games status [<id>]      Show runtime status from the persisted claim
+  gabs games stop <id>          Stop a running game via its stop mechanism
+  gabs games kill <id>          Force terminate a running game
 
 Examples:
   gabs games list               # See game IDs only (AI-friendly)
@@ -779,6 +814,9 @@ Examples:
   gabs games doctor factory   # Diagnose launch configuration
   gabs games repair factory   # Apply safe launch repairs
   gabs games remove factory   # Remove the 'factory' configuration
+  gabs games start factory --profile fast --input seed=42
+  gabs games status factory   # Is it running?
+  gabs games stop factory     # Stop it
 `)
 }
 

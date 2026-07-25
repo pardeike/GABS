@@ -11,6 +11,7 @@ import (
 	"github.com/pardeike/gabs/internal/config"
 	"github.com/pardeike/gabs/internal/gabp"
 	"github.com/pardeike/gabs/internal/launch"
+	"github.com/pardeike/gabs/internal/lifecycle"
 	"github.com/pardeike/gabs/internal/process"
 )
 
@@ -380,10 +381,8 @@ func (s *Server) lifecycleActionResult(game config.GameConfig, action, configRev
 	stopProfile := process.EffectiveClaimProfile(claim)
 	stopHash := claim.HistoryContextHash
 
-	outcome, refusal, err := process.ExecuteStopAction(process.StopRequest{
+	outcome, refusal, err := s.lifecycle().Stop(lifecycle.StopRequest{
 		GameID:             game.ID,
-		ConfigDir:          s.configDir,
-		InstanceID:         s.instanceID,
 		Action:             action,
 		HistoryProfile:     stopProfile,
 		HistoryContextHash: stopHash,
