@@ -990,8 +990,21 @@ contract, not a scratchpad.
       test.yml + a make target) rejects real game/studio trademarks on the
       public surface — it caught+fixed a stray `terraria` in DEPLOYMENT.md and
       now runs clean. All docs use only neutral/fictional names.)
-- [ ] M3.4 skills/gabs-mcp update incl. the agent edit contract — spec:
+- [x] M3.4 skills/gabs-mcp update incl. the agent edit contract — spec:
       31; gates: skill validation
+      (skills/gabs-mcp/SKILL.md gains three concise sections: "The Edit
+      Contract" (verbatim — edit config only when causeClass is config, when
+      setting up a never-proven game, or when the user asked; environment/game/
+      state failures on a proven context are never config problems; treat
+      "started N×" as authoritative), "Profiles and Launch Inputs" (check
+      games_show first; prefer a profile over a duplicate ID only when target+
+      launchMode match; supply an input only when the user asked and never as a
+      substitute for a GABP tool; hot-reload verified via games_show; stop/kill
+      take no profile), and "Outcomes That Are Not Failures" (started_bridge_
+      pending / unobserved / started_attachment_deferred / operation_in_progress
+      / unknown — follow nextActions, never relaunch, switch profiles, or start
+      a duplicate). Skill validation: frontmatter intact, genericity scan clean
+      over skills/gabs-mcp, tool names verified against the code.)
 - [ ] M3.5 Acceptance scenario end-to-end — tests: T-ACC
 - [ ] M3.6 Final regression gate on all three OSes — tests: T-GATE
 

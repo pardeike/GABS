@@ -7,6 +7,10 @@ description: Use when working with the GABS MCP server to inspect configured gam
 
 Use GABS as the stable control surface for a local game-development loop. GABS starts configured games, connects to GABP-compatible bridges, mirrors bridge tools into MCP, and keeps game-specific discovery/calls on the stable core path through `games_tool_names` and `games_call_tool`.
 
+## The Edit Contract
+
+Edit GABS config only when **(a)** the failure's `causeClass` is `config`, **(b)** you are setting up a game that has never launched successfully, or **(c)** the user explicitly asked for a config change. A failure with class `environment`, `game`, or `state` on a context with a positive track record is never a config problem: follow the result's `nextActions`, retry within reason, then report to the user. Treat a result's "this context has started N×" line as authoritative history — do not second-guess a proven config because of one bad run.
+
 ## Default Workflow
 
 1. Check configured games with `games_list`.
@@ -16,6 +20,21 @@ Use GABS as the stable control surface for a local game-development loop. GABS s
 5. Inspect one candidate with `games_tool_detail`.
 6. Call the tool through `games_call_tool` unless a direct mirrored MCP tool is clearly available and already discovered.
 7. After start, connect, stop, reconnect, or an error, call `games_status` or `games_tool_names` again instead of relying on cached tool lists.
+
+## Profiles and Launch Inputs
+
+- Check `games_show` before choosing a profile or supplying a launch input: it lists the declared profiles, the declared inputs (with types), and the per-context track record. Choose from what is declared; never invent a profile name or an input.
+- Prefer a **profile** over duplicating a game under a second ID only when the target and launchMode are the same — profiles parameterize one game; separate IDs are for genuinely different games and keep independent concurrency.
+- Pass a **launch input** only when the user explicitly asked for that variation. Inputs parameterize the launch (a seed, a world name); they are never a substitute for calling a GABP tool to act inside a running game.
+- Config edits apply automatically (hot reload) — after editing, verify with `games_show` rather than restarting GABS or the client.
+- `games_stop` and `games_kill` never take a profile: they act on whatever launch is currently claimed.
+
+## Outcomes That Are Not Failures
+
+- `started_bridge_pending` (the workload verified but the bridge has not connected yet) and `unobserved` (nothing observable within the start budget) are **not** failures. Follow the returned `nextActions` — poll `games_status`, then `games_connect` — and never relaunch or switch profiles in response.
+- `started_attachment_deferred` means a CLI `gabs games start` verified the workload and left the claim active without attaching; pick it up with `games_connect`.
+- On `operation_in_progress`, re-check `games_status` after the reported deadline; do not start a duplicate.
+- On `unknown` liveness, follow the returned next action (inspect evidence; `repair --forget-runtime` only if provably stale) — never start a duplicate.
 
 ## Tool Rules
 
