@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -78,6 +79,7 @@ func runDoctor(log util.Logger, gameID, configDir string, showLastGood bool) int
 		if snap != nil {
 			doctorProfilesAndHooks(d, snap, game)
 		}
+		doctorMacOSTarget(d, game)
 	}
 
 	doctorPermissions(d, configDir, gameID)
@@ -127,14 +129,45 @@ func doctorLaunchTarget(d *doctorReport, game *config.GameConfig) {
 			d.fail("Steam app id file: wrong id %q at %s", content, app.AppIDFilePath)
 		}
 	default:
-		if game.Target != "" {
-			if _, err := os.Stat(game.Target); err != nil {
-				d.fail("Target path: not found (%v)", err)
-			} else {
-				d.info("Target path: found")
-			}
-		}
+		// Target existence/resolvability is reported per launchable context by
+		// doctorProfilesAndHooks, which runs the same Stage-1 resolver check.
+		// That correctly handles a PATH-resolved bare target and a
+		// workingDir-relative target (e.g. ./run.sh); a raw os.Stat(game.Target)
+		// here would falsely mark both "not found" and then contradict the
+		// resolver loop's "resolves" finding.
 	}
+}
+
+// doctorMacOSTarget implements the macOS doctor contract (design/20): warn when
+// the launch target carries the com.apple.quarantine attribute (Gatekeeper may
+// block it) and when a relative target risks App Translocation. No-op off macOS.
+func doctorMacOSTarget(d *doctorReport, game *config.GameConfig) {
+	if runtime.GOOS != "darwin" || game.Target == "" {
+		return
+	}
+	if game.LaunchMode != "DirectPath" && game.LaunchMode != "" && game.LaunchMode != "CustomCommand" {
+		return // URL/managed modes do not exec a path target directly
+	}
+	if !filepath.IsAbs(game.Target) {
+		d.warn("target %q is a relative path; on macOS a quarantined app launched from a relative path can be App-Translocated to a random read-only location (breaking sibling-file assumptions) — prefer an absolute path", game.Target)
+	}
+	// Resolve to the effective executable (inner .app binary, PATH lookup) before
+	// checking the quarantine attribute.
+	eff := launch.EffectiveDirectPathTarget(game.Target)
+	if resolved, err := exec.LookPath(eff); err == nil {
+		eff = resolved
+	}
+	if targetHasQuarantineAttr(eff) {
+		d.warn("target %q carries com.apple.quarantine; macOS Gatekeeper may block or translocate it — clear it with `xattr -dr com.apple.quarantine <path>` once you trust the source", eff)
+	}
+}
+
+// targetHasQuarantineAttr reports whether the file has the com.apple.quarantine
+// extended attribute (macOS). Uses the base-system `xattr` tool so no build
+// tags or extra dependencies are needed; only ever called on darwin.
+func targetHasQuarantineAttr(path string) bool {
+	out, err := exec.Command("xattr", "-p", "com.apple.quarantine", path).CombinedOutput()
+	return err == nil && len(strings.TrimSpace(string(out))) > 0
 }
 
 // doctorProfilesAndHooks resolves every launchable context (the default plus

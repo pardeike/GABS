@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -11,6 +12,11 @@ import (
 	"github.com/pardeike/gabs/internal/process"
 	"github.com/pardeike/gabs/internal/util"
 )
+
+// runXattrWrite sets a synthetic com.apple.quarantine attribute (macOS only).
+func runXattrWrite(path string) error {
+	return exec.Command("xattr", "-w", "com.apple.quarantine", "0081;00000000;test;", path).Run()
+}
 
 func TestConflationWarning(t *testing.T) {
 	if conflationWarning(&launch.ResolvedHook{Command: "docker"}) == "" {
@@ -111,5 +117,74 @@ func TestDoctorTrackRecordAndLastGood(t *testing.T) {
 
 	if code := stopGameCLI(log, gameID, dir, process.OperationActionStop); code != 0 {
 		t.Fatalf("stop exit = %d", code)
+	}
+}
+
+// A bare, PATH-resolved target must not be falsely marked unhealthy (the removed
+// raw os.Stat(game.Target) contradicted the resolver loop).
+func TestDoctorPathTargetNotFalselyUnhealthy(t *testing.T) {
+	dir := t.TempDir()
+	bare := "sh"
+	if runtime.GOOS == "windows" {
+		bare = "cmd"
+	}
+	writeCLIConfig(t, dir, `{"version":"1.0","games":{"g":{"id":"g","name":"G","launchMode":"DirectPath","target":"`+bare+`"}}}`)
+	log := util.NewLogger("error")
+	out := captureStdout(t, func() { runDoctor(log, "g", dir, false) })
+	if strings.Contains(out, "Target path: not found") {
+		t.Fatalf("a PATH-resolved bare target must not be reported not-found:\n%s", out)
+	}
+	if !strings.Contains(out, "resolves") {
+		t.Fatalf("a PATH-resolved target's default context should resolve:\n%s", out)
+	}
+}
+
+// A relative target is resolved against its workingDir, not the doctor's cwd.
+func TestDoctorRelativeTargetResolvesAgainstWorkingDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "run.bin"), []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// JSON-escape the workingDir (Windows backslashes).
+	wd := strings.ReplaceAll(dir, `\`, `\\`)
+	writeCLIConfig(t, dir, `{"version":"1.0","games":{"g":{"id":"g","name":"G","launchMode":"DirectPath","target":"./run.bin","workingDir":"`+wd+`"}}}`)
+	log := util.NewLogger("error")
+	out := captureStdout(t, func() { runDoctor(log, "g", dir, false) })
+	if strings.Contains(out, "Target path: not found") {
+		t.Fatalf("a workingDir-relative target must resolve, not raw-stat fail:\n%s", out)
+	}
+	if !strings.Contains(out, "resolves") {
+		t.Fatalf("the relative target's default context should resolve:\n%s", out)
+	}
+}
+
+// The macOS doctor contract (design/20): quarantine attribute + translocation
+// warning for relative targets.
+func TestDoctorMacOSQuarantineAndTranslocation(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS-only doctor contract (com.apple.quarantine / App Translocation)")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "app.bin")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := runXattrWrite(bin); err != nil {
+		t.Skipf("cannot set quarantine xattr: %v", err)
+	}
+	log := util.NewLogger("error")
+
+	// Absolute quarantined target -> quarantine warning.
+	writeCLIConfig(t, dir, `{"version":"1.0","games":{"g":{"id":"g","name":"G","launchMode":"DirectPath","target":"`+bin+`"}}}`)
+	out := captureStdout(t, func() { runDoctor(log, "g", dir, false) })
+	if !strings.Contains(out, "com.apple.quarantine") {
+		t.Fatalf("a quarantined target must warn:\n%s", out)
+	}
+
+	// Relative target -> translocation warning.
+	writeCLIConfig(t, dir, `{"version":"1.0","games":{"g":{"id":"g","name":"G","launchMode":"DirectPath","target":"./app.bin","workingDir":"`+dir+`"}}}`)
+	out = captureStdout(t, func() { runDoctor(log, "g", dir, false) })
+	if !strings.Contains(out, "App-Translocated") {
+		t.Fatalf("a relative macOS target must warn about translocation:\n%s", out)
 	}
 }
