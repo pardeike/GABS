@@ -188,3 +188,39 @@ func TestDoctorMacOSQuarantineAndTranslocation(t *testing.T) {
 		t.Fatalf("a relative macOS target must warn about translocation:\n%s", out)
 	}
 }
+
+// A quarantined .app can carry com.apple.quarantine on the bundle root while its
+// inner Contents/MacOS binary has none (extended attributes are path-specific).
+// Doctor must still warn: it resolves the bundle to its inner executable, so it
+// must also check the configured bundle path (design/20).
+func TestDoctorMacOSQuarantineOnBundleRootOnly(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS-only doctor contract (com.apple.quarantine on .app bundle root)")
+	}
+	dir := t.TempDir()
+	bundle := filepath.Join(dir, "Probe.app")
+	inner := filepath.Join(bundle, "Contents", "MacOS")
+	if err := os.MkdirAll(inner, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(inner, "Probe") // bundle-name convention -> resolves here
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Quarantine ONLY the bundle root, not the inner executable.
+	if err := runXattrWrite(bundle); err != nil {
+		t.Skipf("cannot set quarantine xattr: %v", err)
+	}
+	// Guard: the inner executable must be clean, or the test would not exercise
+	// the bundle-root miss it is meant to catch.
+	if targetHasQuarantineAttr(exe) {
+		t.Fatalf("test setup: inner executable %q unexpectedly carries quarantine", exe)
+	}
+
+	log := util.NewLogger("error")
+	writeCLIConfig(t, dir, `{"version":"1.0","games":{"g":{"id":"g","name":"G","launchMode":"DirectPath","target":"`+bundle+`"}}}`)
+	out := captureStdout(t, func() { runDoctor(log, "g", dir, false) })
+	if !strings.Contains(out, "com.apple.quarantine") {
+		t.Fatalf("a .app whose bundle root carries quarantine must warn even when the inner binary does not:\n%s", out)
+	}
+}

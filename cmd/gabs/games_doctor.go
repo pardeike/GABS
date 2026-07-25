@@ -151,14 +151,25 @@ func doctorMacOSTarget(d *doctorReport, game *config.GameConfig) {
 	if !filepath.IsAbs(game.Target) {
 		d.warn("target %q is a relative path; on macOS a quarantined app launched from a relative path can be App-Translocated to a random read-only location (breaking sibling-file assumptions) — prefer an absolute path", game.Target)
 	}
-	// Resolve to the effective executable (inner .app binary, PATH lookup) before
-	// checking the quarantine attribute.
+	// Resolve to the effective executable (inner .app binary, PATH lookup).
 	eff := launch.EffectiveDirectPathTarget(game.Target)
 	if resolved, err := exec.LookPath(eff); err == nil {
 		eff = resolved
 	}
-	if targetHasQuarantineAttr(eff) {
-		d.warn("target %q carries com.apple.quarantine; macOS Gatekeeper may block or translocate it — clear it with `xattr -dr com.apple.quarantine <path>` once you trust the source", eff)
+	// Extended attributes are path-specific: a quarantined .app can carry
+	// com.apple.quarantine on the bundle root while its inner Contents/MacOS
+	// binary does not. Check the configured target as well as the resolved inner
+	// executable so the bundle-root case is not missed (design/20).
+	checked := ""
+	for _, p := range []string{game.Target, eff} {
+		if p == "" || p == checked {
+			continue
+		}
+		checked = p
+		if targetHasQuarantineAttr(p) {
+			d.warn("target %q carries com.apple.quarantine; macOS Gatekeeper may block or translocate it — clear it with `xattr -dr com.apple.quarantine <path>` once you trust the source", p)
+			break
+		}
 	}
 }
 

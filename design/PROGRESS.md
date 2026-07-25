@@ -974,7 +974,16 @@ contract, not a scratchpad.
       aware output + invalid-config-still-prints-track-record + broadly-readable
       warning + track-record/last-good after a verified start). Gate: build,
       vet, go test ./..., -race cmd/gabs green; M3.1's mcp oracle unaffected
-      (doctor touches no mcp/lifecycle/process code).)
+      (doctor touches no mcp/lifecycle/process code).
+      ROUND-4 CORRECTION (reviewer, P2): extended attributes are path-specific,
+      so doctorMacOSTarget's quarantine check on the resolved inner .app binary
+      alone missed a bundle carrying com.apple.quarantine on its ROOT while
+      Contents/MacOS/<exe> had none (reproduced). Now checks BOTH the configured
+      target and the resolved inner executable (design/20:300). Regression
+      TestDoctorMacOSQuarantineOnBundleRootOnly creates Probe.app/Contents/MacOS/
+      Probe, quarantines only Probe.app, guards that the inner binary is clean,
+      and requires the warning — verified to FAIL against the old single-path
+      check and PASS with the fix.)
 - [x] M3.3 User docs (README, CONFIGURATION, INTEGRATION,
       TROUBLESHOOTING, example-config.json) — spec: 31; gates: genericity
       scan
@@ -1085,7 +1094,12 @@ contract, not a scratchpad.
       on PATH/relative targets) + the macOS quarantine/translocation checks.
       (F6/P2) fixed CONFIGURATION recovery wording (interrupted stop/kill is NOT
       replayed) and unified the design/05 <-> TROUBLESHOOTING bad-case table with
-      an equality test. Re-gate all green; mcp oracle byte-identical.)
+      an equality test. Re-gate all green; mcp oracle byte-identical.
+      ROUND-4 CORRECTION (reviewer, sole remaining P2): the macOS quarantine
+      check now inspects the configured .app bundle root, not only its resolved
+      inner executable (see M3.2) — the last design-contract gap. Same re-gate:
+      build, vet, go test ./..., -race cmd/gabs, macOS bundle-root regression;
+      tri-OS PR CI re-run green.)
 
 ## Deviations
 
