@@ -258,20 +258,27 @@ func statusGameCLI(log util.Logger, gameID, configDir string) int {
 }
 
 func printOneStatus(m *lifecycle.Manager, gameID string) int {
-	ev, claim, err := m.Status(gameID, false)
+	// A one-shot CLI holds no live bridge and no in-process registry: false + nil
+	// make the persisted attachment lease the cross-process authority (design/04).
+	status, ev, claim, err := m.Status(gameID, false, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s: cannot read runtime claim: %v\n", gameID, err)
 		return 1
 	}
 	if claim == nil {
-		fmt.Printf("%s: stopped (no runtime claim)\n", gameID)
+		// stopped, or the machine cleaned a definitively-stopped claim.
+		detail := ""
+		if ev != nil && ev.Detail != "" {
+			detail = " (" + ev.Detail + ")"
+		}
+		fmt.Printf("%s: %s%s\n", gameID, status, detail)
 		return 0
 	}
-	line := fmt.Sprintf("%s: %s — phase %s", gameID, ev.Verdict, claim.Phase)
+	line := fmt.Sprintf("%s: %s — phase %s", gameID, status, claim.Phase)
 	if p := process.EffectiveClaimProfile(claim); p != "" {
 		line += fmt.Sprintf(", profile %s", p)
 	}
-	if ev.Detail != "" {
+	if ev != nil && ev.Detail != "" {
 		line += fmt.Sprintf(" (%s)", ev.Detail)
 	}
 	fmt.Println(line)

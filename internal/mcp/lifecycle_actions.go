@@ -97,16 +97,6 @@ func (s *Server) selfConnectionFor(gameID, launchID string) func(connectionID st
 	return func(connectionID string) bool { return bound(launchID, connectionID) }
 }
 
-// boundGABPForClaim is the GABP-evidence predicate for one loaded claim:
-// the binding must match the claim's launch AND its persisted attachment
-// connection (review round 9).
-func (s *Server) boundGABPForClaim(gameID string, claim *process.RuntimeState) bool {
-	if claim == nil || claim.Attachment == nil {
-		return false
-	}
-	return s.bridgeBound(gameID)(claim.LaunchID, claim.Attachment.ConnectionID)
-}
-
 // errStaleAttachmentCredential: the connection's credential is not the
 // current claim's per-launch credential — it authenticated against an
 // earlier launch's bridge and must not survive as this claim's evidence

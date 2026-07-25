@@ -97,32 +97,123 @@ func TestStatusNoClaimAndLiveClaim(t *testing.T) {
 	m := managerAt(dir, nil)
 
 	// No claim -> stopped, nil claim.
-	ev, claim, err := m.Status("g", false)
+	status, _, claim, err := m.Status("g", false, nil)
 	if err != nil || claim != nil {
 		t.Fatalf("no-claim status: err=%v claim=%v", err, claim)
 	}
-	if ev.Verdict != process.StatusStopped {
-		t.Fatalf("no claim must read stopped, got %q", ev.Verdict)
+	if status != "stopped" {
+		t.Fatalf("no claim must read stopped, got %q", status)
 	}
 
-	// Seed a claim whose workload PID is THIS live test process: liveness reads
-	// running via the PID fingerprint (cross-platform).
-	spec := process.LaunchSpec{GameId: "g", Mode: "DirectPath", PathOrId: "/bin/true"}
-	st := process.NewRuntimeState(spec, process.RuntimeStateStatusRunning)
-	st.Phase = process.PhaseActive
+	// An active claim on THIS live test process reads running (PID fingerprint).
+	seedLiveActive(t, dir, "g")
+	status, _, claim, err = m.Status("g", false, nil)
+	if err != nil || claim == nil {
+		t.Fatalf("seeded status: err=%v claim=%v", err, claim)
+	}
+	if status != process.RuntimeStateStatusRunning {
+		t.Fatalf("a claim on a live PID must read running, got %q", status)
+	}
+}
+
+// The shared status machine, driven with a CLI's false+nil evidence, must
+// PASSIVELY PROMOTE a live, operation-less phase=starting claim to active and
+// credit the workload start — the exact divergence the review flagged (a thin
+// EvaluateLiveness read would leave the claim untouched).
+func TestStatusPassivePromotionCreditsAndPromotes(t *testing.T) {
+	dir := t.TempDir()
+	m := managerAt(dir, &config.GamesConfig{Version: "1.0", Games: map[string]config.GameConfig{"g": {ID: "g"}}})
+
+	st := process.NewRuntimeState(process.LaunchSpec{GameId: "g", Mode: "DirectPath", PathOrId: "/bin/true"}, process.RuntimeStateStatusStarting)
+	st.LaunchID = "L1"
+	st.Phase = process.PhaseStarting // completed-unobserved shape
+	st.Operation = nil
+	st.SpawnState = process.SpawnStateSpawned
+	st.HistoryContextHash = "ctx-1"
+	st.HistorySuccess = &process.HistorySuccessIdentity{}
 	st.GamePID = os.Getpid()
 	if fp, ferr := process.ProcessStartTime(os.Getpid()); ferr == nil {
 		st.PIDStartTime = fp
 	}
 	if err := process.ClaimRuntimeState("g", dir, st); err != nil {
-		t.Fatalf("seed claim: %v", err)
+		t.Fatal(err)
 	}
-	ev, claim, err = m.Status("g", false)
-	if err != nil || claim == nil {
-		t.Fatalf("seeded status: err=%v claim=%v", err, claim)
+
+	status, _, claim, err := m.Status("g", false, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if ev.Verdict != process.StatusRunning {
-		t.Fatalf("a claim on a live PID must read running, got %q (%s)", ev.Verdict, ev.Detail)
+	if status != process.RuntimeStateStatusRunning {
+		t.Fatalf("status = %q, want running (promoted)", status)
+	}
+	if claim == nil || claim.Phase != process.PhaseActive {
+		t.Fatalf("the machine must promote the claim to active, got %+v", claim)
+	}
+	if h, herr := process.LoadHistory("g", dir); herr != nil || h == nil || h.Profiles[""] == nil || h.Profiles[""].WorkloadStarts < 1 {
+		t.Fatalf("passive promotion must credit the workload start, history=%+v err=%v", h, herr)
+	}
+}
+
+// A definitively-stopped claim (dead PID, positive stopped evidence via a stop
+// process-name scan miss) is fenced-removed by the machine.
+func TestStatusRemovesDefinitivelyStoppedClaim(t *testing.T) {
+	dir := t.TempDir()
+	m := managerAt(dir, nil)
+
+	st := process.NewRuntimeState(process.LaunchSpec{GameId: "g", Mode: "DirectPath", PathOrId: "/bin/true", StopProcessName: "gabs-definitely-not-running-xyz"}, process.RuntimeStateStatusRunning)
+	st.LaunchID = "L1"
+	st.Phase = process.PhaseActive
+	st.GamePID = -1 // no such PID -> stopped by PID evidence
+	if err := process.ClaimRuntimeState("g", dir, st); err != nil {
+		t.Fatal(err)
+	}
+	status, _, claim, err := m.Status("g", false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != "stale-runtime-cleaned" {
+		t.Fatalf("status = %q, want stale-runtime-cleaned", status)
+	}
+	if claim != nil || process.RuntimeClaimExists("g", dir) {
+		t.Fatalf("a definitively stopped claim must be removed, claim=%v exists=%v", claim, process.RuntimeClaimExists("g", dir))
+	}
+}
+
+// Dead-operation recovery: a claim with an expired operation is normalized on
+// observation and reported per its liveness, never as in-progress.
+func TestStatusRecoversDeadOperation(t *testing.T) {
+	dir := t.TempDir()
+	m := managerAt(dir, nil)
+
+	st := process.NewRuntimeState(process.LaunchSpec{GameId: "g", Mode: "DirectPath", PathOrId: "/bin/true"}, process.RuntimeStateStatusStarting)
+	st.LaunchID = "L1"
+	st.Phase = process.PhaseActive
+	st.GamePID = os.Getpid()
+	if fp, ferr := process.ProcessStartTime(os.Getpid()); ferr == nil {
+		st.PIDStartTime = fp
+	}
+	// An operation whose deadline has already passed (dead attempt).
+	st.Operation = &process.RuntimeOperation{
+		OperationID:      "op-1",
+		Action:           process.OperationActionStart,
+		ExecutorPID:      -1, // provably gone executor
+		AttemptStartedAt: time.Now().Add(-time.Hour),
+		Deadline:         time.Now().Add(-time.Minute),
+	}
+	if err := process.ClaimRuntimeState("g", dir, st); err != nil {
+		t.Fatal(err)
+	}
+	status, _, _, err := m.Status("g", false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Never "starting" / in-progress: recovery normalized the dead attempt and
+	// the live PID reads running.
+	if status == process.RuntimeStateStatusStarting {
+		t.Fatalf("a dead operation must be recovered, not reported in-progress; got %q", status)
+	}
+	if cur, _ := process.LoadRuntimeState("g", dir); cur != nil && cur.Operation != nil {
+		t.Fatalf("recovery must clear the dead operation, got %+v", cur.Operation)
 	}
 }
 
@@ -202,6 +293,19 @@ func TestNewInstanceIDUnique(t *testing.T) {
 }
 
 // --- helpers ---
+
+func seedLiveActive(t *testing.T, dir, gameID string) {
+	t.Helper()
+	st := process.NewRuntimeState(process.LaunchSpec{GameId: gameID, Mode: "DirectPath", PathOrId: "/bin/true"}, process.RuntimeStateStatusRunning)
+	st.Phase = process.PhaseActive
+	st.GamePID = os.Getpid()
+	if fp, ferr := process.ProcessStartTime(os.Getpid()); ferr == nil {
+		st.PIDStartTime = fp
+	}
+	if err := process.ClaimRuntimeState(gameID, dir, st); err != nil {
+		t.Fatalf("seed live-active claim: %v", err)
+	}
+}
 
 func seed(t *testing.T, dir, gameID, phase string) {
 	t.Helper()
