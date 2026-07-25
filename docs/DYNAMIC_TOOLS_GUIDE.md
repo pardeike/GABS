@@ -57,10 +57,10 @@ AdventureGame-Specific Tools (if adventure also starts):
 
 GABS can also have multiple live sessions. Runtime ownership is a short
 active-owner lease, not a permanent lock on an AI client session. If another session is
-actively using a running game, `games.start`, `games.connect`, and game-bound
+actively using a running game, `games_start`, `games_connect`, and game-bound
 tool calls return quickly instead of competing. Once that lease goes idle,
-`games.connect` naturally moves ownership to the current session. Use
-`games.connect {"forceTakeover": true}` only when intentionally overriding an
+`games_connect` naturally moves ownership to the current session. Use
+`games_connect {"forceTakeover": true}` only when intentionally overriding an
 active owner immediately.
 
 When a game is not connecting cleanly, call `games_status` first. Its structured

@@ -248,7 +248,7 @@ active lease is idle. To override an actively owned game immediately, use:
 }
 ```
 
-with `games.connect`.
+with `games_connect`.
 
 ## Where GABS Stores Files
 

@@ -93,7 +93,7 @@ Minimal example:
 {
   "version": "1.0",
   "toolNormalization": {
-    "enableOpenAINormalization": false,
+    "enableOpenAINormalization": true,
     "maxToolNameLength": 64,
     "preserveOriginalName": true
   },
@@ -130,6 +130,10 @@ Minimal example:
   config-dependent call without restarting GABS.
 - Top-level settings (`apiKey`, `toolNormalization`, `portRanges`, `timeouts`,
   `stripOutputSchema`) are read at **startup** and require a restart to change.
+  `portRanges` is optional and rarely needed — it narrows the local TCP ports
+  GABS allocates for GABP bridge endpoints, e.g.
+  `"portRanges": { "customRanges": [ { "min": 40000, "max": 41000 } ] }`;
+  omit it to use the built-in defaults.
 - An invalid config file keeps the last valid snapshot in memory: new starts
   are refused with the exact error and JSON path, read-only calls still
   succeed and surface `configError`, and stop/kill/status of already-active
@@ -190,9 +194,11 @@ Legacy Steam launcher URL mode.
 ```
 
 GABS starts the game through the platform launcher URL. This mode hands a URL
-to the OS opener and **promises no context propagation**: configured `args`,
-`env`, `unsetEnv`, `profiles`, and `launchInputs` cannot reach the game and are
+to the OS opener and **promises no context propagation**: configured `env`,
+`unsetEnv`, `profiles`, and `launchInputs` cannot reach the game and are
 rejected as config errors (see [URL launch modes](#url-launch-modes-and-their-limits)).
+Pre-existing launcher-only fields (`args`, `workingDir`) still load for
+compatibility but are not delivered to the workload.
 Put launch options such as `-savedatafolder=...` in Steam's own launch
 options, or use `SteamManaged`, `DirectPath`, or `CustomCommand` when GABS must
 control process arguments and bridge environment directly. `stopProcessName`
@@ -819,6 +825,14 @@ only exist in current binaries.
 
 Config validation reports exact JSON paths. The main rules:
 
+- **Game IDs** are freeform strings but must map to a unique runtime directory,
+  so each ID must be non-empty, contain no NUL byte or backslash, not be an
+  absolute path, and be in canonical slash form — no `.`, `..`, `//`, or
+  trailing `/` segments. Nested `/` (e.g. `factory/old`) and `~` are allowed.
+  Two IDs that differ only by case (e.g. `Adventure` vs `adventure`) are rejected
+  because they would share one directory on case-insensitive filesystems. The
+  case-collision rule is checked when the config is parsed; the per-ID rules are
+  enforced when a runtime path is computed (start/status/stop/connect).
 - Profile and input names match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`
   (case-sensitive).
 - `defaultProfile` is required when `profiles` is non-empty and must name an

@@ -174,7 +174,7 @@ For reference, the managed variables GABS injects into the first process include
 - **`GABS_GAME_ID`** — the configured game's identifier
 - **`GABP_SERVER_PORT`** — port the game-side bridge must listen on
 - **`GABP_TOKEN`** — per-launch authentication token for this GABP session
-- **`GABS_BRIDGE_PATH`** — path hint for a bundled bridge, when configured
+- **`GABS_BRIDGE_PATH`** — path to this launch's `bridge.json` runtime file (always set)
 - **`GABS_PROFILE`** — the selected profile name, when a profile is used
 - **`GABS_FORWARD_ENV`** — the forward list described above
 - **`GABS_ABSENT_ENV`** — the must-be-absent list described above

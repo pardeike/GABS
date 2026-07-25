@@ -52,7 +52,7 @@ not the GABP protocol version.
 
 - **`enableOpenAINormalization`** (boolean): Enable/disable strict-safe MCP name normalization (default: `true` when `toolNormalization` is omitted)
 - **`maxToolNameLength`** (integer): Maximum length for tool names (default: `64`)
-- **`preserveOriginalName`** (boolean): Store original name in metadata and description (default: `true`)
+- **`preserveOriginalName`** (boolean): When a name is normalized, also append the original name to the tool **description** (default: `true`). The original name is **always** recorded in `_meta.originalName` regardless of this setting; `preserveOriginalName` controls only the description text.
 
 ## Examples
 
@@ -64,15 +64,18 @@ With normalization enabled:
 | `adventure.crafting.build` | `adventure_crafting_build` | ✅ |
 | `adventure/core/ping` | `adventure_core_ping` | ✅ |
 | `game.player@stats#get!` | `game_player_stats_get` | ✅ |
-| `very.long.tool.name.that.exceeds.limit` | `very_long_tool_name_that_exceeds` | ✅ |
 | `123.invalid.start` | `tool_123_invalid_start` | ✅ |
+
+Names are truncated only when the normalized form exceeds `maxToolNameLength`
+(default `64`); the examples above are all under that limit, so none is
+truncated.
 
 ## Original Name Preservation
 
-When normalization is applied and `preserveOriginalName` is enabled:
+When a tool name is normalized:
 
-1. **Metadata**: Original name stored in `_meta.originalName`
-2. **Description**: Original name appended to description (e.g., "Get inventory items (Original: factory.inventory.get)")
+1. **Metadata**: the original name is **always** stored in `_meta.originalName` (independent of `preserveOriginalName`).
+2. **Description**: when `preserveOriginalName` is `true`, the original name is also appended to the description (e.g., "Get inventory items (Original: factory.inventory.get)").
 
 Mirrored game tools also include their canonical GABP name in metadata as
 `_meta.gabpName`, for example `core/ping`.

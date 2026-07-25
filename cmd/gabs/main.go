@@ -196,6 +196,10 @@ Game management:
   gabs games show <id>          Show details for a game
   gabs games doctor <id>        Diagnose one game configuration
   gabs games repair <id>        Apply safe repairs for one game configuration
+  gabs games start <id>         Launch a game (attachment deferred to games_connect)
+  gabs games status [<id>]      Show runtime status from the persisted claim
+  gabs games stop <id>          Stop a running game
+  gabs games kill <id>          Force terminate a running game
 
 Examples:
   # Start GABS MCP server (stdio)
@@ -220,11 +224,11 @@ API Key Configuration:
   HTTP authentication. Clients must include: Authorization: Bearer your-secret-key
 
 Once the server is running, use MCP tools to manage games:
-  games.list        List configured game IDs (simplified for AI)
-  games.status      Check status of specific games
-  games.start       Start a game
-  games.stop        Gracefully stop a game  
-  games.kill        Force terminate a game
+  games_list        List configured game IDs (simplified for AI)
+  games_status      Check status of specific games
+  games_start       Start a game
+  games_stop        Gracefully stop a game
+  games_kill        Force terminate a game
 `, version.Get(), defaultBackoff)
 }
 

@@ -157,12 +157,14 @@ async handleGameRequest(gameId, action) {
 }
 
 // Pattern 2: Group tools by game for clarity
-function organizeToolsForUser(allTools) {
+// Public tool names are strict-safe (dots replaced with underscores), so you
+// can't recover the gameId by splitting the exposed name. Ask GABS instead:
+// games_tool_names accepts a gameId and returns just that game's tools.
+async function organizeToolsForUser(mcp, gameIds) {
   const gameGroups = {};
-  for (const tool of allTools) {
-    const [gameId, ...toolParts] = tool.name.split('.');
-    if (!gameGroups[gameId]) gameGroups[gameId] = [];
-    gameGroups[gameId].push(tool);
+  for (const gameId of gameIds) {
+    const res = await mcp.callTool("games_tool_names", { gameId, brief: true });
+    gameGroups[gameId] = res.tools; // tools scoped to this game
   }
   return gameGroups;
 }
