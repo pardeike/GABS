@@ -30,7 +30,7 @@ the caller guidance.
 | Claim exists, evidence unclear | hook unknown/timeout | `blocked_unknown_state` + evidence | state | check hook/stderr; `repair --forget-runtime` if truly stale |
 | Lost claim, workload alive | pre-start probes (all profiles) | `external_instance_detected` + external snapshot | state | stop it by ID — the snapshot enables it |
 | Executable broken (arch, deps, Gatekeeper) | spawn error | `spawn_failed` + OS error | environment | fix binary/permissions |
-| Crash / bad save / mod failure | early exit | `exited_during_start` + exit code + output tail | game | read output; fix game state |
+| Crash / bad save / add-on failure | early exit | `exited_during_start` + exit code + output tail | game | read output; fix game state |
 | Anti-cheat kills modified process | early exit or no bridge | `exited_during_start` / `started_bridge_pending` | game | hint lists anti-cheat as cause |
 | Steam not running (SteamManaged) | advisory + adoption/exit | warning; then normal outcomes | environment | start Steam; see adoption note |
 | Steam re-exec drops context | adoption, delivery not verified | `adopted` warning, `started_bridge_pending` | environment | `steam_appid.txt`, Steam launch options, or wrapper |

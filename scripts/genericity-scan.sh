@@ -20,9 +20,13 @@ cd "$(dirname "$0")/.."
 # not scanned.
 PATHS="README.md example-config.json docs skills/gabs-mcp"
 
-# Real game / studio / franchise trademarks that must never appear on the public
-# surface. Word-boundary, case-insensitive. Extend as needed.
-DENY='rimworld|rimbridge|ludeon|minecraft|mojang|factorio|wube|valheim|iron ?gate|terraria|re-?logic|stardew|skyrim|elder ?scrolls|fallout|bethesda|witcher|cd ?projekt|cyberpunk|fortnite|roblox|counter-?strike|dota|team ?fortress|garry'
+# Real game / studio / franchise trademarks — plus game-modding jargon ("mod",
+# "modification"), which reads as a specific game culture on a game-agnostic
+# tool — that must never appear on the public surface. Word-boundary,
+# case-insensitive. This mirrors and extends internal/mcp's
+# TestPublicSurfacesStayGeneric (the authoritative in-suite gate); keep the two
+# in sync. Extend as needed.
+DENY='mods?|modifications?|rimworld|rimbridge|ludeon|minecraft|mojang|factorio|wube|valheim|iron ?gate|terraria|re-?logic|stardew|skyrim|elder ?scrolls|fallout|bethesda|witcher|cd ?projekt|cyberpunk|fortnite|roblox|counter-?strike|dota|team ?fortress|garry'
 
 status=0
 for p in $PATHS; do

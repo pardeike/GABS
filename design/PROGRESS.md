@@ -1022,7 +1022,19 @@ contract, not a scratchpad.
       and hot-reload by TestDiscoveryUsesPerCallConfig/TestActiveConfigRevision
       Surfaced. Gate: build, vet, -race cmd/gabs green. Skips on Windows — the
       cmd acceptance tests run on the unix CI lanes, matching the M2 pattern.)
-- [ ] M3.6 Final regression gate on all three OSes — tests: T-GATE
+- [~] M3.6 Final regression gate on all three OSes — tests: T-GATE
+      (macOS local gate GREEN: go build, go vet, go test ./..., go test -race
+      ./..., make build, the genericity scan (both the in-suite
+      TestPublicSurfacesStayGeneric and scripts/genericity-scan.sh — aligned to
+      also reject "mod"/"modification" jargon; a stray "mod failure" in the
+      TROUBLESHOOTING bad-case table was genericized to "add-on failure"), skill
+      validation, and a clean working tree. The T-GATE regression cells are
+      covered by the existing suites (recovery verdicts, delivery unknown/
+      partial, interrupted-executor normalization, GABS_PROFILE-divergent status
+      hooks, attached-bridge-vs-CLI-stop owner-fingerprint evidence, exhaustive
+      Stage-1 branch coverage) plus the M3.5 acceptance cells. Linux + Windows
+      lanes to be confirmed by the pushed CI run on PR #67; flip to [x] on
+      tri-OS green.)
 
 ## Deviations
 
