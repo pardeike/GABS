@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -110,10 +111,17 @@ func TestCLICrossSessionConnectAndHotReload(t *testing.T) {
 	}
 	_ = store
 
-	// 3. Stop the game through the same server, so a fresh launch can run.
-	stopOut := serverCall(t, server, "games.stop", map[string]interface{}{"gameId": "g"})
-	if strings.Contains(stopOut, `"isError":true`) {
-		t.Fatalf("server games_stop failed: %s", stopOut)
+	// 3. Terminate the game through the same server, so a fresh launch can run.
+	// Graceful stop on unix; on Windows a go-test helper does not honor the
+	// graceful console-ctrl signal, so force-kill (this step only needs to free
+	// the game — graceful-stop verification is covered elsewhere).
+	termTool := "games.stop"
+	if runtime.GOOS == "windows" {
+		termTool = "games.kill"
+	}
+	termOut := serverCall(t, server, termTool, map[string]interface{}{"gameId": "g"})
+	if strings.Contains(termOut, `"isError":true`) {
+		t.Fatalf("server %s failed: %s", termTool, termOut)
 	}
 
 	// 4. Rename the profile on disk (p1 -> p2) WITHOUT restarting the server.
