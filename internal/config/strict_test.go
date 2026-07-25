@@ -175,3 +175,33 @@ func TestJSONPointerEscaping(t *testing.T) {
 		t.Fatalf("expected escaped pointer /we~1ird~0, got %v", cfg.Warnings)
 	}
 }
+
+// Finding 2 residual (round 6): two DISTINCT, individually-canonical game IDs
+// that map to the same runtime directory on a case-insensitive filesystem must
+// be rejected at load — uniformly, so a config is portable across filesystems.
+func TestGameIDDirectoryCollisionRejected(t *testing.T) {
+	cases := []struct{ name, json string }{
+		{"case variants", `{"version":"1.0","games":{"Adventure":{"id":"Adventure","name":"A","launchMode":"DirectPath","target":"/x"},"adventure":{"id":"adventure","name":"a","launchMode":"DirectPath","target":"/y"}}}`},
+		{"path-normalizing alias", `{"version":"1.0","games":{"factory/../adventure":{"id":"a","name":"A","launchMode":"DirectPath","target":"/x"},"adventure":{"id":"b","name":"B","launchMode":"DirectPath","target":"/y"}}}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := writeTemp(t, c.json)
+			_, err := LoadGamesConfigFromPath(p)
+			if err == nil {
+				t.Fatal("game IDs that map to the same runtime directory must be rejected")
+			}
+			if !strings.Contains(err.Error(), "same runtime directory") {
+				t.Fatalf("error should explain the directory collision, got: %v", err)
+			}
+		})
+	}
+}
+
+// Distinct IDs — including legitimate nested-slash IDs — still load unchanged.
+func TestDistinctAndNestedGameIDsLoad(t *testing.T) {
+	p := writeTemp(t, `{"version":"1.0","games":{"adventure":{"id":"adventure","name":"A","launchMode":"DirectPath","target":"/x"},"factory":{"id":"factory","name":"F","launchMode":"DirectPath","target":"/y"},"factory/old":{"id":"factory/old","name":"O","launchMode":"DirectPath","target":"/z"}}}`)
+	if _, err := LoadGamesConfigFromPath(p); err != nil {
+		t.Fatalf("distinct (including nested-slash) game IDs must load: %v", err)
+	}
+}

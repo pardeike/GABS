@@ -982,7 +982,13 @@ contract, not a scratchpad.
       ID→runtime-directory mapping is INJECTIVE: "factory/../adventure",
       "adventure/", "a//b", "./a" no longer alias another ID's claim (status/
       history/stop cross-ID read/remove closed); legitimate nested-slash and `~`
-      IDs stay valid. (F3/P2) LoadHistory resolves through a new SafeHistoryPath
+      IDs stay valid. The remaining CASE-INSENSITIVE-filesystem residual (two
+      distinct canonical IDs like "Adventure"/"adventure" folding to one dir on
+      macOS/Windows) is closed by a config-LOAD corpus check (parseGamesConfig):
+      distinct IDs whose cleaned, lower-cased directory-relative path collides are
+      rejected UNIFORMLY on every OS, so a config is portable and no two IDs share
+      a runtime directory. Regression: colliding configs rejected, distinct/
+      nested-slash configs still load. (F3/P2) LoadHistory resolves through a new SafeHistoryPath
       (SafeGameDir): an escaping ID is an error, not an external-file read —
       `doctor ../victim --show-last-good` can no longer parse a foreign
       history.json. (F4/P2) the GABP handshake publishes the welcome in one

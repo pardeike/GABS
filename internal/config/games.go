@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -171,6 +172,26 @@ func parseGamesConfig(data []byte) (*GamesConfig, error) {
 		gameIDs = append(gameIDs, id)
 	}
 	sort.Strings(gameIDs)
+	// Injective storage mapping (round 6): distinct game IDs must not map to the
+	// same runtime directory. The per-ID canonical-form rule (ValidateGameID)
+	// handles path-normalizing spellings, but two DISTINCT canonical IDs can still
+	// collide by CASE on a case-insensitive filesystem (macOS/Windows) — e.g.
+	// "Adventure" vs "adventure". Reject such a config UNIFORMLY (so a config is
+	// portable — valid or invalid the same way on every filesystem) rather than
+	// letting status/history/stop for one ID silently reach another's claim. The
+	// fold key is the cleaned, lower-cased directory-relative path.
+	dirOwner := make(map[string]string, len(gameIDs))
+	for _, id := range gameIDs {
+		key := strings.ToLower(path.Clean("/" + id))
+		if other, ok := dirOwner[key]; ok {
+			extErrs = append(extErrs, ConfigIssue{
+				Path:    "games." + id,
+				Message: fmt.Sprintf("game ID %q maps to the same runtime directory as %q on a case-insensitive filesystem; use distinct IDs", id, other),
+			})
+		} else {
+			dirOwner[key] = id
+		}
+	}
 	for _, id := range gameIDs {
 		g := config.Games[id]
 		errsG, warnsG := ValidateGameExtensions(id, &g, opts)
