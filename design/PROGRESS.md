@@ -1005,7 +1005,23 @@ contract, not a scratchpad.
       / unknown — follow nextActions, never relaunch, switch profiles, or start
       a duplicate). Skill validation: frontmatter intact, genericity scan clean
       over skills/gabs-mcp, tool names verified against the code.)
-- [ ] M3.5 Acceptance scenario end-to-end — tests: T-ACC
+- [x] M3.5 Acceptance scenario end-to-end — tests: T-ACC
+      (cmd/gabs/acceptance_test.go drives the neutral end-to-end scenario
+      through the CLI with real processes: (1) two profiles of ONE game launched
+      sequentially isolate argv, env, AND cwd — asserted against what a recorder
+      target actually received, not config echoing — and each launch reports its
+      activeProfile in the claim; (2) an early-crash target (exit 3 + stderr)
+      surfaces exited_during_start with the exit code and the captured output
+      tail and leaves no claim; (3) renaming a profile on disk and launching the
+      new name works without restarting GABS or the client (config is re-read
+      from its source of truth), and the old name no longer resolves. The
+      remaining T-ACC cells — wrapper-exit + status hook / adoption, stop-via-
+      hook + verification, and slow-shutdown raised verifyTimeoutSeconds — are
+      covered by the existing suites (internal/mcp/conformance_adoption_test.go,
+      internal/process/stop_gate_test.go, internal/mcp/stop_lifecycle_mcp_test.go)
+      and hot-reload by TestDiscoveryUsesPerCallConfig/TestActiveConfigRevision
+      Surfaced. Gate: build, vet, -race cmd/gabs green. Skips on Windows — the
+      cmd acceptance tests run on the unix CI lanes, matching the M2 pattern.)
 - [ ] M3.6 Final regression gate on all three OSes — tests: T-GATE
 
 ## Deviations
