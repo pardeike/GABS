@@ -953,7 +953,22 @@ contract, not a scratchpad.
       gabs binary and runs `games start` / `status` / `stop` as three separate
       processes, so a claim written by one process is read and cleared by
       independent processes — the portable test-binary-as-game helper lets it
-      run on Windows too.)
+      run on Windows too.
+      ROUND-5 CORRECTION (reviewer, two P2 runtime-state I/O defects in the
+      shared status path): (a) status.go discarded the POST-observation reload
+      error — a claim/runtime-dir that became unreadable (I/O/permission)
+      returned (nil claim, nil error), which a caller renders as a successful
+      stop; it now surfaces the error (LoadRuntimeState returns (nil,nil) only on
+      ErrNotExist, so "removed" and "unreadable" are now distinguished). (b)
+      status_machine.go returned the EMPTY supersession sentinel when a fenced
+      removal failed for a NON-fencing reason (write/lock/permission) while the
+      claim was retained — the CLI rendered an empty status and the MCP path got
+      an invalid one; it now returns "unknown" (real uncertainty, claim kept).
+      Direct white-box tests cover both (a reload seam injects the post-
+      observation read fault; a read-only claim dir forces the non-fencing
+      removal failure), each verified to FAIL against the pre-fix code. MCP
+      consumer confirmed to route "unknown" through the same default branch that
+      took "" (strictly better); mcp oracle byte-identical.)
 - [x] M3.2 Profile-aware doctor + --show-last-good + track-record
       display + conflation lint — spec: 11, 08; tests: T-CLI
       (cmd/gabs/games_doctor.go. `gabs games doctor <id>` is now profile-aware
@@ -1099,7 +1114,12 @@ contract, not a scratchpad.
       check now inspects the configured .app bundle root, not only its resolved
       inner executable (see M3.2) — the last design-contract gap. Same re-gate:
       build, vet, go test ./..., -race cmd/gabs, macOS bundle-root regression;
-      tri-OS PR CI re-run green.)
+      tri-OS PR CI re-run green.
+      ROUND-5 CORRECTION (reviewer): two P2 runtime-state I/O defects in the
+      shared status path — discarded post-observation reload error + empty status
+      on a non-fencing removal failure (see M3.1). Re-gate: build, vet, go test
+      ./..., -race ./internal/lifecycle + ./cmd/gabs, mcp oracle byte-identical,
+      genericity; tri-OS PR CI re-run green.)
 
 ## Deviations
 

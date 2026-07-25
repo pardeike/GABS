@@ -29,8 +29,18 @@ func (m *Manager) Status(gameID string, gabpLive bool, bridgeBound func(launchID
 	if claim.SchemaVersion >= process.RuntimeSchemaVersion {
 		status, ev := m.ObserveClaimStatus(gameID, claim, gabpLive, bridgeBound)
 		// The machine may have promoted or removed the claim; reload for the
-		// caller so it renders the post-observation state.
-		cur, _ := process.LoadRuntimeState(gameID, m.configDir)
+		// caller so it renders the post-observation state. A reload FAILURE here is
+		// not "claim removed" — the claim or runtime dir became unreadable (I/O,
+		// permission). Surface it so a caller does not present that unverified
+		// state as a successful stop (design/04: authoritative persisted state).
+		reload := m.reloadRuntimeState
+		if reload == nil {
+			reload = process.LoadRuntimeState
+		}
+		cur, rerr := reload(gameID, m.configDir)
+		if rerr != nil {
+			return "unknown", nil, nil, rerr
+		}
 		return status, ev, cur, nil
 	}
 	// A pre-profile (schema-0) claim that no lifecycle touch has normalized yet:

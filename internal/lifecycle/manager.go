@@ -45,6 +45,11 @@ type Manager struct {
 	ownerLease    time.Duration
 	starter       *process.SerializedStarter
 	newController func() process.ControllerInterface
+	// reloadRuntimeState re-reads the persisted claim after the status machine
+	// runs (Status). It exists as a field only so a white-box test can inject a
+	// post-observation read failure — the case a real filesystem I/O/permission
+	// fault produces — which is otherwise unreachable between the two reads.
+	reloadRuntimeState func(gameID, configDir string) (*process.RuntimeState, error)
 }
 
 // NewManager builds a lifecycle Manager. gamesConfig is the startup-pinned
@@ -61,6 +66,8 @@ func NewManager(log util.Logger, configDir, instanceID string, gamesConfig *conf
 		ownerLease:    ownerLease,
 		starter:       starter,
 		newController: newController,
+
+		reloadRuntimeState: process.LoadRuntimeState,
 	}
 }
 

@@ -182,8 +182,14 @@ func (m *Manager) evaluateClaimStatusOnce(gameID string, claim *process.RuntimeS
 			if errors.Is(err, process.ErrFencingViolation) {
 				return "", &ev, true
 			}
+			// A non-fencing removal failure (write/lock/permission): the claim is
+			// RETAINED, so this is not a supersession retry. The empty status is
+			// only meaningful for that retry branch; returning it here would render
+			// an empty status (CLI) or hand the MCP path an invalid one. Report a
+			// real "unknown" — liveness read stopped but the authoritative claim
+			// could not be finalized — keeping ev's detail for the human.
 			m.log.Warnw("failed to remove stopped runtime claim", "gameId", gameID, "error", err)
-			return "", &ev, false
+			return "unknown", &ev, false
 		}
 		m.log.Debugw("removed stopped runtime claim", "gameId", gameID, "evidence", ev.Detail)
 		return "stale-runtime-cleaned", &ev, false

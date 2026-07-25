@@ -3,6 +3,8 @@ package lifecycle
 import (
 	"errors"
 	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -177,6 +179,109 @@ func TestStatusRemovesDefinitivelyStoppedClaim(t *testing.T) {
 	if claim != nil || process.RuntimeClaimExists("g", dir) {
 		t.Fatalf("a definitively stopped claim must be removed, claim=%v exists=%v", claim, process.RuntimeClaimExists("g", dir))
 	}
+}
+
+// When liveness is definitively stopped but the fenced removal fails for a
+// non-fencing reason (write/lock/permission), Status must return a usable
+// status ("unknown"), NOT the empty supersession-retry sentinel, and the claim
+// must be retained (design/06 — only a durable removal clears a claim).
+func TestStatusStoppedRemovalFailureReturnsUsableStatus(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory-permission removal blocking is a POSIX behavior")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory write permissions")
+	}
+	dir := t.TempDir()
+	m := managerAt(dir, nil)
+
+	// A definitively-stopped claim (no such PID, no such stop-process): the
+	// machine will reach the fenced-removal branch.
+	st := process.NewRuntimeState(process.LaunchSpec{GameId: "g", Mode: "DirectPath", PathOrId: "/bin/true", StopProcessName: "gabs-definitely-not-running-xyz"}, process.RuntimeStateStatusRunning)
+	st.LaunchID = "L1"
+	st.Phase = process.PhaseActive
+	st.GamePID = -1
+	if err := process.ClaimRuntimeState("g", dir, st); err != nil {
+		t.Fatal(err)
+	}
+
+	// Make the claim's directory read-only so the unlink (or lock create) fails
+	// with EACCES — a non-fencing removal failure. Reads still work (r-x), so the
+	// initial load and the post-observation reload both succeed.
+	claimDir := filepath.Dir(runtimeStatePathFor(t, dir, "g"))
+	if err := os.Chmod(claimDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(claimDir, 0o755) })
+
+	status, _, claim, err := m.Status("g", false, nil)
+	if err != nil {
+		t.Fatalf("a readable claim must not surface an error here: %v", err)
+	}
+	if status != "unknown" {
+		t.Fatalf("status = %q, want unknown when a stopped claim cannot be removed", status)
+	}
+	if claim == nil || !process.RuntimeClaimExists("g", dir) {
+		t.Fatalf("a claim whose removal failed must be RETAINED, claim=%v exists=%v", claim, process.RuntimeClaimExists("g", dir))
+	}
+}
+
+// A post-observation reload FAILURE (a real filesystem I/O/permission fault on
+// the claim or runtime dir) must be surfaced, not silently rendered as a
+// successfully-removed claim: otherwise a caller presents an unverified state as
+// a successful stop (design/04 — the persisted claim is authoritative).
+func TestStatusPropagatesPostObservationReloadFailure(t *testing.T) {
+	dir := t.TempDir()
+	m := managerAt(dir, nil)
+
+	// A live claim (self PID): the machine returns running and touches nothing,
+	// so only the injected post-observation reload can fail.
+	st := process.NewRuntimeState(process.LaunchSpec{GameId: "g", Mode: "DirectPath", PathOrId: "/bin/true"}, process.RuntimeStateStatusRunning)
+	st.LaunchID = "L1"
+	st.Phase = process.PhaseActive
+	st.GamePID = os.Getpid()
+	if fp, ferr := process.ProcessStartTime(os.Getpid()); ferr == nil {
+		st.PIDStartTime = fp
+	}
+	if err := process.ClaimRuntimeState("g", dir, st); err != nil {
+		t.Fatal(err)
+	}
+
+	wantErr := errors.New("runtime dir unreadable")
+	m.reloadRuntimeState = func(string, string) (*process.RuntimeState, error) {
+		return nil, wantErr
+	}
+
+	status, _, claim, err := m.Status("g", false, nil)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("a post-observation reload failure must be propagated, got err=%v", err)
+	}
+	if claim != nil {
+		t.Fatalf("a failed reload must not hand back a claim (that reads as removed), got %+v", claim)
+	}
+	if status != "unknown" {
+		t.Fatalf("status = %q, want unknown on reload failure", status)
+	}
+	// The failure was READING the claim, not removing it: it is still on disk.
+	if !process.RuntimeClaimExists("g", dir) {
+		t.Fatal("the claim must remain on disk after a reload-read failure")
+	}
+}
+
+// runtimeStatePathFor returns the on-disk runtime.json path for a game so a test
+// can manipulate the claim's directory (SafeRuntimeStatePath is the same path
+// LoadRuntimeState reads).
+func runtimeStatePathFor(t *testing.T, configDir, gameID string) string {
+	t.Helper()
+	cp, err := config.NewConfigPaths(configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := cp.SafeRuntimeStatePath(gameID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 // Pending-credit reconciliation: a live claim carrying pending clean-stop /
