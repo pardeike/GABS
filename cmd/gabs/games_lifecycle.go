@@ -231,20 +231,32 @@ func statusGameCLI(log util.Logger, gameID, configDir string) int {
 		return printOneStatus(m, gameID)
 	}
 
+	// A malformed config or an unreadable runtime root must NOT be reported as a
+	// complete, successful summary: surface each failure and return nonzero,
+	// while still listing whatever is recoverable (design/07).
+	rc := 0
 	ids := map[string]bool{}
 	if gc, err := config.LoadGamesConfigFromDir(configDir); err == nil {
 		for _, g := range gc.ListGames() {
 			ids[g.ID] = true
 		}
+	} else {
+		fmt.Fprintf(os.Stderr, "warning: configuration could not be read: %v (listing runtime claims only)\n", err)
+		rc = 1
 	}
 	if claimed, err := process.ListRuntimeClaimIDs(configDir); err == nil {
 		for _, id := range claimed {
 			ids[id] = true
 		}
+	} else {
+		fmt.Fprintf(os.Stderr, "warning: runtime claims could not be scanned: %v (summary may be incomplete)\n", err)
+		rc = 1
 	}
 	if len(ids) == 0 {
-		fmt.Println("No games configured and no runtime claims.")
-		return 0
+		if rc == 0 {
+			fmt.Println("No games configured and no runtime claims.")
+		}
+		return rc
 	}
 	ordered := make([]string, 0, len(ids))
 	for id := range ids {
@@ -252,9 +264,11 @@ func statusGameCLI(log util.Logger, gameID, configDir string) int {
 	}
 	sortStrings(ordered)
 	for _, id := range ordered {
-		printOneStatus(m, id)
+		if printOneStatus(m, id) != 0 {
+			rc = 1
+		}
 	}
-	return 0
+	return rc
 }
 
 func printOneStatus(m *lifecycle.Manager, gameID string) int {

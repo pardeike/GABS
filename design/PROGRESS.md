@@ -968,7 +968,35 @@ contract, not a scratchpad.
       observation read fault; a read-only claim dir forces the non-fencing
       removal failure), each verified to FAIL against the pre-fix code. MCP
       consumer confirmed to route "unknown" through the same default branch that
-      took "" (strictly better); mcp oracle byte-identical.)
+      took "" (strictly better); mcp oracle byte-identical.
+      ROUND-6 CORRECTION (reviewer, deep review — 7 findings; all regression
+      tests verified to FAIL against pre-fix code): (F1/P1) m.Start now
+      MATERIALIZES the spawn spec (controller.MaterializeSpawnSpec) BEFORE
+      computeSpawnDigests + the size check, so a SteamManaged launch digests the
+      RESOLVED executable + app dir, not the app ID + os.Getwd() — a correct
+      welcome no longer records a cwd mismatch / partial delivery, and
+      spec_too_large sizes the real argv (test drives the production start and
+      evaluates the persisted digest against the resolved app dir → verified;
+      fakeController now echoes its spec so the mcp oracle stays byte-identical).
+      (F2/P1) ValidateGameID rejects NON-CANONICAL and backslash IDs so the
+      ID→runtime-directory mapping is INJECTIVE: "factory/../adventure",
+      "adventure/", "a//b", "./a" no longer alias another ID's claim (status/
+      history/stop cross-ID read/remove closed); legitimate nested-slash and `~`
+      IDs stay valid. (F3/P2) LoadHistory resolves through a new SafeHistoryPath
+      (SafeGameDir): an escaping ID is an error, not an external-file read —
+      `doctor ../victim --show-last-good` can no longer parse a foreign
+      history.json. (F4/P2) the GABP handshake publishes the welcome in one
+      locked step (publishWelcome) that sets the teardown-sensitive authenticated
+      + raw observed values ONLY while still connected, so a welcome-then-close
+      race can no longer strand post-teardown state disconnectOnce would never
+      clear, and the log fields are captured under the lock (no unsynchronized
+      read). (F5/P2) ListRuntimeClaimIDs returns the ROOT scan error (unreadable
+      config base) instead of a falsely-complete empty scan — surfaced in BOTH
+      the MCP summary (runtimeClaimScanError) and the CLI. (F6/P2 + F7/P2) the
+      aggregate CLI status surfaces a config-read failure AND propagates any
+      per-row failure, returning nonzero instead of a false "complete" summary /
+      exit 0. Full re-gate: build, vet, race (config/process/gabp/lifecycle/
+      cmd), genericity, mcp oracle byte-identical; tri-OS PR CI re-run green.)
 - [x] M3.2 Profile-aware doctor + --show-last-good + track-record
       display + conflation lint — spec: 11, 08; tests: T-CLI
       (cmd/gabs/games_doctor.go. `gabs games doctor <id>` is now profile-aware
@@ -1119,7 +1147,14 @@ contract, not a scratchpad.
       shared status path — discarded post-observation reload error + empty status
       on a non-fencing removal failure (see M3.1). Re-gate: build, vet, go test
       ./..., -race ./internal/lifecycle + ./cmd/gabs, mcp oracle byte-identical,
-      genericity; tri-OS PR CI re-run green.)
+      genericity; tri-OS PR CI re-run green.
+      ROUND-6 CORRECTION (reviewer, deep review — 7 findings, see M3.1): 2 P1
+      (SteamManaged materialize-before-digest; injective game-ID→directory
+      mapping) + 5 P2 (history read through SafeGameDir; GABP handshake teardown
+      race; runtime-root scan error surfaced; aggregate CLI status surfaces
+      config + row failures). Every fix has a regression verified to FAIL against
+      the pre-fix code. Re-gate: build, vet, race (config/process/gabp/lifecycle/
+      cmd), genericity, mcp oracle byte-identical; tri-OS PR CI re-run green.)
 
 ## Deviations
 

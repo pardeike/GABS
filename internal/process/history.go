@@ -348,7 +348,16 @@ func LoadHistory(gameID, configDir string) (*GameHistory, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(cp.GetHistoryPath(gameID))
+	// Resolve the read through the SAFE path: a missing/corrupt file degrades to
+	// an empty record, but an ID that escapes the config base (`..`, symlink) is
+	// an ERROR, not an empty record — the same boundary a runtime-state read
+	// enforces (design/07). This blocks `doctor ../victim --show-last-good` from
+	// parsing an external history.json.
+	histPath, err := cp.SafeHistoryPath(gameID)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(histPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return emptyHistory(), nil

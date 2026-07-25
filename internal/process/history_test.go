@@ -406,3 +406,21 @@ func applyCleanStopUnderLock(t *testing.T, gameID, dir, profile, hash string, at
 		t.Fatalf("applyCleanStop: %v", err)
 	}
 }
+
+// Finding 3 (round 6): a history READ must resolve through the safe path. An ID
+// that escapes the config base is an ERROR, not a degraded-empty record, so
+// `doctor ../victim --show-last-good` cannot parse an external history.json. A
+// valid ID with no file still degrades to an empty record.
+func TestLoadHistoryRejectsEscapingID(t *testing.T) {
+	dir := t.TempDir()
+	for _, bad := range []string{"../victim", "a/../../victim", "factory/../adventure"} {
+		if _, err := LoadHistory(bad, dir); err == nil {
+			t.Errorf("LoadHistory(%q) must error on an escaping/non-canonical ID, not read it", bad)
+		}
+	}
+	// A legitimate ID with no history file still degrades to empty, no error.
+	h, err := LoadHistory("adventure", dir)
+	if err != nil || h == nil {
+		t.Fatalf("a valid ID with no file must degrade to an empty record, got h=%v err=%v", h, err)
+	}
+}

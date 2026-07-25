@@ -53,6 +53,13 @@ func ListRuntimeClaimIDs(configDir string) ([]string, error) {
 	// the whole scan (the corrupt-claim repair path).
 	walkErr := filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			// The ROOT itself failing (an unreadable config base) is a real scan
+			// failure, not a skippable corrupt subtree: returning SkipDir here
+			// would report a falsely-complete empty scan. Surface it; a
+			// non-existent base is still degraded to "no claims" below.
+			if filepath.Clean(path) == filepath.Clean(base) {
+				return err
+			}
 			if d != nil && d.IsDir() {
 				return fs.SkipDir
 			}

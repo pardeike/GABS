@@ -423,3 +423,67 @@ func TestParseObservedContextBindingWireShape(t *testing.T) {
 		t.Fatalf("non-binding names must not populate the report: %+v", obsWrong)
 	}
 }
+
+// Finding 4 (round 6): if the peer sends welcome and immediately closes,
+// markDisconnected can run BEFORE the welcome is published. The publish must NOT
+// restore the teardown-sensitive fields (authenticated + the raw observed
+// environment values) — they "never outlive the connection" and disconnectOnce
+// would prevent a later Close from re-clearing them.
+func TestPublishWelcomeDoesNotRestoreStateAfterTeardown(t *testing.T) {
+	c := NewClient(util.NewLogger("error"))
+	// Simulate markDisconnected having already torn the client down.
+	c.mu.Lock()
+	c.connected = false
+	c.authenticated = false
+	c.observed = nil
+	c.mu.Unlock()
+
+	result := map[string]interface{}{
+		"observed": map[string]interface{}{
+			"cwd":       "/secret",
+			"envValues": map[string]interface{}{"TOKEN": "leaked"},
+		},
+	}
+	welcome := SessionWelcomeResult{AgentID: "a", Capabilities: Capabilities{Methods: []string{"tools/list"}}}
+	agentID, _, haveReport := c.publishWelcome(welcome, result)
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.authenticated {
+		t.Fatal("authenticated must NOT be restored after teardown")
+	}
+	if c.observed != nil {
+		t.Fatal("raw observed values must NOT be restored after teardown")
+	}
+	if haveReport {
+		t.Fatal("the captured log field must reflect the un-restored (nil) observed")
+	}
+	// agentId/capabilities are not teardown-sensitive and may still publish.
+	if agentID != "a" || len(c.capabilities.Methods) != 1 {
+		t.Fatalf("non-sensitive fields should still publish, got agentId=%q caps=%v", agentID, c.capabilities.Methods)
+	}
+}
+
+// The normal path: a still-connected handshake authenticates and records the
+// observed delivery report.
+func TestPublishWelcomeWhenConnectedAuthenticates(t *testing.T) {
+	c := NewClient(util.NewLogger("error"))
+	c.mu.Lock()
+	c.connected = true
+	c.mu.Unlock()
+
+	result := map[string]interface{}{
+		"observed": map[string]interface{}{"cwd": "/game"},
+	}
+	welcome := SessionWelcomeResult{AgentID: "a", Capabilities: Capabilities{Methods: []string{"tools/list"}}}
+	_, _, haveReport := c.publishWelcome(welcome, result)
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if !c.authenticated {
+		t.Fatal("a connected handshake must authenticate")
+	}
+	if c.observed == nil || !haveReport {
+		t.Fatal("a connected handshake must record the observed report")
+	}
+}

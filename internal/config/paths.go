@@ -3,19 +3,25 @@ package config
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
 )
 
-// ValidateGameID rejects only the identifiers that can never be a runtime path:
-// empty, a NUL byte, or an ABSOLUTE path (leading separator or a Windows drive).
-// Game IDs are otherwise arbitrary public strings (design/01: "existing configs
-// remain valid, untouched"; RFC 6901 attribution supports `/` and `~`), so a
-// nested `/` ID is legal and maps to a nested runtime directory. Traversal and
-// containment are enforced structurally by SafeGameDir, never by a character
-// grammar — redefining the ID grammar as a filesystem grammar breaks accepted
-// configs (round-19 regression).
+// ValidateGameID rejects identifiers that can never be a SAFE, INJECTIVE runtime
+// path: empty, a NUL byte, an ABSOLUTE path (leading separator or a Windows
+// drive), a backslash (a path separator on Windows, so it would alias per-OS),
+// or a NON-CANONICAL form. Game IDs are otherwise arbitrary public strings
+// (design/01: "existing configs remain valid, untouched"; RFC 6901 attribution
+// supports `/` and `~`), so a nested `/` ID is legal and maps to a nested
+// runtime directory. The canonical-form rule keeps the ID→directory mapping
+// injective: "factory/../adventure", "adventure/", "a//b", and "./a" all clean
+// to a directory another ID already owns, so accepting them as distinct public
+// IDs would let status/history/stop for one ID read or remove another ID's
+// claim. Traversal/containment beyond aliasing is still enforced structurally by
+// SafeGameDir — the character set is not otherwise constrained (round-19: a
+// character grammar breaks accepted configs; a canonical-FORM rule does not).
 func ValidateGameID(gameID string) error {
 	if gameID == "" {
 		return fmt.Errorf("game ID is required")
@@ -23,10 +29,26 @@ func ValidateGameID(gameID string) error {
 	if strings.ContainsRune(gameID, 0) {
 		return fmt.Errorf("game ID %q must not contain a NUL byte", gameID)
 	}
+	if strings.ContainsRune(gameID, '\\') {
+		return fmt.Errorf("game ID %q must not contain a backslash (a path separator on Windows)", gameID)
+	}
 	if isAbsoluteID(gameID) {
 		return fmt.Errorf("game ID %q must not be an absolute path", gameID)
 	}
+	if !isCanonicalGameID(gameID) {
+		return fmt.Errorf("game ID %q is not in canonical form; it aliases another ID's runtime directory (avoid '.', '..', '//' and a trailing '/')", gameID)
+	}
 	return nil
+}
+
+// isCanonicalGameID reports whether the ID already equals its cleaned, rooted
+// slash form — the property that makes ID→runtime-directory injective. Rooting
+// with "/" before path.Clean means a leading ".." cannot escape (it cleans to
+// "/"), so any ".", "..", empty ("//"), or trailing-slash segment cleans to a
+// different spelling and is rejected as non-canonical. path (not filepath) keeps
+// this slash-based and identical on every OS (backslashes are already rejected).
+func isCanonicalGameID(id string) bool {
+	return strings.TrimPrefix(path.Clean("/"+id), "/") == id
 }
 
 // isAbsoluteID reports whether the ID is an absolute path on any platform — a
@@ -82,6 +104,17 @@ func (cp *ConfigPaths) SafeRuntimeStatePath(gameID string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "runtime.json"), nil
+}
+
+// SafeHistoryPath is SafeGameDir joined with history.json — the validated
+// counterpart of GetHistoryPath, so a history READ cannot leave the config base
+// through a `..` or symlinked ID (an arbitrary-file read via `doctor ../victim`).
+func (cp *ConfigPaths) SafeHistoryPath(gameID string) (string, error) {
+	dir, err := cp.SafeGameDir(gameID)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "history.json"), nil
 }
 
 // deepestExistingResolved resolves the symlinks of the deepest existing ancestor

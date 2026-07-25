@@ -1033,12 +1033,17 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				specs = append(specs, rowSpec{gameID: games[i].ID, configured: &games[i]})
 				seen[games[i].ID] = true
 			}
+			claimScanError := ""
 			if claimIDs, scanErr := process.ListRuntimeClaimIDs(s.configDir); scanErr == nil {
 				for _, id := range claimIDs {
 					if !seen[id] {
 						specs = append(specs, rowSpec{gameID: id})
 					}
 				}
+			} else {
+				// An unreadable runtime root omits runtime-only claims: say so
+				// rather than presenting a falsely-complete summary (design/07).
+				claimScanError = scanErr.Error()
 			}
 
 			type gameStatusRow struct {
@@ -1093,6 +1098,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				"count":                 len(statusItems),
 				"games":                 statusItems,
 				"currentConfigRevision": configRevision,
+			}
+			if claimScanError != "" {
+				content.WriteString(fmt.Sprintf("\n⚠ runtime claim scan incomplete: %s (runtime-only claims may be omitted)\n", claimScanError))
+				structuredAll["runtimeClaimScanError"] = claimScanError
 			}
 			attachConfigHealth(structuredAll, gamesConfig, cfgErr)
 			return &ToolResult{

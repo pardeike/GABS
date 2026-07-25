@@ -185,6 +185,25 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 
 	controller.SetBridgeInfo(port, token)
 
+	// Materialize the spawn spec ONCE (design/03, review round 9): for
+	// SteamManaged this resolves the app to its real executable + working
+	// directory and pins it on the controller, so digesting, sizing, and the
+	// actual spawn all derive the SAME command. Without this, digests hash the
+	// app ID + os.Getwd() and a correct welcome is recorded as a cwd mismatch /
+	// partial delivery, and spec_too_large sizes the wrong argv. DirectPath and
+	// the URL modes echo the spec, so this is a no-op there.
+	if exe, cwd, merr := controller.MaterializeSpawnSpec(); merr != nil {
+		var procErr *process.ProcessError
+		if errors.As(merr, &procErr) && (procErr.Type == process.ProcessErrorTypeStart || procErr.Type == process.ProcessErrorTypeConfiguration) {
+			pendingFailCode = "spawn_failed"
+		}
+		return nil, fmt.Errorf("failed to resolve the launch target for game '%s' (mode: %s, target: %s): %w",
+			game.ID, game.LaunchMode, game.Target, merr)
+	} else {
+		launchSpec.PathOrId = exe
+		launchSpec.WorkingDir = cwd
+	}
+
 	// The claim carries the endpoint (port + per-launch token) and the salted
 	// expected-context digests, pinned in one transition so a delayed welcome
 	// report verifies against what was actually spawned (design/03, design/07).

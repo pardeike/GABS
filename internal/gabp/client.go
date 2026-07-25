@@ -196,15 +196,31 @@ func (c *Client) handshakeWithTimeout(timeout time.Duration) error {
 		return fmt.Errorf("failed to parse welcome: %w", err)
 	}
 
+	agentID, methodCount, haveReport := c.publishWelcome(welcome, result)
+	c.log.Infow("GABP handshake complete", "agentId", agentID, "methods", methodCount, "deliveryReport", haveReport)
+	return nil
+}
+
+// publishWelcome commits the handshake result in ONE locked step and returns the
+// log fields captured atomically. authenticated and the raw observed environment
+// values are teardown-sensitive: markDisconnected (fired once via disconnectOnce)
+// clears them and they must "never outlive the connection". If the peer sent
+// welcome and immediately closed, that teardown can run BEFORE this publish;
+// restoring authenticated/observed here would strand post-teardown state no
+// later Close can clear. So they are set ONLY while still connected.
+// agentId/capabilities are not cleared on disconnect, so they publish
+// unconditionally. Reading the log fields inside the lock keeps c.observed from
+// being read without it.
+func (c *Client) publishWelcome(welcome SessionWelcomeResult, result interface{}) (agentID string, methodCount int, haveReport bool) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.agentId = welcome.AgentID
 	c.capabilities = welcome.Capabilities
-	c.observed = parseObservedContext(result)
-	c.authenticated = true
-	c.mu.Unlock()
-
-	c.log.Infow("GABP handshake complete", "agentId", c.agentId, "methods", len(c.capabilities.Methods), "deliveryReport", c.observed != nil)
-	return nil
+	if c.connected {
+		c.observed = parseObservedContext(result)
+		c.authenticated = true
+	}
+	return c.agentId, len(c.capabilities.Methods), c.observed != nil
 }
 
 // ObservedContext is the optional, backward-compatible welcome-time

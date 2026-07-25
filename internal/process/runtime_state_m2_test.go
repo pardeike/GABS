@@ -465,3 +465,44 @@ func TestExternalSnapshotInputsStateRoundTrip(t *testing.T) {
 		t.Fatalf("persisted marker missing: %s", data)
 	}
 }
+
+// Finding 5 (round 6): an UNREADABLE config root is a real scan failure, not a
+// successful empty scan — otherwise all-game status silently omits runtime-only
+// claims. A NON-EXISTENT root still degrades to "no claims".
+func TestListRuntimeClaimIDsSurfacesRootScanError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory read-permission blocking is a POSIX behavior")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory read permissions")
+	}
+	dir := t.TempDir()
+	cp, err := config.NewConfigPaths(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := cp.GetBaseDir()
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(base, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(base, 0o700) })
+
+	if ids, scanErr := ListRuntimeClaimIDs(dir); scanErr == nil {
+		t.Fatalf("an unreadable config root must return a scan error, got ids=%v nil error", ids)
+	}
+}
+
+// A base directory that does not exist yet is not an error — there simply are no
+// claims (the pre-first-run state).
+func TestListRuntimeClaimIDsMissingRootIsEmpty(t *testing.T) {
+	ids, err := ListRuntimeClaimIDs(filepath.Join(t.TempDir(), "does-not-exist-yet"))
+	if err != nil {
+		t.Fatalf("a non-existent base must degrade to no claims, got err=%v", err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("expected no claims, got %v", ids)
+	}
+}

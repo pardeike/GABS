@@ -24,6 +24,7 @@ type fakeController struct {
 	isRunningCalls int
 	exitCode       int
 	mode           string
+	spec           process.LaunchSpec
 	afterObs       func(pid int, startTime int64, spawnErr error)
 	beforeObs      func() error
 }
@@ -45,7 +46,7 @@ func newVerifiedThenDeathController() process.ControllerInterface {
 	return &fakeController{aliveThenDead: true, exitCode: 1, mode: "DirectPath"}
 }
 
-func (f *fakeController) Configure(spec process.LaunchSpec) error { return nil }
+func (f *fakeController) Configure(spec process.LaunchSpec) error { f.spec = spec; return nil }
 func (f *fakeController) SetBridgeInfo(port int, token string)    {}
 func (f *fakeController) Start() error {
 	if f.beforeObs != nil {
@@ -91,4 +92,9 @@ func (f *fakeController) SetSpawnObservers(before func() error, after func(pid i
 func (f *fakeController) DirectChildExited() bool                       { return !f.running }
 func (f *fakeController) ExitCode() int                                 { return f.exitCode }
 func (f *fakeController) TerminateDirectChild()                         {}
-func (f *fakeController) MaterializeSpawnSpec() (string, string, error) { return "/fake/exe", "", nil }
+// MaterializeSpawnSpec echoes the configured spec (like the real Controller's
+// DirectPath/URL path), so digesting and sizing see exactly what production
+// would for a non-Steam-resolved launch — the fake never does real resolution.
+func (f *fakeController) MaterializeSpawnSpec() (string, string, error) {
+	return f.spec.PathOrId, f.spec.WorkingDir, nil
+}
