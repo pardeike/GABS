@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/pardeike/gabs/internal/config"
@@ -63,11 +64,17 @@ func NewManager(log util.Logger, configDir, instanceID string, gamesConfig *conf
 	}
 }
 
+// instanceIDCounter guarantees uniqueness even when two IDs are minted within
+// the same nanosecond — Windows' clock granularity is coarse, so pid+nano alone
+// can collide within one process (as newServerInstanceID also guards against).
+var instanceIDCounter uint64
+
 // NewInstanceID mints a fresh fencing owner identity for a one-shot frontend (a
-// CLI process): each invocation is a distinct OS process, so pid + nanosecond
-// is unique enough to fence its own claim transitions.
+// CLI process): pid distinguishes processes and an atomic sequence guarantees
+// per-process uniqueness regardless of clock resolution.
 func NewInstanceID() string {
-	return fmt.Sprintf("cli-%d-%d", os.Getpid(), time.Now().UnixNano())
+	seq := atomic.AddUint64(&instanceIDCounter, 1)
+	return fmt.Sprintf("cli-%d-%d-%d", os.Getpid(), time.Now().UnixNano(), seq)
 }
 
 // ConfigDir is the config directory this manager operates against.

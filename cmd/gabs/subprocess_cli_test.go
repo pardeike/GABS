@@ -78,13 +78,21 @@ func TestCLICrossProcessLifecycle(t *testing.T) {
 		t.Fatalf("cross-process status must read running: code=%d out=%s", code, out)
 	}
 
-	// stop (process 3, independent) clears the claim
-	out, code = run("stop", "g")
+	// terminate (process 3, independent) clears the claim. Use graceful stop on
+	// unix; on Windows a go-test binary does not honor the graceful
+	// console-ctrl signal, so force-kill — the cross-process claim clearing this
+	// asserts is identical either way (graceful-stop verification is covered by
+	// the unix acceptance suite and internal/process/stop_gate_test.go).
+	termVerb := "stop"
+	if runtime.GOOS == "windows" {
+		termVerb = "kill"
+	}
+	out, code = run(termVerb, "g")
 	if code != 0 {
-		t.Fatalf("cross-process stop: code=%d out=%s", code, out)
+		t.Fatalf("cross-process %s: code=%d out=%s", termVerb, code, out)
 	}
 	if process.RuntimeClaimExists("g", dir) {
-		t.Fatalf("stop must remove the claim; out=%s", out)
+		t.Fatalf("%s must remove the claim; out=%s", termVerb, out)
 	}
 
 	// status again -> stopped
