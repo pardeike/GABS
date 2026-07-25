@@ -9,14 +9,8 @@
   "stripOutputSchema": false,
   "portRanges": {
     "customRanges": [
-      {
-        "min": 8000,
-        "max": 8999
-      },
-      {
-        "min": 9000,
-        "max": 9999
-      }
+      { "min": 8000, "max": 8999 },
+      { "min": 9000, "max": 9999 }
     ]
   },
   "timeouts": {
@@ -29,30 +23,56 @@
     }
   },
   "games": {
-    "factory": {
-      "id": "factory",
-      "name": "Example Game",
+    "myserver": {
+      "id": "myserver",
+      "name": "Example Game Server",
+      "description": "One profiled game showing launch profiles, a typed launch input, and lifecycle hooks. The status hook is intentionally a WRAPPER, not a raw container/daemon query: it must check reachability first and exit an unclassified code (2) when it cannot tell, otherwise running=0 / stopped=1 (see docs/CONFIGURATION.md). All names here are neutral placeholders — replace them with your own.",
       "launchMode": "DirectPath",
-      "target": "/path/to/factory/server.jar",
-      "workingDir": "/path/to/factory",
-      "args": ["-Xmx4G", "-Xms2G", "-jar", "server.jar", "nogui"],
-      "description": "FactorySim server with GABP bridge for AI control"
-    },
-    "adventure": {
-      "id": "adventure",
-      "name": "AdventureGame",
-      "launchMode": "SteamManaged",
-      "target": "123456",
-      "description": "AdventureGame sample via managed Steam launch with GABP bridge"
-    },
-    "adventurearena": {
-      "id": "adventurearena",
-      "name": "AdventureArena Dedicated Server",
-      "launchMode": "CustomCommand",
-      "target": "adventurearena_server.exe -nographics -batchmode -name \"My GABS Server\" -port 2456 -world \"Dedicated\" -password \"mypassword\"",
-      "workingDir": "/path/to/adventurearena/server",
-      "stopProcessName": "adventurearena_server.exe",
-      "description": "AdventureArena dedicated server with custom launch parameters"
+      "target": "/opt/mygame/bin/server",
+      "workingDir": "/opt/mygame",
+      "args": ["--port", "7777"],
+      "env": {
+        "MYGAME_LOG_LEVEL": "info"
+      },
+      "defaultProfile": "dev",
+      "profiles": {
+        "dev": {
+          "description": "Fast local iteration: verbose logs, a scratch data directory.",
+          "args": ["--data-dir", "/tmp/mygame-dev"],
+          "env": { "MYGAME_LOG_LEVEL": "debug" }
+        },
+        "prod": {
+          "description": "Production-like: the real data directory, default logging.",
+          "args": ["--data-dir", "/var/lib/mygame"],
+          "workingDir": "/var/lib/mygame"
+        }
+      },
+      "launchInputs": {
+        "world": {
+          "description": "Name of the world/save to load. Its value substitutes into ${value} in the bound arg.",
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "args": ["--world", "${value}"]
+        }
+      },
+      "lifecycle": {
+        "status": {
+          "command": "/opt/mygame/hooks/status.sh",
+          "timeoutSeconds": 5,
+          "runningExitCodes": [0],
+          "stoppedExitCodes": [1]
+        },
+        "stop": {
+          "command": "/opt/mygame/hooks/stop.sh",
+          "timeoutSeconds": 30,
+          "verifyTimeoutSeconds": 60
+        },
+        "kill": {
+          "command": "/opt/mygame/hooks/kill.sh",
+          "timeoutSeconds": 10
+        }
+      }
     }
   }
 }

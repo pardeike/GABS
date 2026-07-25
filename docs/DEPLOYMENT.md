@@ -134,7 +134,7 @@ Configure the client to connect to your GABS HTTP endpoint.
 gabs games add factory-survival
 gabs games add factory-creative
 gabs games add adventure-a
-gabs games add terraria-world1
+gabs games add sandbox-world1
 
 # Start GABS
 gabs server --http :8080

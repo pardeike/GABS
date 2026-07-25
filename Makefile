@@ -34,6 +34,12 @@ build-debug:
 test:
 	go test -v ./...
 
+# Public docs, example config, and skill must use only neutral game names
+# (design/31).
+.PHONY: genericity
+genericity:
+	./scripts/genericity-scan.sh
+
 # Clean build artifacts
 .PHONY: clean
 clean:

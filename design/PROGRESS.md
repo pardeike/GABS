@@ -964,9 +964,32 @@ contract, not a scratchpad.
       warning + track-record/last-good after a verified start). Gate: build,
       vet, go test ./..., -race cmd/gabs green; M3.1's mcp oracle unaffected
       (doctor touches no mcp/lifecycle/process code).)
-- [ ] M3.3 User docs (README, CONFIGURATION, INTEGRATION,
+- [x] M3.3 User docs (README, CONFIGURATION, INTEGRATION,
       TROUBLESHOOTING, example-config.json) — spec: 31; gates: genericity
       scan
+      (README: the user-level model + one discovery->start example (games_list
+      -> games_start -> games_connect -> games_tool_names/detail/call_tool),
+      both frontends, hot-reload. docs/CONFIGURATION.md: full launch-profile
+      schema (env/unsetEnv/defaultProfile/profiles/typed launchInputs/lifecycle
+      hooks), the exact resolver order (args append, env override, workingDir
+      replace), the exit-code contract with the canonical status-hook WRAPPER
+      pattern (reachability -> exit 2 unknown; running/absent -> 0/1) and raw
+      `docker inspect` as the misconfiguration, idempotent hooks,
+      verifyTimeoutSeconds save-on-exit guidance, the Windows cmd.exe /c
+      script-hook rule, the Steam re-exec caveat + workarounds, the
+      legacy->profile recipe, the ID-consolidation checklist, and the
+      old-binary warning. docs/INTEGRATION.md: the launcher/wrapper contract
+      (forward argv, preserve/map env, GABS_FORWARD_ENV container loop, never
+      reintroduce GABS_ABSENT_ENV names), the env-only live-bridge rule
+      (bridge.json diagnostic-only, never a discovery fallback), and the
+      optional session-welcome `observed` field spec. docs/TROUBLESHOOTING.md:
+      the design/05 bad-case map table verbatim + the not-a-failure outcomes +
+      the conflation mistake. example-config.json: one neutral profiled game
+      with a typed input and the wrapper-based status hook (schema-validated).
+      Genericity gate: scripts/genericity-scan.sh (a genericity CI job in
+      test.yml + a make target) rejects real game/studio trademarks on the
+      public surface — it caught+fixed a stray `terraria` in DEPLOYMENT.md and
+      now runs clean. All docs use only neutral/fictional names.)
 - [ ] M3.4 skills/gabs-mcp update incl. the agent edit contract — spec:
       31; gates: skill validation
 - [ ] M3.5 Acceptance scenario end-to-end — tests: T-ACC

@@ -28,6 +28,17 @@ jobs:
       - name: Run tests
         run: go test -v ./...
 
+  # Public docs, the example config, and the skill must use only neutral,
+  # fictional game names — GABS is game-agnostic (design/31).
+  genericity:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Public-surface genericity scan
+        run: ./scripts/genericity-scan.sh
+
   # Windows runs vet/build plus the process package, where all the
   # Windows-specific lifecycle code lives (Job Objects, LockFileEx,
   # GetProcessTimes, cmd.exe hooks). The wider suite's fixtures are
