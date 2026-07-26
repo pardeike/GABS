@@ -1172,18 +1172,24 @@ contract, not a scratchpad.
   every argument a profile contributes, and launches against the bare game-level
   args — for a save-data-root profile that means writing real save data to the
   wrong location, with nothing logged, because the old binary does not know it
-  ignored anything. ADDITION: an optional top-level `minGabsVersion`, enforced by
-  1.1.0+ (refuse to load and name both versions), plus a doctor advisory whenever
-  a game uses profiles/inputs/hooks and no minimum is declared.
-  This is explicitly **not** the rejected schema-version bump: config `version`
-  stays "1.0" and keeps meaning the config format; `minGabsVersion` constrains the
-  binary. Honest limit, verified and documented rather than papered over:
-  releases before 1.1.0 ignore unknown top-level fields *and* a bumped `version`,
-  so NO config construct can make an already-released binary fail. The field
-  protects against future skew; the doctor advisory and docs carry the 1.0.8 case,
-  where the only real remedy is upgrading every GABS that reads the config dir.
-  A build with an unparseable version (local `dev`) warns instead of refusing, so
-  the guard never bricks development.
+  ignored anything. ADDITION (since withdrawn, see resolution): an optional
+  top-level `minGabsVersion`, enforced by 1.1.0+ (refuse to load and name both
+  versions), plus a doctor advisory whenever a game uses profiles/inputs/hooks
+  and no minimum is declared.
+  RESOLVED 2026-07-26 by reviewer adjudication — deviation withdrawn, baseline
+  upheld: the schema field, load-time enforcement, semver comparison, and their
+  docs/example/tests are removed. The baseline's reasons prevailed: the field
+  expands the public schema for a mechanism that cannot constrain the
+  already-released binaries that motivated it (pre-1.1.0 releases ignore unknown
+  top-level fields *and* a bumped `version`, so NO config construct makes them
+  fail), and future config/binary compatibility negotiation is left to a
+  separately designed mechanism if ever needed. What remains is the part that
+  works today and fits the baseline: a non-fatal `games doctor` advisory —
+  emitted only when the selected game uses profiles/launchInputs/lifecycle,
+  never during ordinary loading/listing/starting/hot reload — telling the
+  operator that pre-1.1.0 binaries silently ignore those fields and every GABS
+  reading the config directory must be upgraded, plus the same warning in the
+  configuration docs.
 
 - 2026-07-23, M2.12, round-18 P1b, design/20:262-264 + design/30:243 (argv
   payload for the documented cmd.exe /c shape): design/20 defines the argv digest

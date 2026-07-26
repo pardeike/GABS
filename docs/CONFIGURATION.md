@@ -142,39 +142,22 @@ Minimal example:
 - Each launch pins exactly one config snapshot. Editing or deleting a profile
   never changes how an already-running launch is observed or stopped.
 
-### `minGabsVersion`: guarding against an older binary
+### Older GABS binaries: upgrade before adding profiles
 
-Optional top-level field naming the lowest GABS version that can read your
-config correctly:
-
-```json
-{ "version": "1.0", "minGabsVersion": "1.1.0", "games": { } }
-```
-
-A GABS below that version refuses to load the file and names both versions. Note
-what this does and does not protect:
-
-- **`version` is the config-format version and stays `"1.0"`.**
-  `minGabsVersion` constrains the *binary*. They are different things.
-- **It protects against future skew, not against GABS 1.0.8 or earlier.**
-  Releases before 1.1.0 ignore unknown top-level fields, so they ignore
-  `minGabsVersion` too — and they ignore a bumped `version` as well. There is no
-  config construct that makes them fail.
-
-That matters because of how those releases fail. A pre-1.1.0 GABS reads a config
-containing `profiles`, `launchInputs`, or `lifecycle` **without any complaint**
-and simply ignores those fields. Every argument a profile contributes disappears,
-so a launch that should have gone to an isolated data root goes to the default
-one instead — the game may write real save data in the wrong place. Nothing is
-logged, because the old binary does not know it is missing anything.
+GABS releases before 1.1.0 do not understand `profiles`, `launchInputs`, or
+`lifecycle`. A pre-1.1.0 GABS reads a config containing them **without any
+complaint** and simply ignores those fields. Every argument a profile
+contributes disappears, so a launch that should have gone to an isolated data
+root goes to the default one instead — the game may write real save data in the
+wrong place. Nothing is logged, because the old binary does not know it is
+missing anything. No config construct can make an already-released binary
+refuse the file: those releases ignore unknown top-level fields and a bumped
+config `version` alike (verified against the 1.0.8 release).
 
 The operational rule follows: **upgrade every GABS that reads a config directory
 to 1.1.0+ before adding profiles to it.** If several tools or clients share
-`~/.gabs`, upgrade them all. `gabs games doctor <id>` warns whenever a game uses
-the new fields and the config declares no `minGabsVersion`.
-
-A build with no parseable version (a local `dev` build) loads the config and
-warns that the requirement could not be checked, rather than refusing to start.
+`~/.gabs`, upgrade them all. `gabs games doctor <id>` prints a non-fatal
+reminder whenever a game uses the new fields.
 
 ## Launch Modes Explained
 

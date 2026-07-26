@@ -79,15 +79,6 @@ type GamesConfig struct {
 	Version string                `json:"version"`
 	Games   map[string]GameConfig `json:"games"`
 
-	// MinGabsVersion is the lowest GABS version the author asserts can read
-	// this config correctly. A binary below it refuses to load rather than
-	// silently ignoring fields it does not understand — the failure mode this
-	// exists to prevent, since a pre-profile GABS drops the args a profile
-	// contributes and launches against the wrong data root. Empty means no
-	// requirement. This is NOT the config-schema `version`, which stays "1.0"
-	// (design/12 rejects a schema bump); it constrains the *binary*.
-	MinGabsVersion string `json:"minGabsVersion,omitempty"`
-
 	ToolNormalization *ToolNormalizationConfig `json:"toolNormalization,omitempty"`
 	APIKey            string                   `json:"apiKey,omitempty"`            // API key for HTTP server authentication
 	PortRanges        *PortRangeConfig         `json:"portRanges,omitempty"`        // Custom port ranges for bridge connections
@@ -172,17 +163,6 @@ func parseGamesConfig(data []byte) (*GamesConfig, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
-	// The binary-version requirement is checked before per-game validation, so
-	// a too-old binary reports the one actionable problem instead of a list of
-	// downstream field complaints.
-	minVersionWarn, minVersionErr := checkMinGabsVersion(config.MinGabsVersion)
-	if minVersionErr != nil {
-		return nil, &ValidationError{Issues: []ConfigIssue{*minVersionErr}}
-	}
-	if minVersionWarn != nil {
-		ukWarns = append(ukWarns, *minVersionWarn)
-	}
-
 	// Extension validation (profiles, launch inputs, lifecycle gate).
 	// Deliberately NOT the legacy per-game Validate(): loading never ran it,
 	// and existing configs must keep loading exactly as before.
@@ -193,7 +173,7 @@ func parseGamesConfig(data []byte) (*GamesConfig, error) {
 		gameIDs = append(gameIDs, id)
 	}
 	sort.Strings(gameIDs)
-	// Injective storage mapping (round 6): distinct game IDs must not map to the
+	// Injective storage mapping: distinct game IDs must not map to the
 	// same runtime directory. The per-ID canonical-form rule (ValidateGameID)
 	// handles path-normalizing spellings, but two DISTINCT canonical IDs can still
 	// collide by CASE on a case-insensitive filesystem (macOS/Windows) — e.g.
