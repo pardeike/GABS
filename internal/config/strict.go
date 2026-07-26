@@ -72,7 +72,7 @@ func scanDuplicateMembers(data []byte) ([]ConfigIssue, error) {
 // naming the path — protection against silent typos without breaking old
 // files.
 var (
-	knownTopKeys = keySet("version", "games", "toolNormalization", "apiKey", "portRanges", "timeouts", "stripOutputSchema")
+	knownTopKeys = keySet("version", "games", "minGabsVersion", "toolNormalization", "apiKey", "portRanges", "timeouts", "stripOutputSchema")
 	knownToolN   = keySet("enableOpenAINormalization", "maxToolNameLength", "preserveOriginalName")
 	knownPorts   = keySet("customRanges")
 	knownRange   = keySet("min", "max")

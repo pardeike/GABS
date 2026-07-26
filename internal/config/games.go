@@ -76,8 +76,18 @@ type TimeoutsConfig struct {
 
 // GamesConfig represents the main GABS configuration
 type GamesConfig struct {
-	Version           string                   `json:"version"`
-	Games             map[string]GameConfig    `json:"games"`
+	Version string                `json:"version"`
+	Games   map[string]GameConfig `json:"games"`
+
+	// MinGabsVersion is the lowest GABS version the author asserts can read
+	// this config correctly. A binary below it refuses to load rather than
+	// silently ignoring fields it does not understand — the failure mode this
+	// exists to prevent, since a pre-profile GABS drops the args a profile
+	// contributes and launches against the wrong data root. Empty means no
+	// requirement. This is NOT the config-schema `version`, which stays "1.0"
+	// (design/12 rejects a schema bump); it constrains the *binary*.
+	MinGabsVersion string `json:"minGabsVersion,omitempty"`
+
 	ToolNormalization *ToolNormalizationConfig `json:"toolNormalization,omitempty"`
 	APIKey            string                   `json:"apiKey,omitempty"`            // API key for HTTP server authentication
 	PortRanges        *PortRangeConfig         `json:"portRanges,omitempty"`        // Custom port ranges for bridge connections
@@ -160,6 +170,17 @@ func parseGamesConfig(data []byte) (*GamesConfig, error) {
 	ukErrs, ukWarns, err := checkUnknownKeys(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	// The binary-version requirement is checked before per-game validation, so
+	// a too-old binary reports the one actionable problem instead of a list of
+	// downstream field complaints.
+	minVersionWarn, minVersionErr := checkMinGabsVersion(config.MinGabsVersion)
+	if minVersionErr != nil {
+		return nil, &ValidationError{Issues: []ConfigIssue{*minVersionErr}}
+	}
+	if minVersionWarn != nil {
+		ukWarns = append(ukWarns, *minVersionWarn)
 	}
 
 	// Extension validation (profiles, launch inputs, lifecycle gate).

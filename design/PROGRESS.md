@@ -1164,6 +1164,27 @@ contract, not a scratchpad.
 
 ## Deviations
 
+- 2026-07-26, post-M3, design/README "Compatibility promises" + design/12
+  ("No schema version bump"): the promise that a profile-enabled config must not
+  be used with a pre-profile binary was recorded as a **release-notes item, not a
+  schema mechanism**. Hands-on verification showed the consequence is worse than
+  a note can carry: the 1.0.8 release loads a profiles config silently, drops
+  every argument a profile contributes, and launches against the bare game-level
+  args — for a save-data-root profile that means writing real save data to the
+  wrong location, with nothing logged, because the old binary does not know it
+  ignored anything. ADDITION: an optional top-level `minGabsVersion`, enforced by
+  1.1.0+ (refuse to load and name both versions), plus a doctor advisory whenever
+  a game uses profiles/inputs/hooks and no minimum is declared.
+  This is explicitly **not** the rejected schema-version bump: config `version`
+  stays "1.0" and keeps meaning the config format; `minGabsVersion` constrains the
+  binary. Honest limit, verified and documented rather than papered over:
+  releases before 1.1.0 ignore unknown top-level fields *and* a bumped `version`,
+  so NO config construct can make an already-released binary fail. The field
+  protects against future skew; the doctor advisory and docs carry the 1.0.8 case,
+  where the only real remedy is upgrading every GABS that reads the config dir.
+  A build with an unparseable version (local `dev`) warns instead of refusing, so
+  the guard never bricks development.
+
 - 2026-07-23, M2.12, round-18 P1b, design/20:262-264 + design/30:243 (argv
   payload for the documented cmd.exe /c shape): design/20 defines the argv digest
   as "elements after argv[0]" — literally one excluded element. That cannot

@@ -15,6 +15,7 @@ import (
 	"github.com/pardeike/gabs/internal/process"
 	"github.com/pardeike/gabs/internal/steam"
 	"github.com/pardeike/gabs/internal/util"
+	"github.com/pardeike/gabs/internal/version"
 )
 
 // knownConflatingStatusTools are status-hook commands whose exit codes conflate
@@ -78,6 +79,7 @@ func runDoctor(log util.Logger, gameID, configDir string, showLastGood bool) int
 		doctorLaunchTarget(d, game)
 		if snap != nil {
 			doctorProfilesAndHooks(d, snap, game)
+			doctorVersionSkew(d, snap, game)
 		}
 		doctorMacOSTarget(d, game)
 	}
@@ -92,6 +94,37 @@ func runDoctor(log util.Logger, gameID, configDir string, showLastGood bool) int
 		return 1
 	}
 	return 0
+}
+
+// doctorVersionSkew reports the one hazard GABS cannot enforce.
+//
+// A pre-1.1.0 GABS reads a config with `profiles`/`launchInputs`/`lifecycle`
+// without complaint and ignores those fields, so every arg a profile
+// contributes silently disappears and the workload launches against whatever
+// data root the bare game-level args select. Verified against the 1.0.8
+// release: it ignores unknown top-level fields AND a bumped config `version`,
+// so there is no construct that makes an already-released binary fail. The only
+// available protection is telling the operator, and letting them declare
+// `minGabsVersion` so that any FUTURE binary below it refuses the config.
+func doctorVersionSkew(d *doctorReport, snap *config.Snapshot, game *config.GameConfig) {
+	usesNewFields := len(game.Profiles) > 0 || len(game.LaunchInputs) > 0 || game.Lifecycle != nil
+	if !usesNewFields {
+		return
+	}
+
+	declared := snap.Config.MinGabsVersion
+	if declared != "" {
+		d.info("Binary requirement: config declares minGabsVersion %s (this binary is %s)",
+			declared, version.Get())
+		return
+	}
+
+	d.warn("this game uses profiles/launch inputs/lifecycle hooks, but the config declares no "+
+		"minGabsVersion — a GABS older than %s reads this config without complaint and silently "+
+		"ignores those fields, dropping every argument a profile contributes (a launch can hit the "+
+		"wrong data root). Add \"minGabsVersion\": \"%s\" at the top level so a too-old binary refuses "+
+		"the config instead. Releases before %s cannot detect this and will not warn.",
+		config.MinGabsVersionForProfiles, config.MinGabsVersionForProfiles, config.MinGabsVersionForProfiles)
 }
 
 // doctorLaunchTarget checks the launch target reachability per mode (the
