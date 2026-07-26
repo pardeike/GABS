@@ -99,7 +99,17 @@ func main() {
 		grace        = fs.Duration("grace", 3*time.Second, "Graceful stop timeout before kill")
 	)
 
-	if err := fs.Parse(remainingArgs); err != nil {
+	// Hoist process-wide flags out of the argument vector first: the flag
+	// package stops at the first positional, so a flag written after the
+	// subcommand (`gabs games list --configDir /path`) would otherwise be
+	// silently ignored and run against the default config directory.
+	globalArgs, subcmdArgs, hoistErr := hoistGlobalFlags(remainingArgs)
+	if hoistErr != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", hoistErr)
+		os.Exit(2)
+	}
+
+	if err := fs.Parse(globalArgs); err != nil {
 		os.Exit(2)
 	}
 
@@ -152,7 +162,7 @@ func main() {
 	case "server":
 		exitCode = runServer(ctx, log, opts)
 	case "games":
-		exitCode = manageGames(ctx, log, opts, fs.Args())
+		exitCode = manageGames(ctx, log, opts, subcmdArgs)
 	case "version":
 		fmt.Printf("%s %s (%s)\n", "gabs", version.Get(), version.GetCommit())
 		return
@@ -310,6 +320,14 @@ func manageGames(ctx context.Context, log util.Logger, opts options, args []stri
 	}
 
 	action := args[0]
+
+	// Reject positionals beyond the action's arity. Actions read a fixed index
+	// and previously ignored the remainder, so a misplaced token disappeared
+	// without a word.
+	if err := checkNoTrailingArgs(action, args[1:], trailingAllowanceFor(action)); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 2
+	}
 
 	switch action {
 	case "list":

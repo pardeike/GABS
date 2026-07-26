@@ -263,6 +263,10 @@ is useful when you want separate local, test, or CI environments.
 # Use a custom config directory
 gabs server --configDir /path/to/custom-gabs
 gabs games --configDir /path/to/custom-gabs list
+
+# The flag is positional-independent: these are equivalent
+gabs games list --configDir /path/to/custom-gabs
+gabs games start adventure --configDir /path/to/custom-gabs --profile combat-test
 ```
 
 Typical contents include `config.json`, per-game directories, `bridge.json`, and
