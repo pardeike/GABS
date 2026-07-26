@@ -799,12 +799,23 @@ func (c *Controller) launchLogPath() string {
 	return filepath.Join(c.runtimeDir(), "launch.log")
 }
 
-// runtimeDir returns the per-game runtime directory.
+// runtimeDir returns the per-game runtime directory: the one stamped from the
+// active config dir when present, else the legacy ~/.gabs/<gameId> default.
 func (c *Controller) runtimeDir() string {
 	if c.spec.RuntimeDir != "" {
 		return c.spec.RuntimeDir
 	}
-	return filepath.Dir(c.getBridgePath())
+	return c.defaultRuntimeDir()
+}
+
+// defaultRuntimeDir is the pre-profile location, used only when no runtime dir
+// was stamped onto the spec.
+func (c *Controller) defaultRuntimeDir() string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".gabs", c.spec.GameId)
+	}
+	return filepath.Join(homeDir, ".gabs", c.spec.GameId)
 }
 
 // LaunchLogTail returns up to maxBytes from the end of the child output
@@ -844,12 +855,12 @@ func startErrorHintFor(err error, goos string) string {
 	return ""
 }
 
+// getBridgePath is the endpoint-cache path handed to the workload as
+// GABS_BRIDGE_PATH. It must follow the active runtime directory: hardcoding
+// $HOME/.gabs here made GABS write bridge.json under --configDir while telling
+// the game to read a stale file elsewhere, with a different port and token.
 func (c *Controller) getBridgePath() string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(".gabs", c.spec.GameId, "bridge.json")
-	}
-	return filepath.Join(homeDir, ".gabs", c.spec.GameId, "bridge.json")
+	return filepath.Join(c.runtimeDir(), "bridge.json")
 }
 
 func (c *Controller) stopByProcessName(processName string, force bool, grace time.Duration) error {
