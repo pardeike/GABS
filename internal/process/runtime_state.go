@@ -6,45 +6,165 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/pardeike/gabs/internal/config"
 	"github.com/pardeike/gabs/internal/launch"
 )
 
-// RuntimeClaimExists reports whether a runtime.json is present for gameID —
-// true even for a corrupt/unreadable claim, so a removed-but-claimed game stays
-// addressable by ID (design/07) and can still be forgotten via repair.
-func RuntimeClaimExists(gameID, configDir string) bool {
+// safeExactClaimParent resolves gameID's claim directory through exact
+// on-disk path components. The config root itself may be symlinked, but a
+// game ID must never address another game's directory through an in-root
+// symlink or a case-insensitive spelling alias, so every component below the
+// resolved root must be an exact-spelling, non-symlink directory. Traversing
+// a symlinked component would target another location, so it is rejected even
+// for removal.
+func safeExactClaimParent(gameID, configDir string) (string, error) {
 	cp, err := config.NewConfigPaths(configDir)
 	if err != nil {
-		return false
+		return "", err
 	}
-	path, err := cp.SafeRuntimeStatePath(gameID)
+	if _, err := cp.SafeRuntimeStatePath(gameID); err != nil {
+		return "", err // unsafe ID: lexical or symlink-ancestor escape
+	}
+	current, err := filepath.EvalSymlinks(cp.GetBaseDir())
 	if err != nil {
-		return false // an unsafe ID has no addressable claim
+		return "", err
 	}
-	_, statErr := os.Stat(path)
-	return statErr == nil
+	for _, component := range strings.Split(gameID, "/") {
+		entries, err := os.ReadDir(current)
+		if err != nil {
+			return "", err
+		}
+		exact := false
+		for _, entry := range entries {
+			if entry.Name() == component {
+				exact = true
+				break
+			}
+		}
+		if !exact {
+			// On a case-insensitive filesystem the component may exist under a
+			// different spelling; an inexact spelling must not address another
+			// ID's directory.
+			return "", os.ErrNotExist
+		}
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("runtime claim path component %s is a symlink", current)
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("runtime claim path component %s is not a directory", current)
+		}
+	}
+	return current, nil
+}
+
+// errNonRegularClaim marks a runtime.json that exists but is not a regular
+// file (a symlink or special file). Such a leaf is never read through; explicit
+// repair may still unlink the exact entry.
+var errNonRegularClaim = errors.New("runtime claim is not a regular file")
+
+// regularClaimPath is safeExactClaimParent extended to the leaf: the claim
+// file itself must be a non-symlink regular file before any read. Content is
+// deliberately not inspected — a corrupt claim stays addressable so repair and
+// runtime-only status can surface it.
+func regularClaimPath(gameID, configDir string) (string, os.FileInfo, error) {
+	parent, err := safeExactClaimParent(gameID, configDir)
+	if err != nil {
+		return "", nil, err
+	}
+	path := filepath.Join(parent, "runtime.json")
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return "", nil, fmt.Errorf("%w: %s", errNonRegularClaim, path)
+	}
+	return path, info, nil
+}
+
+// errClaimReplaced marks a pathname whose file was swapped between the
+// regularity gate and the open. The legitimate writer replaces the claim by
+// rename on every publish, so callers treat it as a transient race and retry.
+var errClaimReplaced = errors.New("runtime claim was replaced while opening")
+
+// readRegularClaim reads the gated claim through an open handle proven (via
+// SameFile) to be the exact regular file the gate inspected — a pathname
+// swapped to a symlink after the gate is never read through — and tightens
+// legacy permissions through that same handle, never the pathname.
+func readRegularClaim(gameID, configDir string) ([]byte, error) {
+	path, gateInfo, err := regularClaimPath(gameID, configDir)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	handleInfo, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !handleInfo.Mode().IsRegular() || !os.SameFile(gateInfo, handleInfo) {
+		return nil, fmt.Errorf("%w: %s", errClaimReplaced, path)
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, err
+	}
+	if err := tightenLegacyClaimHandle(f, handleInfo); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// RuntimeClaimExists reports whether gameID has an addressable regular
+// runtime.json — true even for a corrupt/unreadable claim, so a
+// removed-but-claimed game stays addressable by ID (design/07) and can still
+// be forgotten via repair. Unsafe IDs, symlinked path components, and
+// symlinked or otherwise non-regular claim files are never addressable.
+func RuntimeClaimExists(gameID, configDir string) bool {
+	_, _, err := regularClaimPath(gameID, configDir)
+	return err == nil
 }
 
 // ListRuntimeClaimIDs returns, sorted, every game ID that has a persisted
 // runtime.json under configDir — the runtime surface that no-argument
 // games_status unions with the configured entries (design/07): a game removed
-// from config but still holding a claim must remain discoverable. An unreadable
-// individual entry is skipped, never failing the whole scan, so a corrupt claim
-// still surfaces (its status resolves to unknown, with the repair path); only a
-// failure to scan the base directory itself is returned.
+// from config but still holding a claim must remain discoverable. The scan
+// never follows symlinks and includes only entries the regular-claim resolver
+// would address, so symlinked leaves and malformed storage aliases are
+// ignored while a corrupt-but-regular claim still surfaces (its status
+// resolves to unknown, with the repair path). An unreadable individual entry
+// is skipped, never failing the whole scan; only a failure to scan the base
+// directory itself is returned.
 func ListRuntimeClaimIDs(configDir string) ([]string, error) {
 	cp, err := config.NewConfigPaths(configDir)
 	if err != nil {
 		return nil, err
 	}
-	base := cp.GetBaseDir()
+	// The config root itself may be a symlink; resolve it once so WalkDir
+	// (which never descends symlinked directories) still walks the real tree.
+	base, err := filepath.EvalSymlinks(cp.GetBaseDir())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
 	var ids []string
 	// A nested `/` game ID maps to a nested directory, so discovery walks the
 	// tree for runtime.json at any depth and decodes the storage key — the
@@ -72,7 +192,14 @@ func ListRuntimeClaimIDs(configDir string) ([]string, error) {
 		if relErr != nil || rel == "." {
 			return nil
 		}
-		ids = append(ids, filepath.ToSlash(rel))
+		id := filepath.ToSlash(rel)
+		// Only what the resolver would address counts as a claim: this drops a
+		// symlink merely named runtime.json and any storage path that is not a
+		// valid game ID.
+		if _, _, resolveErr := regularClaimPath(id, configDir); resolveErr != nil {
+			return nil
+		}
+		ids = append(ids, id)
 		return nil
 	})
 	if walkErr != nil {
@@ -260,14 +387,14 @@ type RuntimeState struct {
 	// HistoryContextHash pins the input-free track-record context hash at
 	// claim creation (design/08): delivery, reconnect, stop, recovery, and
 	// delayed completions credit THIS launch's context, never a value
-	// recomputed from hot-reloaded config (review round 10).
+	// recomputed from hot-reloaded config.
 	HistoryContextHash string `json:"historyContextHash,omitempty"`
 
 	// HistorySuccess pins the snapshot + input-bucket identity needed to
 	// record this launch's Stage 4 verified start from the claim alone, so a
 	// promotion that happens asynchronously (passive status, attachment,
 	// recovery) or after a crash-and-restart still credits the start with the
-	// right lastGood and bucket (round 11 P1-2). Pinned at publication.
+	// right lastGood and bucket. Pinned at publication.
 	HistorySuccess *HistorySuccessIdentity `json:"historySuccess,omitempty"`
 
 	Profile           string   `json:"profile,omitempty"`
@@ -298,7 +425,7 @@ type RuntimeState struct {
 	ProcessStartDeadline time.Time               `json:"processStartDeadline,omitempty"`
 	ObservedProfile      string                  `json:"observedProfile,omitempty"` // external snapshots only
 	// PendingCleanStops and PendingDeliveries are verified history events whose
-	// cleanStops/deliveriesVerified credit has not yet landed (round 16 F5).
+	// cleanStops/deliveriesVerified credit has not yet landed.
 	// Each entry is SELF-CONTAINED — it carries the event's own immutable
 	// identity and history coordinates — so reconciliation credits the exact
 	// event as a pure function of the entry, independent of the claim's current
@@ -311,7 +438,7 @@ type RuntimeState struct {
 }
 
 // PendingCredit is a self-contained record of a verified history event awaiting
-// its idempotent credit (round 16 F5). ID is the operationID (clean stop) or
+// its idempotent credit. ID is the operationID (clean stop) or
 // connectionID (verified delivery); Profile and ContextHash pin which history
 // entry it credits, captured when the event was observed — never re-read from
 // the mutable claim at reconciliation time.
@@ -459,7 +586,7 @@ func claimRuntimeStateWithoutLink(gameID, configDir, path, tmpPath string, linkE
 
 // SaveRuntimeState overwrites the shared runtime state file in-place.
 // saveRuntimeStateFailHook forces SaveRuntimeState to fail — test-only, to
-// exercise the round-14 F5 record-first ordering (a runtime-save failure after
+// exercise the record-first ordering (a runtime-save failure after
 // a credit must replay to exactly-one via the idempotent credit, never losing
 // or double-counting the event).
 var saveRuntimeStateFailHook func() error
@@ -518,47 +645,32 @@ func SaveRuntimeState(gameID, configDir string, state RuntimeState) error {
 	return nil
 }
 
-// LoadRuntimeState reads the shared runtime state file if present.
+// LoadRuntimeState reads the shared runtime state file if present. The claim
+// is addressed through exact on-disk components and must be a regular file: a
+// symlink is never read through, so an unsafe path or non-regular leaf returns
+// an error and the claim's status resolves to unknown with the repair path.
 func LoadRuntimeState(gameID, configDir string) (*RuntimeState, error) {
-	cp, err := config.NewConfigPaths(configDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create config paths: %w", err)
-	}
-
-	path, err := cp.SafeRuntimeStatePath(gameID)
-	if err != nil {
-		return nil, err
-	}
-	// Read + tighten under a bounded retry: on Windows a concurrent writer's
-	// rename/replace briefly holds runtime.json without read-sharing (a sharing
-	// violation), and a stop/superseding start can remove it between the read and
-	// the tighten. Both are transient — the write window is a single tmp+rename —
-	// so retry rather than surface a spurious hard error. A removed file is no
-	// claim; a legitimate loose-permission file that cannot be tightened still
-	// surfaces (the token must not stay world-readable).
+	// Read through a gated handle under a bounded retry: on Windows a
+	// concurrent writer's rename/replace briefly holds runtime.json without
+	// read-sharing (a sharing violation), and on every OS a legitimate publish
+	// swaps the inode between the gate and the open (errClaimReplaced). Both
+	// are transient — the write window is a single tmp+rename — so retry
+	// rather than surface a spurious hard error. A removed file is no claim; a
+	// non-regular leaf and a legitimate loose-permission file that cannot be
+	// tightened still surface (the token must not stay world-readable).
 	var data []byte
 	for attempt := 0; ; attempt++ {
 		var rerr error
-		data, rerr = os.ReadFile(path)
+		data, rerr = readRegularClaim(gameID, configDir)
 		if rerr != nil {
 			if errors.Is(rerr, os.ErrNotExist) {
 				return nil, nil
 			}
-			if isTransientClaimReadError(rerr) && attempt < maxClaimReadAttempts {
+			if (errors.Is(rerr, errClaimReplaced) || isTransientClaimReadError(rerr)) && attempt < maxClaimReadAttempts {
 				time.Sleep(claimReadRetryDelay)
 				continue
 			}
 			return nil, fmt.Errorf("failed to read runtime state: %w", rerr)
-		}
-		if terr := tightenLegacyClaimPermissions(path); terr != nil {
-			if errors.Is(terr, os.ErrNotExist) {
-				return nil, nil
-			}
-			if isTransientClaimReadError(terr) && attempt < maxClaimReadAttempts {
-				time.Sleep(claimReadRetryDelay)
-				continue
-			}
-			return nil, terr
 		}
 		break
 	}
@@ -567,18 +679,20 @@ func LoadRuntimeState(gameID, configDir string) (*RuntimeState, error) {
 	if perr != nil {
 		// A torn or empty claim can only be the link-less fallback mid-
 		// publication (design/05: readers never act on a partial claim).
-		// The transition lock brackets that window: take it and re-read.
+		// The transition lock brackets that window: take it and re-read —
+		// through a fresh gate and handle, so a pathname swapped to a symlink
+		// while this reader waited on the lock is never read through.
 		lock, lerr := AcquireTransitionLock(gameID, configDir, 2*time.Second)
 		if lerr != nil {
 			return nil, fmt.Errorf("failed to parse runtime state (and could not take the transition lock to re-read): %w", perr)
 		}
-		data, err = os.ReadFile(path)
+		data, rerr := readRegularClaim(gameID, configDir)
 		lock.Release()
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
+		if rerr != nil {
+			if errors.Is(rerr, os.ErrNotExist) {
 				return nil, nil
 			}
-			return nil, fmt.Errorf("failed to read runtime state: %w", err)
+			return nil, fmt.Errorf("failed to read runtime state: %w", rerr)
 		}
 		if state, perr = parseRuntimeState(data); perr != nil {
 			return nil, fmt.Errorf("failed to parse runtime state: %w", perr)
@@ -600,7 +714,7 @@ func parseRuntimeState(data []byte) (*RuntimeState, error) {
 
 // RemoveRuntimeState removes the shared runtime state file for a game.
 // removeRuntimeStateFailHook forces RemoveRuntimeState to fail — test-only, to
-// exercise the round-14 F5 record-first clean-stop ordering (a claim-removal
+// exercise the record-first clean-stop ordering (a claim-removal
 // failure after the cleanStop credit must replay to exactly-one, never losing
 // or double-counting the stop event).
 var removeRuntimeStateFailHook func() error
@@ -619,16 +733,19 @@ func RemoveRuntimeState(gameID, configDir string) error {
 			return err
 		}
 	}
-	cp, err := config.NewConfigPaths(configDir)
+	parent, err := safeExactClaimParent(gameID, configDir)
 	if err != nil {
-		return fmt.Errorf("failed to create config paths: %w", err)
-	}
-
-	path, err := cp.SafeRuntimeStatePath(gameID)
-	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil // no addressable claim directory: nothing to remove
+		}
 		return err
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+	// The leaf is unlinked exactly, never followed: repair must be able to
+	// remove a malformed (symlinked or special) claim without touching its
+	// target, so leaf regularity is deliberately not required here. Symlinked
+	// intermediate directories were still rejected above — unlinking through
+	// one would target another location.
+	if err := os.Remove(filepath.Join(parent, "runtime.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("failed to remove runtime state: %w", err)
 	}
 
@@ -763,18 +880,19 @@ func TransitionRuntimeState(gameID, configDir string, lockTimeout time.Duration,
 
 // TransitionRuntimeStateWithCredit is TransitionRuntimeState plus a credit hook
 // that runs UNDER THE LOCK, BEFORE runtime.json is saved, and can ABORT the
-// transition by returning an error (round 14 F5). The history counters belong
+// transition by returning an error. The history counters belong
 // here — recorded FIRST (idempotent by event ID), so the runtime commit is
 // gated on the credit committing:
 //   - a history-write failure aborts the runtime save; the caller retries and
-//     the idempotent credit counts at most once — no event is ever lost. (The
-//     earlier round-13 afterCommit ordering ran the credit AFTER the save and
+//     the idempotent credit counts at most once — no event is ever lost. (An
+//     earlier afterCommit ordering ran the credit AFTER the save and
 //     could permanently drop an event whose history write failed once the
 //     runtime commit had already consumed the trigger.)
 //   - a runtime-save failure after a successful credit replays the same way:
 //     the credit no-ops by event ID, the runtime save is retried.
 //   - a crash between the two writes replays: the runtime state is unchanged,
 //     so the operation re-runs and the credit no-ops.
+//
 // A corrupt/unreadable history degrades to an empty track record inside
 // LoadHistory (design/30) and still credits+repairs, so the degradation rule
 // never blocks the lifecycle. Still fenced by the same lock, so a stale caller

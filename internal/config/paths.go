@@ -20,8 +20,8 @@ import (
 // to a directory another ID already owns, so accepting them as distinct public
 // IDs would let status/history/stop for one ID read or remove another ID's
 // claim. Traversal/containment beyond aliasing is still enforced structurally by
-// SafeGameDir — the character set is not otherwise constrained (round-19: a
-// character grammar breaks accepted configs; a canonical-FORM rule does not).
+// SafeGameDir — the character set is not otherwise constrained (a character
+// grammar breaks accepted configs; a canonical-FORM rule does not).
 func ValidateGameID(gameID string) error {
 	if gameID == "" {
 		return fmt.Errorf("game ID is required")
@@ -66,7 +66,7 @@ func isAbsoluteID(id string) bool {
 }
 
 // SafeGameDir validates gameID and returns its runtime directory, proving it
-// stays beneath the canonical config base (design/07) through two layers:
+// stays beneath the canonical config base (design/07) through three layers:
 //   - LEXICAL: filepath.Join cleans the ID, so a `..` traversal escapes the base
 //     and is rejected before any filesystem op; a plain nested `/` ID stays a
 //     descendant (base/factory/old).
@@ -74,6 +74,11 @@ func isAbsoluteID(id string) bool {
 //     must lie within the resolved base, so a symlinked intermediate cannot
 //     redirect a read/write/lock/removal outside the base even when the leaf does
 //     not exist yet (the create path is not exempt).
+//   - EXACT: every already-existing component beneath the resolved base must be
+//     an exact-spelling, non-symlink directory, so an in-root symlink or a
+//     case/normalization alias can never redirect reads or writes into another
+//     game's directory. Not-yet-existing tails pass: creation makes real
+//     directories.
 func (cp *ConfigPaths) SafeGameDir(gameID string) (string, error) {
 	if err := ValidateGameID(gameID); err != nil {
 		return "", err
@@ -94,7 +99,72 @@ func (cp *ConfigPaths) SafeGameDir(gameID string) (string, error) {
 			return "", fmt.Errorf("game ID %q resolves through a symlink outside the config base", gameID)
 		}
 	}
+	if err := rejectAliasedExistingComponents(cp.baseDir, gameID); err != nil {
+		return "", err
+	}
 	return dir, nil
+}
+
+// rejectAliasedExistingComponents walks gameID's already-existing path
+// components beneath the resolved base and rejects any that is a symlink, a
+// non-directory, or reachable only through an inexact spelling (a case or
+// normalization alias on an insensitive filesystem). An in-root symlink whose
+// target is still inside the base passes ancestor containment, so this exact
+// walk is what keeps one game ID from addressing another game's directory.
+// An alias is reported as os.ErrNotExist: the EXACT spelling has no directory,
+// and readers treat that as "no claim" while writers surface the message.
+func rejectAliasedExistingComponents(baseDir, gameID string) error {
+	current, err := filepath.EvalSymlinks(baseDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // nothing exists yet, so nothing can be aliased
+		}
+		return err
+	}
+	for _, component := range strings.Split(gameID, "/") {
+		entries, err := os.ReadDir(current)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		exact := listingHasExactName(entries, component)
+		current = filepath.Join(current, component)
+		info, lerr := os.Lstat(current)
+		if !exact && lerr == nil {
+			// The listing may simply have raced an exact create; re-list once
+			// before calling it an alias.
+			if relisted, rerr := os.ReadDir(filepath.Dir(current)); rerr == nil {
+				exact = listingHasExactName(relisted, component)
+			}
+			if !exact {
+				return fmt.Errorf("game ID %q aliases an existing directory entry under the config base: %w", gameID, os.ErrNotExist)
+			}
+		}
+		if lerr != nil {
+			if os.IsNotExist(lerr) {
+				return nil // the rest of the path does not exist yet
+			}
+			return lerr
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("game directory component %s is a symlink", current)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("game directory component %s is not a directory", current)
+		}
+	}
+	return nil
+}
+
+func listingHasExactName(entries []os.DirEntry, name string) bool {
+	for _, entry := range entries {
+		if entry.Name() == name {
+			return true
+		}
+	}
+	return false
 }
 
 // SafeRuntimeStatePath is SafeGameDir joined with runtime.json.
