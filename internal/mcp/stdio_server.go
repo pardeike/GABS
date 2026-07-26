@@ -864,7 +864,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			content.WriteString(fmt.Sprintf("  Working Directory: %s\n", game.WorkingDir))
 		}
 		if len(game.Args) > 0 {
-			content.WriteString(fmt.Sprintf("  Arguments: %s\n", strings.Join(game.Args, " ")))
+			content.WriteString(fmt.Sprintf("  %s: %s\n", config.ArgumentsLabel(*game), strings.Join(game.Args, " ")))
 		}
 
 		// Validation status for launcher-based games
@@ -883,6 +883,12 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		if game.Description != "" {
 			content.WriteString(fmt.Sprintf("\nDescription: %s\n", game.Description))
 		}
+
+		// Profiles and launch inputs in the text block too: structuredContent
+		// alone is not enough, because not every MCP client surfaces it to a
+		// model, and games_start's own schema points callers here to discover
+		// them.
+		content.WriteString(config.DescribeLaunchContexts(*game))
 
 		status := s.checkGameStatus(game.ID)
 		validationWarnings := gameValidationWarnings(*game)
@@ -3378,12 +3384,7 @@ func (s *Server) configFilePathHint() string {
 
 // sortedProfileNames returns the profile names in deterministic order.
 func sortedProfileNames(profiles map[string]config.ProfileConfig) []string {
-	names := make([]string, 0, len(profiles))
-	for name := range profiles {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
+	return config.SortedProfileNames(profiles)
 }
 
 // profilesStructured renders profile discovery metadata: names and

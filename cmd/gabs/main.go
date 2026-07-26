@@ -595,7 +595,7 @@ func showGame(log util.Logger, gameID string, configDir string) int {
 		fmt.Printf("  Working Directory: %s\n", game.WorkingDir)
 	}
 	if len(game.Args) > 0 {
-		fmt.Printf("  Arguments: %s\n", strings.Join(game.Args, " "))
+		fmt.Printf("  %s: %s\n", config.ArgumentsLabel(*game), strings.Join(game.Args, " "))
 	}
 	if game.StopProcessName != "" {
 		fmt.Printf("  Stop Process Name: %s\n", game.StopProcessName)
@@ -606,6 +606,9 @@ func showGame(log util.Logger, gameID string, configDir string) int {
 	if game.Description != "" {
 		fmt.Printf("  Description: %s\n", game.Description)
 	}
+	// The CLI renders the same launch-context text as games_show so the two
+	// frontends agree on what is discoverable.
+	fmt.Print(config.DescribeLaunchContexts(*game))
 
 	return 0
 }
