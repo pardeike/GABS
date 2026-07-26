@@ -47,7 +47,7 @@ type StartGate struct {
 	Probes          map[string]*launch.ResolvedLifecycle
 	StopProcessName string
 	// HistoryContextHash + HistorySuccess pin this launch's track-record
-	// identity in the claim at publication (round 11 P1-2), so every Stage 4
+	// identity in the claim at publication, so every Stage 4
 	// promotion path records the verified start from the claim alone and a
 	// crash before endpoint allocation still leaves recovery an identity.
 	HistoryContextHash string
@@ -124,11 +124,17 @@ func GateStart(g StartGate) (*StartGateResult, error) {
 
 		state = NewRuntimeState(g.Spec, RuntimeStateStatusStarting)
 		state.OwnerInstanceID = g.InstanceID
-		// Pin the track-record identity at publication (round 11 P1-2).
+		// Pin the track-record identity at publication.
 		state.HistoryContextHash = g.HistoryContextHash
 		state.HistorySuccess = g.HistorySuccess
 		execPID := os.Getpid()
 		execStart, _ := ProcessStartTime(execPID)
+		// The deadline stamped at publication covers only the probe phase:
+		// claim evaluation may already have consumed real time (a slow status
+		// hook), and the probes below run under their own hook timeouts. The
+		// full process-start budget is re-stamped once Stage 2 completes, so
+		// evaluation and probe time are never charged against the Stage 4
+		// verification window.
 		state.Operation = &RuntimeOperation{
 			OperationID:          NewFencingID(),
 			Action:               OperationActionStart,
@@ -136,9 +142,9 @@ func GateStart(g StartGate) (*StartGateResult, error) {
 			ExecutorPID:          execPID,
 			ExecutorPIDStartTime: execStart,
 			AttemptStartedAt:     now,
-			Deadline:             now.Add(g.Budget),
+			Deadline:             time.Now().UTC().Add(preflightProbeBudget(g)),
 		}
-		state.ProcessStartDeadline = now.Add(g.Budget)
+		state.ProcessStartDeadline = state.Operation.Deadline
 
 		cerr := ClaimRuntimeState(g.GameID, g.ConfigDir, state)
 		if cerr == nil {
@@ -173,7 +179,22 @@ func GateStart(g StartGate) (*StartGateResult, error) {
 	if refusal != nil {
 		return &StartGateResult{Refusal: refusal, Warnings: warnings}, nil
 	}
-	return &StartGateResult{Claim: &state, Warnings: warnings}, nil
+	// Stage 2 is complete: re-stamp the FULL process-start budget so Stage 4
+	// keeps its promised verification window however long claim evaluation and
+	// probes took, and a just-spawned unobserved launch is never immediately
+	// supersedable. Fenced: a successor that won the claim mid-probe stays.
+	restamped, rerr := FencedTransition(g.GameID, g.ConfigDir, state.LaunchID, state.Operation.OperationID, func(s *RuntimeState) error {
+		s.Operation.Deadline = time.Now().UTC().Add(g.Budget)
+		s.ProcessStartDeadline = s.Operation.Deadline
+		return nil
+	})
+	if rerr != nil {
+		if errors.Is(rerr, ErrFencingViolation) || errors.Is(rerr, ErrNoRuntimeClaim) {
+			return &StartGateResult{Refusal: supersededDuringProbeRefusal(g), Warnings: warnings}, nil
+		}
+		return nil, rerr
+	}
+	return &StartGateResult{Claim: restamped, Warnings: warnings}, nil
 }
 
 // gateExistingClaim returns a refusal, or nil when the claim may be cleared
@@ -243,7 +264,7 @@ func gateExistingClaim(g StartGate, claim *RuntimeState, now time.Time) (*StartR
 
 	// Bridge evidence is claim-bound and evaluated HERE, per claim — a
 	// boolean sampled before the claim load could attribute an old
-	// launch's socket to a successor (review round 9).
+	// launch's socket to a successor.
 	gabpLive := g.BridgeBound != nil && g.BridgeBound(claim.LaunchID, "")
 	ev := EvaluateLiveness(LivenessInput{
 		GABPLive:         gabpLive,
@@ -354,9 +375,29 @@ func removeEvaluatedClaim(g StartGate, evaluated *RuntimeState) error {
 	// A superseding start clears a stale claim: credit EVERY pending history event
 	// (clean stops, verified deliveries) it still carries, remove the claim, then
 	// GC the markers behind the durable removal, so no verified event is lost with
-	// the claim and none replays (round 16/17 F5). A credit-write failure persists
+	// the claim and none replays. A credit-write failure persists
 	// the pending lists and aborts, leaving the claim for a later retry.
 	return creditPendingThenRemoveLocked(g.GameID, g.ConfigDir, cur)
+}
+
+// preflightProbeMargin covers the stopProcessName scan and the fenced claim
+// rewrites of the probe phase beyond the hook timeouts themselves.
+const preflightProbeMargin = 10 * time.Second
+
+// preflightProbeBudget bounds the operation deadline for the probe phase:
+// probes run concurrently, so the slowest configured status-hook timeout
+// dominates, plus the fixed margin.
+func preflightProbeBudget(g StartGate) time.Duration {
+	budget := preflightProbeMargin
+	for _, lc := range g.Probes {
+		if lc == nil || lc.Status == nil {
+			continue
+		}
+		if t := time.Duration(lc.Status.TimeoutSeconds)*time.Second + preflightProbeMargin; t > budget {
+			budget = t
+		}
+	}
+	return budget
 }
 
 // runPreStartProbes probes every profile's status hook concurrently, each
@@ -535,9 +576,9 @@ func FencedTransition(gameID, configDir, launchID, operationID string, mutate fu
 }
 
 // FencedTransitionWithCredit is FencedTransition with a credit hook run under
-// the lock BEFORE the runtime.json save, able to abort the transition (round 14
-// F5) — the history counters that must be recorded first (idempotent by event
-// ID) so no event is lost or double-counted belong here, not in mutate.
+// the lock BEFORE the runtime.json save, able to abort the transition — the
+// history counters that must be recorded first (idempotent by event ID) so no
+// event is lost or double-counted belong here, not in mutate.
 func FencedTransitionWithCredit(gameID, configDir, launchID, operationID string, mutate func(*RuntimeState) error, credit func(*RuntimeState) error) (*RuntimeState, error) {
 	return TransitionRuntimeStateWithCredit(gameID, configDir, transitionLockGateTimeout, func(s *RuntimeState) error {
 		if s.LaunchID != launchID {
