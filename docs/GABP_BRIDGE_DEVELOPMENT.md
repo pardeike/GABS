@@ -356,12 +356,12 @@ flow is:
   "method": "session/hello",
   "params": {
     "token": "secret-auth-token",
-    "bridgeVersion": "1.0.0",
+    "bridgeVersion": "1.1.0",
     "platform": "darwin",
     "launchId": "f28c9f0d-bf7a-4f0a-9b42-5c61a54c5f7d",
     "clientInfo": {
       "name": "gabs",
-      "version": "1.0.0"
+      "version": "1.1.0"
     }
   }
 }
