@@ -24,8 +24,8 @@ var steamResolveExecutable = func(appID string) (string, error) {
 }
 
 // SetSteamResolveExecutableForTesting swaps the SteamManaged resolvability
-// probe so a test can pin a resolved executable without a real Steam install
-// (round 12 F6 production tests). Returns a restore func.
+// probe so a test can pin a resolved executable without a real Steam install.
+// Returns a restore func.
 func SetSteamResolveExecutableForTesting(fn func(appID string) (string, error)) func() {
 	prev := steamResolveExecutable
 	steamResolveExecutable = fn

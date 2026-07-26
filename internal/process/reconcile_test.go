@@ -251,7 +251,9 @@ func TestPendingCleanStopCreditedAfterOperationCleared(t *testing.T) {
 	dir := t.TempDir()
 	const hash = "sha256:ctx"
 	swapLivenessProbes(t,
-		func(*launch.ResolvedHook, string, string) (string, HookResult) { return StatusStopped, HookResult{ExitCode: 1} },
+		func(*launch.ResolvedHook, string, string) (string, HookResult) {
+			return StatusStopped, HookResult{ExitCode: 1}
+		},
 		nil, func(string) ([]int, error) { return nil, nil })
 
 	opA := failedVerifiedStop(t, dir, "g1", hash, "combat")
@@ -320,7 +322,9 @@ func TestInterruptedRecoveryReplaysCleanStopCredit(t *testing.T) {
 	dir := t.TempDir()
 	const hash = "sha256:ctx"
 	swapLivenessProbes(t,
-		func(*launch.ResolvedHook, string, string) (string, HookResult) { return StatusStopped, HookResult{ExitCode: 1} },
+		func(*launch.ResolvedHook, string, string) (string, HookResult) {
+			return StatusStopped, HookResult{ExitCode: 1}
+		},
 		nil, func(string) ([]int, error) { return nil, nil })
 
 	_ = failedVerifiedStop(t, dir, "g1", hash, "combat")
@@ -350,7 +354,9 @@ func TestSupersedingStartCreditsPendingCleanStop(t *testing.T) {
 	dir := t.TempDir()
 	const hash = "sha256:ctx"
 	swapLivenessProbes(t,
-		func(*launch.ResolvedHook, string, string) (string, HookResult) { return StatusStopped, HookResult{ExitCode: 1} },
+		func(*launch.ResolvedHook, string, string) (string, HookResult) {
+			return StatusStopped, HookResult{ExitCode: 1}
+		},
 		nil, func(string) ([]int, error) { return nil, nil })
 
 	opID := NewFencingID()
@@ -392,7 +398,9 @@ func TestConcurrentDeleterDoesNotLoseOrDoubleCleanStop(t *testing.T) {
 		dir := t.TempDir()
 		const hash = "sha256:ctx"
 		swapLivenessProbes(t,
-			func(*launch.ResolvedHook, string, string) (string, HookResult) { return StatusStopped, HookResult{ExitCode: 1} },
+			func(*launch.ResolvedHook, string, string) (string, HookResult) {
+				return StatusStopped, HookResult{ExitCode: 1}
+			},
 			nil, func(string) ([]int, error) { return nil, nil })
 
 		_ = failedVerifiedStop(t, dir, "g1", hash, "combat")

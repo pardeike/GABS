@@ -117,7 +117,7 @@ type ToolResult struct {
 	// wire data (json:"-"): GABS failure attribution must NEVER touch a
 	// bridge-returned payload — its `code` is game-defined and may collide with
 	// a GABS stable code — so completeFailureAttribution skips it regardless of
-	// keys or error flag (round 14 F2).
+	// keys or error flag.
 	BridgePassthrough bool `json:"-"`
 }
 

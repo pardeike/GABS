@@ -17,12 +17,12 @@ import (
 // rotate) and the spawn-boundary diagnostics stamp are three separate steps
 // (read, compare, rewrite) that an interleaving rotation can defeat, restoring a
 // superseded launch's token/diagnostics over the successor's rotated endpoint.
-// The earlier round-13 fix used a process-local sync.Map of mutexes, which
+// An earlier fix used a process-local sync.Map of mutexes, which
 // cannot serialize a superseded GABS process against a successor GABS process:
 // endpoint rotation and the async stamp run OUTSIDE any held transition lock
 // (GateStart releases its lock internally, see withBridgeLock), so the fence
-// MUST cross process boundaries. Round 14 F1 holds the dedicated cross-process
-// bridge.lock (withBridgeLock) across the whole read-compare-write.
+// MUST cross process boundaries. The dedicated cross-process bridge.lock
+// (withBridgeLock) is held across the whole read-compare-write.
 
 // bridgeStampAfterReadHook is a test-only barrier fired inside
 // StampBridgeDiagnostics after the read, while the bridge lock is held.
@@ -125,12 +125,12 @@ func EnsureBridgeJSONWithConfig(gameID, configDir string, gamesConfig *GamesConf
 // StampBridgeDiagnostics (design/20: "written at spawn"). Rewriting with an
 // empty BridgeDiagnostics also CLEARS any stale diagnostics a reused file
 // carried, so a pre-spawn failure never leaves a profile/revision/startedAt
-// for a process that was never spawned (round 11 P2-8).
+// for a process that was never spawned.
 func PrepareBridgeEndpointForStart(gameID, configDir string, gamesConfig *GamesConfig, resetEndpoint bool) (int, string, string, bool, error) {
 	// Hold the cross-process bridge lock across the entire read/reuse/rotate so
 	// a concurrent stamp or preparation — in this process or a successor GABS
-	// process — cannot interleave and restore a superseded endpoint (round 14
-	// F1). A business error (e.g. port-in-use) is returned verbatim via opErr,
+	// process — cannot interleave and restore a superseded endpoint.
+	// A business error (e.g. port-in-use) is returned verbatim via opErr,
 	// not the lock error, so callers still see the exact endpoint diagnostics.
 	var port int
 	var token, path string
@@ -194,7 +194,7 @@ func prepareBridgeEndpointForStartLocked(gameID, configDir string, gamesConfig *
 // StampBridgeDiagnostics rewrites bridge.json with the diagnostic-only fields
 // (profile, configRevision, startedAt) at the spawn boundary (design/20),
 // preserving the endpoint (port/token) written at preparation time. It is
-// FENCED to this launch's endpoint generation (round 12 F10): it refuses to
+// FENCED to this launch's endpoint generation: it refuses to
 // stamp unless bridge.json still carries the expected port AND token, so a
 // launch whose claim/endpoint was superseded between spawn and stamp can never
 // write its profile/revision onto the successor's rotated token. Returns
@@ -204,7 +204,7 @@ func StampBridgeDiagnostics(gameID, configDir string, expectedPort int, expected
 	// The read → compare → rewrite must be atomic with respect to any endpoint
 	// rotation — in this process OR a successor GABS process — or a successor's
 	// token published between the read and the write would be overwritten by
-	// this stale launch (round 14 F1). The cross-process bridge lock provides
+	// this stale launch. The cross-process bridge lock provides
 	// that fence.
 	return withBridgeLock(configDir, gameID, func() error {
 		cp, err := NewConfigPaths(configDir)
@@ -218,7 +218,7 @@ func StampBridgeDiagnostics(gameID, configDir string, expectedPort int, expected
 		}
 		// Test barrier: a hook fired after the read (still under the lock) lets
 		// a deterministic test attempt a rotation and prove it CANNOT land until
-		// the stamp completes (round 14 F1).
+		// the stamp completes.
 		if bridgeStampAfterReadHook != nil {
 			bridgeStampAfterReadHook()
 		}
@@ -234,7 +234,7 @@ func StampBridgeDiagnostics(gameID, configDir string, expectedPort int, expected
 
 // ErrBridgeEndpointRotated reports that bridge.json no longer carries the
 // launch's endpoint (a successor rotated the token), so its diagnostics must
-// not be stamped (round 12 F10).
+// not be stamped.
 var ErrBridgeEndpointRotated = fmt.Errorf("bridge endpoint rotated; refusing to stamp stale diagnostics")
 
 // WriteBridgeJSONWithEndpoint writes a specific bridge endpoint atomically,

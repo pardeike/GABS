@@ -263,7 +263,7 @@ func TestEnsureClientRunningWithinRespectsBudget(t *testing.T) {
 			return os.Args[0], []string{"-test.run=TestSteamClientHelper", "--"}, nil
 		},
 		func() bool { return false }, // never becomes visible
-		time.Hour, time.Hour, // large delays that must be clamped to the budget
+		time.Hour, time.Hour,         // large delays that must be clamped to the budget
 	)
 	t.Cleanup(restore)
 

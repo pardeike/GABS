@@ -77,7 +77,7 @@ type StopRequest struct {
 	// HistoryProfile and HistoryContextHash are the pinned track-record
 	// coordinates (from the claim, never recomputed from hot config): a
 	// verified stop records cleanStops++ and a failed action records its
-	// failure under the same removal/completion lock (design/20; round 10).
+	// failure under the same removal/completion lock (design/20).
 	HistoryProfile     string
 	HistoryContextHash string
 }
@@ -269,7 +269,7 @@ func ExecuteStopAction(req StopRequest) (*StopOutcome, *StopRefusal, error) {
 			outcome.Warnings = append(outcome.Warnings, fmt.Sprintf("the %s completion was superseded and left the current claim untouched", req.Action))
 		default:
 			// Verified termination, but the clean-stop credit (and thus removal)
-			// failed (round 16 F5). removeRuntimeStateForStopCompletion already
+			// failed. removeRuntimeStateForStopCompletion already
 			// persisted the clean-stop as a self-contained pending event under
 			// the SAME lock that observed the failure (no post-release gap, no
 			// discarded error), so the claim remains and a later deleter or the
@@ -412,7 +412,7 @@ func persistStopCompletion(req StopRequest, launchID, operationID, phase, status
 	outcome.FinalPhase = final.Phase
 
 	// A terminal action failure of an accepted attempt updates the active
-	// context's failure record (design/20; round 10) — under the same lock,
+	// context's failure record (design/20) — under the same lock,
 	// so a superseded successor is never touched (the fenced transition
 	// above already proved this launch is still current).
 	if req.HistoryContextHash != "" && (result.Outcome == OutcomeActionFailed || result.Outcome == OutcomeActionTimedOut) {
@@ -421,7 +421,7 @@ func persistStopCompletion(req StopRequest, launchID, operationID, phase, status
 			if cur, cerr := LoadRuntimeState(req.GameID, req.ConfigDir); cerr == nil && cur != nil && cur.LaunchID == launchID {
 				class := Classify(result.Outcome, ClassifyContext{}).Class
 				// The pinned input-name set (names only, never values) so an
-				// input-bearing launch's failure records its inputs (F7).
+				// input-bearing launch's failure records its inputs.
 				ApplyActionFailureLocked(req.GameID, req.ConfigDir, req.HistoryProfile, req.HistoryContextHash, result.Outcome, class, cur.AppliedInputNames, result.Timestamp)
 			}
 			lock.Release()
@@ -435,7 +435,7 @@ func persistStopCompletion(req StopRequest, launchID, operationID, phase, status
 var errStopAttachmentLive = errors.New("live foreign bridge attachment")
 
 // cleanStopCompletion is a direct stop completion's clean-stop credit, recorded
-// as a self-contained pending event before removal (round 16 F5).
+// as a self-contained pending event before removal.
 type cleanStopCompletion struct {
 	operationID string
 	profile     string
@@ -448,7 +448,7 @@ type cleanStopCompletion struct {
 // records its clean-stop as a self-contained pending event and credits it (with
 // every other pending event) inside the SAME lock BEFORE removal; a history
 // write failure aborts the removal so the claim — and its pending event —
-// survives for a later retry, never lost with the deleted claim (round 16 F5).
+// survives for a later retry, never lost with the deleted claim.
 func removeRuntimeStateForStopCompletion(req StopRequest, launchID, operationID string) error {
 	var completion *cleanStopCompletion
 	if req.HistoryContextHash != "" {
@@ -459,8 +459,8 @@ func removeRuntimeStateForStopCompletion(req StopRequest, launchID, operationID 
 
 // removeRuntimeStateGuarded removes the claim under the transition lock. Before
 // removal it reconciles EVERY pending history event on the claim — clean stops
-// and verified deliveries — crediting each by its own self-contained identity
-// (round 16 F5); a completion (a direct stop that just verified termination)
+// and verified deliveries — crediting each by its own self-contained identity;
+// a completion (a direct stop that just verified termination)
 // first appends its clean-stop as a pending event. A credit-write failure
 // persists the pending lists under this lock and ABORTS removal, so the claim
 // and its un-credited events survive for a later deleter/status retry — nothing
@@ -490,14 +490,14 @@ func removeRuntimeStateGuarded(gameID, configDir, instanceID, launchID, operatio
 	}
 	if completion != nil {
 		// Never dropped at a cap — termination already verified, so a refusal
-		// would be permanent loss (round 17 F5); this claim's pending records are
+		// would be permanent loss; this claim's pending records are
 		// credited and removed immediately below.
 		cur.PendingCleanStops = appendPendingCredit(cur.PendingCleanStops,
 			pendingCleanStopEvent(completion.operationID, completion.profile, completion.contextHash, time.Now().UTC()))
 	}
 	// Credit every pending event, remove the claim, then GC the markers — GC is
 	// gated behind the durable removal so an intervening reconcile can never drop
-	// a marker whose removal has not committed (round 17 F5 P1). A credit failure
+	// a marker whose removal has not committed. A credit failure
 	// persists the pending lists and aborts; a removal failure keeps the markers.
 	return creditPendingThenRemoveLocked(gameID, configDir, cur)
 }
@@ -578,7 +578,7 @@ func RemoveRuntimeStateIfCurrent(gameID, configDir, instanceID, launchID string,
 	// The status funnel removes a stopped/stale active claim here: credit every
 	// pending history event (verified deliveries, clean stops), remove the claim,
 	// then GC the markers behind the durable removal so none is lost with the
-	// claim and none replays (round 16/17 F5). A credit-write failure persists the
+	// claim and none replays. A credit-write failure persists the
 	// pending lists and aborts, leaving the claim for a later status retry.
 	return creditPendingThenRemoveLocked(gameID, configDir, cur)
 }

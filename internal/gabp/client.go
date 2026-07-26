@@ -592,7 +592,7 @@ func (c *Client) GetCapabilities() Capabilities {
 
 // IsConnected reports a usable connection: the transport is up AND the
 // session handshake authenticated. A dialed-but-unauthenticated client is
-// never "connected" to consumers (review round 9) — internal request
+// never "connected" to consumers — internal request
 // plumbing uses the transport flag directly.
 func (c *Client) IsConnected() bool {
 	c.mu.RLock()

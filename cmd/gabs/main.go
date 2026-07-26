@@ -625,7 +625,7 @@ func showGame(log util.Logger, gameID string, configDir string) int {
 func forgetRuntimeClaim(gameID, configDir string, assumeYes bool, in io.Reader, out io.Writer) int {
 	// Read the exact bytes ONCE: the evidence shown and the identity confirmed
 	// are the same bytes, so a successor published mid-prompt cannot be deleted
-	// unseen (round-19 P1).
+	// unseen.
 	data, digest, found, err := process.ReadRuntimeClaim(gameID, configDir)
 	if err != nil {
 		fmt.Fprintf(out, "Cannot access a runtime claim for '%s': %v\n", gameID, err)

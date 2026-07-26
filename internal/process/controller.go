@@ -24,7 +24,7 @@ var (
 	epicLaunchCommandFactory  = defaultEpicLaunchCommandFactory
 	findProcessesByNameFunc   = findProcessesByName
 	// steamResolveAppFunc is injectable so tests can pin a resolved app
-	// without a real Steam library (review round 9).
+	// without a real Steam library.
 	steamResolveAppFunc = steam.ResolveApp
 )
 
@@ -87,7 +87,7 @@ type Controller struct {
 
 	// resolvedSteamApp is the SteamManaged app pinned by
 	// MaterializeSpawnSpec so digesting, sizing, and spawning consume one
-	// immutable specification (review round 9).
+	// immutable specification.
 	resolvedSteamApp *steam.App
 
 	// Stage 3 spawnState observers (design/05); nil for legacy callers.
@@ -157,8 +157,8 @@ func (c *Controller) Start() error {
 	case "SteamAppId":
 		cmdName, cmdArgs = steamLaunchCommandFactory(c.spec.PathOrId)
 	case "SteamManaged":
-		// The spec was materialized before digesting and sizing (review
-		// round 9): resolution, digesting, sizing, and spawning must not
+		// The spec was materialized before digesting and sizing:
+		// resolution, digesting, sizing, and spawning must not
 		// independently derive different commands. Fall back to resolving
 		// here only for legacy callers that never materialized.
 		app := c.resolvedSteamApp
@@ -176,7 +176,7 @@ func (c *Controller) Start() error {
 				c.spec.WorkingDir = app.WorkingDir
 			}
 		}
-		// EnsureClientRunning is deliberately NOT called here (M2.15): the
+		// EnsureClientRunning is deliberately NOT called here: the
 		// Steam-client store-launcher assistance is best-effort Stage-2 work in
 		// the start manager, charged against the operation deadline — never a
 		// spawn-time step that could fail the launch or run twice (design/05).
@@ -632,7 +632,7 @@ func (c *Controller) Kill() error {
 
 // MaterializeSpawnSpec resolves the mode-specific executable and effective
 // working directory BEFORE spawn, so digesting, platform sizing, and the
-// spawn itself all consume one immutable specification (review round 9).
+// spawn itself all consume one immutable specification.
 // For SteamManaged this resolves the Steam app once and pins its
 // executable and default working directory; Start reuses exactly these
 // values. Other modes return the already-final values.
@@ -942,7 +942,7 @@ func (e *ProcessError) Error() string {
 // Unwrap exposes the wrapped cause so the start pipeline can see a
 // pre-spawn fencing loss (ErrFencingViolation / ErrNoRuntimeClaim) that the
 // controller's beforeSpawn abort surfaces, rather than misreporting a
-// deliberately-never-attempted spawn as spawn_failed (review round 10).
+// deliberately-never-attempted spawn as spawn_failed.
 func (e *ProcessError) Unwrap() error { return e.Err }
 
 // Helper functions for cross-platform process management

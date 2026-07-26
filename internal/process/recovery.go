@@ -118,7 +118,7 @@ func RecoverInterruptedClaim(gameID, configDir, instanceID string, claim *Runtim
 		updated, err := FencedTransitionWithCredit(gameID, configDir, claim.LaunchID, op.OperationID, func(s *RuntimeState) error {
 			// A recovered START that was still in phase=starting is the Stage 4
 			// verification for that launch — credit workloadStarts++ from the
-			// pinned identity (round 11 P1-2). An interrupted stop/kill recovery
+			// pinned identity. An interrupted stop/kill recovery
 			// must NOT: its workload started earlier and was already counted.
 			creditStart = s.Phase == PhaseStarting && op.Action == OperationActionStart
 			if interrupted != nil {
@@ -131,7 +131,7 @@ func RecoverInterruptedClaim(gameID, configDir, instanceID string, claim *Runtim
 			}
 			return nil
 		}, func(s *RuntimeState) error {
-			// Credit BEFORE the runtime save (round 14 F5), idempotent by
+			// Credit BEFORE the runtime save, idempotent by
 			// launchID: a history-write failure aborts the recovery so a retry
 			// re-credits exactly once; a crash before the save replays.
 			if creditStart {
@@ -172,7 +172,7 @@ func RecoverInterruptedClaim(gameID, configDir, instanceID string, claim *Runtim
 	default: // stopped
 		// removeRuntimeStateGuarded reconciles every pending history event
 		// (clean stops, verified deliveries) by its own self-contained identity
-		// before removal (round 16 F5), so recovery need not special-case it; a
+		// before removal, so recovery need not special-case it; a
 		// genuinely interrupted stop left no pending clean-stop and is NOT
 		// credited.
 		err := removeRuntimeStateGuarded(gameID, configDir, instanceID, claim.LaunchID, op.OperationID, selfLive, nil)

@@ -118,7 +118,7 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 	startWarnings := gateRes.Warnings
 	hc.LaunchID = launchID
 
-	// Stage 2 store-launcher advisory (design/05, M2.15): for Steam modes, scan
+	// Stage 2 store-launcher advisory (design/05): for Steam modes, scan
 	// once; if the Steam client is not observable, record the single advisory
 	// warning — and for SteamManaged only, run bounded best-effort assistance
 	// charged against THIS operation's persisted deadline so it cannot expire
@@ -137,7 +137,7 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 
 	cleanupRuntimeState := true
 	// Terminal accepted-attempt failures must be written to history while the
-	// claim is still alive and fenced to THIS launch (round 10).
+	// claim is still alive and fenced to THIS launch.
 	failureRecorded := false
 	var pendingFailCode string
 	recordFail := func(code string) {
@@ -185,7 +185,7 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 
 	controller.SetBridgeInfo(port, token)
 
-	// Materialize the spawn spec ONCE (design/03, review round 9): for
+	// Materialize the spawn spec ONCE (design/03): for
 	// SteamManaged this resolves the app to its real executable + working
 	// directory and pins it on the controller, so digesting, sizing, and the
 	// actual spawn all derive the SAME command. Without this, digests hash the
@@ -232,7 +232,7 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 		}
 	}
 
-	// A diagnostic-stamp write failure surfaced from the spawn observer (F10).
+	// A diagnostic-stamp write failure surfaced from the spawn observer.
 	var stampMu sync.Mutex
 	var stampWarnings []string
 
@@ -240,7 +240,7 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 	controller.SetSpawnObservers(
 		func() error {
 			_, terr := process.FencedTransition(game.ID, m.configDir, launchID, opID, func(st *process.RuntimeState) error {
-				// The persisted operation deadline is authoritative (M2.15):
+				// The persisted operation deadline is authoritative:
 				// checking "operation still live?" and marking spawning are ONE
 				// atomic step under the transition lock. Once the deadline has
 				// passed the operation is supersedable — refuse the spawn.
@@ -265,7 +265,7 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 			// Stamp the diagnostic-only bridge.json fields at the spawn boundary
 			// (design/20), ONLY on a successful spawn and FENCED to this launch's
 			// endpoint so a superseded launch never writes onto the successor's
-			// rotated token (round 12 F10).
+			// rotated token.
 			if spawnErr == nil {
 				err := config.StampBridgeDiagnostics(game.ID, m.configDir, port, token, config.BridgeDiagnostics{
 					Profile:        launchSpec.Profile,
@@ -285,8 +285,8 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 			}
 		})
 
-	// Charge Stage 4 the REMAINING operation budget, not a fresh full duration
-	// (M2.15). If the deadline is already (near) consumed, do not spawn at all.
+	// Charge Stage 4 the REMAINING operation budget, not a fresh full duration.
+	// If the deadline is already (near) consumed, do not spawn at all.
 	remaining := time.Until(runtimeState.Operation.Deadline)
 	if remaining < minStageFourBudget {
 		return nil, &process.ProcessError{
@@ -377,7 +377,7 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 			return nil, m.SupersededStartRefusal(game.ID)
 		} else {
 			// Record spawn_failed ONLY when the handler will also render it as
-			// spawn_failed (round 10): a Start/Configuration ProcessError.
+			// spawn_failed: a Start/Configuration ProcessError.
 			if procErr != nil && (procErr.Type == process.ProcessErrorTypeStart || procErr.Type == process.ProcessErrorTypeConfiguration) {
 				pendingFailCode = "spawn_failed"
 			}
@@ -424,9 +424,9 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 		*st = process.RefreshRuntimeOwnerLease(*st, os.Getpid(), m.instanceID, m.RuntimeOwnerLeaseForOperation(totalGABPTimeout), time.Now().UTC())
 		return nil
 	}, func(st *process.RuntimeState) error {
-		// Stage 4 verified: credit workloadStarts++ BEFORE the flip commits
-		// (round 11 P1-2; round 14 F5), only when this transition actually
-		// promoted a starting claim, so the four promotion paths record once.
+		// Stage 4 verified: credit workloadStarts++ BEFORE the flip commits,
+		// only when this transition actually promoted a starting claim, so the
+		// four promotion paths record once.
 		if wasStarting {
 			return m.ApplyPinnedWorkloadStart(game.ID, st)
 		}

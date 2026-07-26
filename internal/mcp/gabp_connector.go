@@ -79,7 +79,7 @@ func (e *staleBridgeCredentialError) Error() string {
 // supersededConnectionError is the typed refusal for a connection whose
 // attachment could not be published — the claim vanished or was replaced
 // during the handshake, or the connection stopped being current. Such a
-// client is closed and never mirrors tools (review round 8).
+// client is closed and never mirrors tools.
 type supersededConnectionError struct {
 	gameID string
 }
@@ -141,7 +141,7 @@ func (c *ServerGABPConnector) AttemptConnection(ctx context.Context, gameID stri
 	// Persist the attachment record (design/04) BEFORE mirroring: an
 	// ordinary connection may expose tools only after a successful
 	// attachment commit — a client without a persisted launch/connection
-	// binding must not survive (review round 8). The record binds to the
+	// binding must not survive. The record binds to the
 	// claim whose endpoint credential authenticated, and only while this
 	// client is still the game's current live connection.
 	ref, rerr := c.server.recordBridgeAttachment(gameID, client, port, token, func() bool {
@@ -166,7 +166,7 @@ func (c *ServerGABPConnector) AttemptConnection(ctx context.Context, gameID stri
 	// The welcome-time delivery report is evaluated against the
 	// spawn-pinned digests and persisted under EXACTLY the connection
 	// that produced it (the publication result above) — never a
-	// reacquired reference (review round 9). Taking the report also
+	// reacquired reference. Taking the report also
 	// discards the raw values from the client.
 	c.server.recordContextDelivery(gameID, ref, client.TakeObservedContext())
 
@@ -177,7 +177,7 @@ func (c *ServerGABPConnector) AttemptConnection(ctx context.Context, gameID stri
 
 	if err := c.setupToolMirroring(ctx, gameID, client); err != nil {
 		// A terminal setup failure closes and removes the exact client —
-		// it must not linger connected without mirrored state (round 9).
+		// it must not linger connected without mirrored state.
 		c.server.HandleUnexpectedGABPDisconnect(gameID, client, err)
 		c.server.mu.Lock()
 		if current, exists := c.server.gabpClients[gameID]; exists && current == client {
@@ -206,7 +206,7 @@ func (c *ServerGABPConnector) startAsyncToolMirroring(gameID string, client *gab
 		defer c.server.bgWG.Done()
 		if c.asyncMirrorDelay > 0 {
 			// A shutdown during the pre-mirror delay abandons the mirroring
-			// so the goroutine joins promptly (round 12 F4).
+			// so the goroutine joins promptly.
 			select {
 			case <-time.After(c.asyncMirrorDelay):
 			case <-c.server.shutdownCh:
@@ -215,7 +215,7 @@ func (c *ServerGABPConnector) startAsyncToolMirroring(gameID string, client *gab
 		}
 		// Revalidate the exact binding before committing any mirroring: a
 		// delayed discovery for connection A must never overwrite tools
-		// mirrored from a newer connection B (review round 9).
+		// mirrored from a newer connection B.
 		if !c.server.bridgeBound(gameID)(ref.launchID, ref.connectionID) {
 			return
 		}
@@ -251,7 +251,7 @@ func (c *ServerGABPConnector) setupToolMirroring(ctx context.Context, gameID str
 	if attentionTimeout > attentionRefreshTimeout {
 		attentionTimeout = attentionRefreshTimeout
 	}
-	// Nested spawn (round 13 F3): the attention goroutine is started from
+	// Nested spawn: the attention goroutine is started from
 	// inside the mirroring goroutine, so it too must go through admission so a
 	// shutdown that began after mirroring started cannot race the join.
 	if !c.server.admitBackgroundTask() {

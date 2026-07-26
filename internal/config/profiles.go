@@ -100,8 +100,8 @@ func (e *ValidationError) Error() string {
 	return "invalid configuration:\n" + strings.Join(parts, "\n")
 }
 
-// ValidationOptions controls extension validation. The milestone-1 lifecycle
-// feature gate is gone (M2.14): the lifecycle runtime executes, so lifecycle
+// ValidationOptions controls extension validation. The earlier lifecycle
+// feature gate is gone: the lifecycle runtime executes, so lifecycle
 // fields always validate.
 type ValidationOptions struct {
 	// CaseInsensitiveEnv rejects env keys that collide after ASCII case

@@ -12,13 +12,13 @@ import (
 const bridgeLockTimeout = 5 * time.Second
 
 // BridgeLockTimeout is the bound on bridge-lock contention. A caller that must
-// leave room for endpoint preparation inside an operation deadline reserves this
-// (M2.15), so the reserve tracks the real lock bound rather than a duplicated
+// leave room for endpoint preparation inside an operation deadline reserves
+// this, so the reserve tracks the real lock bound rather than a duplicated
 // literal.
 func BridgeLockTimeout() time.Duration { return bridgeLockTimeout }
 
 // withBridgeLock runs fn while holding a per-game CROSS-PROCESS exclusive
-// advisory lock on <gameDir>/bridge.lock (round 14 F1). It is:
+// advisory lock on <gameDir>/bridge.lock. It is:
 //
 //   - cross-process, not a process-local mutex: endpoint rotation
 //     (PrepareBridgeEndpointForStart) and the diagnostics stamp

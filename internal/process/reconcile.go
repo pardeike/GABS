@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-// Round-16 F5: verified history events (clean stops, verified deliveries) whose
-// credit failed once are recorded as SELF-CONTAINED pending events on the claim,
+// Verified history events (clean stops, verified deliveries) whose credit
+// failed once are recorded as SELF-CONTAINED pending events on the claim,
 // each carrying its own immutable identity + history coordinates. Reconciliation
 // credits the exact event as a pure function of the entry — never re-reading the
 // claim's current Operation/Attachment, which ordinary lifecycle replaces or
@@ -15,8 +15,8 @@ import (
 
 // appendPendingCredit records a pending credit for an already-happened event
 // (a verified welcome report, a verified termination) unless its id is already
-// present. It NEVER drops the event at a cap (round 17 F5): the report was
-// already consumed / the action already executed, so refusing would be permanent
+// present. It NEVER drops the event at a cap: the report was already
+// consumed / the action already executed, so refusing would be permanent
 // loss. In normal operation the list stays tiny — the reconcile after every
 // append drains it. It could only grow under a sustained, history-SPECIFIC write
 // outage (runtime writes landing while history writes fail), and non-dropping is
@@ -32,13 +32,13 @@ func appendPendingCredit(list []PendingCredit, e PendingCredit) []PendingCredit 
 }
 
 // creditPendingEventsLocked credits every pending clean-stop and delivery on cur
-// in ONE history write (round 17 F5): each is credited by its own self-contained
+// in ONE history write: each is credited by its own self-contained
 // coordinates, idempotent by a lifetime-coupled marker (CreditedPendingEvents).
 // It does NOT garbage-collect markers and does NOT prune cur's pending lists —
 // the caller must first make the runtime transition durable (prune+save, or
 // claim removal) and only THEN GC the drained markers via
-// gcPendingCreditMarkersLocked. Crediting-then-GCing in one write is the round-17
-// P1 bug: a just-credited event that is not yet durable in runtime (an appended
+// gcPendingCreditMarkersLocked. Crediting-then-GCing in one write would be a
+// bug: a just-credited event that is not yet durable in runtime (an appended
 // completion whose removal has not committed) would have its marker dropped by an
 // unrelated reconcile, letting the still-current event replay. MUST hold the
 // per-game transition lock.
@@ -74,8 +74,8 @@ func pendingMarkerKeys(cur *RuntimeState) map[string]bool {
 }
 
 // gcPendingCreditMarkersLocked drops exactly the credited-event markers named in
-// drained — the records a just-committed prune/removal made durably unreferenced
-// (round 17 P1). It is SCOPED: it never touches a marker outside drained, so a
+// drained — the records a just-committed prune/removal made durably
+// unreferenced. It is SCOPED: it never touches a marker outside drained, so a
 // pending event on another path (durable in history but not yet in this claim's
 // runtime state) keeps its marker. Run ONLY after the runtime transition is
 // durable. MUST hold the transition lock.
@@ -91,8 +91,8 @@ func gcPendingCreditMarkersLocked(gameID, configDir string, drained map[string]b
 }
 
 // creditPendingThenRemoveLocked credits every pending history event on cur, then
-// removes the claim, then GCs those markers — in that DURABLE order (round 17
-// F5 P1). GC runs only AFTER the removal is durable, so an intervening reconcile
+// removes the claim, then GCs those markers — in that DURABLE order.
+// GC runs only AFTER the removal is durable, so an intervening reconcile
 // of an unrelated claim can never drop a marker whose runtime transition has not
 // committed (a premature GC lets the still-current event replay and double-count).
 // A credit-write failure persists the pending lists and ABORTS removal, leaving
@@ -120,7 +120,7 @@ func creditPendingThenRemoveLocked(gameID, configDir string, cur *RuntimeState) 
 }
 
 // pendingDeliveryEvent builds a self-contained pending delivery credit for a
-// verified welcome report observed on connectionID (round 16 F5). Raw observed
+// verified welcome report observed on connectionID. Raw observed
 // env values are never carried — only the derived verdict's identity.
 func pendingDeliveryEvent(st *RuntimeState, connectionID string, at time.Time) PendingCredit {
 	return PendingCredit{
@@ -132,14 +132,14 @@ func pendingDeliveryEvent(st *RuntimeState, connectionID string, at time.Time) P
 }
 
 // pendingCleanStopEvent builds a self-contained pending clean-stop credit for a
-// stop that verified termination under operationID (round 16 F5).
+// stop that verified termination under operationID.
 func pendingCleanStopEvent(operationID, profile, contextHash string, at time.Time) PendingCredit {
 	return PendingCredit{ID: operationID, Profile: profile, ContextHash: contextHash, At: at}
 }
 
 // ReconcilePendingCredits credits any pending history events (clean stops AND
 // verified deliveries) on the current claim by each event's own self-contained
-// coordinates, pruning those that land — the round-16 F5 status/connect
+// coordinates, pruning those that land — the status/connect
 // reconciliation on a LIVE claim (no removal), INDEPENDENT of the current
 // Operation/Attachment (a disconnect or operation change must not strand an
 // event). Fenced to launchID. Persists the pruned lists only when a credit
@@ -177,7 +177,7 @@ func ReconcilePendingCredits(gameID, configDir, launchID string) error {
 	// The prune is durable: these events are gone from runtime state, so GC only
 	// THEIR markers. A scoped drop (not a global retain-live sweep) is essential —
 	// a marker for an event on another path that is durable in history but not yet
-	// pruned from its own claim must survive (round 17 P1). A GC-write failure
+	// pruned from its own claim must survive. A GC-write failure
 	// only leaves harmless stale markers.
 	_ = gcPendingCreditMarkersLocked(gameID, configDir, drained)
 	return nil
@@ -186,7 +186,7 @@ func ReconcilePendingCredits(gameID, configDir, launchID string) error {
 // AppendPendingDelivery evaluates the welcome report against the claim's PINNED
 // digests under the transition lock (fenced to launchID + connectionID),
 // renders the derived verdict for display, and — when it is VERIFIED — records a
-// self-contained pending credit bound to THIS connectionID (round 16 F5). The
+// self-contained pending credit bound to THIS connectionID. The
 // credit itself is applied by ReconcilePendingCredits. Only the derived
 // verdict + identity persist; the raw env-bearing report never does. Overflow of
 // the bounded list is a loud fault, returned as an error, never a silent drop.
@@ -199,7 +199,7 @@ func AppendPendingDelivery(gameID, configDir, launchID, connectionID string, obs
 		st.ContextDelivery = verdict // rendered: the latest connection's verdict
 		if verdict != nil && verdict.Overall == DeliveryVerified && st.HistoryContextHash != "" {
 			// Never dropped at a cap — the report was already consumed, so a
-			// refusal would be permanent loss (round 17 F5). The reconcile that
+			// refusal would be permanent loss. The reconcile that
 			// follows this append drains the list.
 			st.PendingDeliveries = appendPendingCredit(st.PendingDeliveries, pendingDeliveryEvent(st, connectionID, at))
 		}

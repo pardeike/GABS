@@ -14,10 +14,10 @@ import (
 // T-DELIV). This is the local proof; only the actual %* forwarding is CI-gated.
 func TestArgvPayloadForDigest(t *testing.T) {
 	cases := []struct {
-		name    string
+		name     string
 		pathOrId string
-		args    []string
-		want    []string
+		args     []string
+		want     []string
 	}{
 		{"cmd /c strips prefix", "cmd.exe", []string{"/c", "w.cmd", "--data-root", "x"}, []string{"--data-root", "x"}},
 		{"cmd /C case-insensitive", "cmd.exe", []string{"/C", "w.cmd", "-p", "combat"}, []string{"-p", "combat"}},

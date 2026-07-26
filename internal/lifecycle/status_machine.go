@@ -113,9 +113,9 @@ func (m *Manager) evaluateClaimStatusOnce(gameID string, claim *process.RuntimeS
 	})
 	switch ev.Verdict {
 	case process.StatusRunning:
-		// A live claim: reconcile any pending history credits whose write failed
-		// (round 16 F5). Gated on a non-empty pending list so a steady-state
-		// status stays read-only.
+		// A live claim: reconcile any pending history credits whose write failed.
+		// Gated on a non-empty pending list so a steady-state status stays
+		// read-only.
 		if len(claim.PendingDeliveries) > 0 || len(claim.PendingCleanStops) > 0 {
 			if err := process.ReconcilePendingCredits(gameID, m.configDir, claim.LaunchID); err != nil {
 				m.log.Warnw("pending credit reconciliation failed", "gameId", gameID, "error", err)
@@ -127,8 +127,7 @@ func (m *Manager) evaluateClaimStatusOnce(gameID string, claim *process.RuntimeS
 				// Passive promotion (design/20): running seen by a status
 				// observation promotes a completed-unobserved claim to active;
 				// credit the start from the pinned identity BEFORE the flip
-				// commits (round 11 P1-2; round 14 F5 — record-first +
-				// launchID-idempotent).
+				// commits (record-first + launchID-idempotent).
 				if _, err := process.FencedTransitionWithCredit(gameID, m.configDir, claim.LaunchID, "", func(st *process.RuntimeState) error {
 					if st.Operation != nil || st.Phase != process.PhaseStarting {
 						return process.ErrFencingViolation

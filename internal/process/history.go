@@ -88,28 +88,28 @@ type HistoryEntry struct {
 	LastFailure         *HistoryFailure `json:"lastFailure,omitempty"`
 	Buckets             []HistoryBucket `json:"buckets,omitempty"`
 	// CreditedLaunchIDs are the launches whose Stage-4 verified start already
-	// counted (round 12 F9). Keyed by launchID, the credit is idempotent across
-	// both crash directions: the credit is recorded FIRST under the transition
-	// lock, before runtime.json is saved (round 14 F5), so a runtime-save
-	// failure or a crash between the two files replays without double-counting —
-	// a retried promotion finds the launchID already credited. LRU-capped.
+	// counted. Keyed by launchID, the credit is idempotent across both crash
+	// directions: the credit is recorded FIRST under the transition lock,
+	// before runtime.json is saved, so a runtime-save failure or a crash
+	// between the two files replays without double-counting — a retried
+	// promotion finds the launchID already credited. LRU-capped.
 	CreditedLaunchIDs []string `json:"creditedLaunchIds,omitempty"`
 	// CreditedEvents are the RECORD-FIRST non-start events (bridge connect)
 	// already counted, keyed "kind:id". Their replay source is TRANSIENT (a
-	// reconnect gets a fresh connectionID), so a small LRU window suffices
-	// (round 14 F5). Delivery/clean-stop are NOT here — their replay source is a
-	// durable pending record, so they use CreditedPendingEvents (round 17 F5).
+	// reconnect gets a fresh connectionID), so a small LRU window suffices.
+	// Delivery/clean-stop are NOT here — their replay source is a durable
+	// pending record, so they use CreditedPendingEvents.
 	CreditedEvents []string `json:"creditedEvents,omitempty"`
 	// CreditedPendingEvents are the delivery/clean-stop events already counted
-	// whose replay source is a DURABLE pending record on the claim (round 17
-	// F5). Keyed "delivery:connectionID" / "stop:operationID". This set is NOT
+	// whose replay source is a DURABLE pending record on the claim. Keyed
+	// "delivery:connectionID" / "stop:operationID". This set is NOT
 	// LRU-capped: it is lifetime-coupled to the pending records. A marker is
 	// dropped (gcPendingCreditMarkersLocked) only AFTER the runtime transition
 	// that de-references its record — a prune+save or a claim removal — is
 	// durable, and only for the exact records that transition drained. So a
 	// marker can never be evicted while the record it guards can still replay,
 	// and an unrelated reconcile can never drop a marker whose runtime transition
-	// has not yet committed (round 17 P1). A stale marker left by a GC-write
+	// has not yet committed. A stale marker left by a GC-write
 	// failure is harmless: every id is a fresh 128-bit random (NewFencingID) that
 	// a future event can never collide with. That is the per-pending-record
 	// "credited" bit, stored history-side for atomicity with the counter.
@@ -117,8 +117,8 @@ type HistoryEntry struct {
 }
 
 // creditEventOnce reports whether key is a NEW record-first event for this entry
-// (bridge connect), recording it LRU-capped so a recent retry no-ops (round 14
-// F5). Returns false when already credited.
+// (bridge connect), recording it LRU-capped so a recent retry no-ops. Returns
+// false when already credited.
 func (e *HistoryEntry) creditEventOnce(key string) bool {
 	if key == "" {
 		return true // no identity to dedup by; credit unconditionally
@@ -136,7 +136,7 @@ func (e *HistoryEntry) creditEventOnce(key string) bool {
 }
 
 // markPendingCreditOnce reports whether key is a NEW pending-event credit for
-// this entry, recording it WITHOUT an LRU cap (round 17 F5): the marker is
+// this entry, recording it WITHOUT an LRU cap: the marker is
 // GC'd by dropPendingCreditMarkers only after its pending record's runtime
 // transition is durable, so it must never be dropped by recency while the record
 // can still replay.
@@ -154,11 +154,11 @@ func (e *HistoryEntry) markPendingCreditOnce(key string) bool {
 }
 
 // dropPendingCreditMarkers removes exactly the markers named in drained — the
-// pending records a just-committed prune/removal made durably unreferenced
-// (round 17 F5 P1). It is SCOPED, never a retain-live sweep: a marker outside
-// drained belongs to an event on another path that may be durable in history but
-// not yet pruned from its own claim, and dropping it early would let that event
-// replay and double-count.
+// pending records a just-committed prune/removal made durably unreferenced.
+// It is SCOPED, never a retain-live sweep: a marker outside drained belongs to
+// an event on another path that may be durable in history but not yet pruned
+// from its own claim, and dropping it early would let that event replay and
+// double-count.
 func (e *HistoryEntry) dropPendingCreditMarkers(drained map[string]bool) {
 	if len(e.CreditedPendingEvents) == 0 {
 		return
@@ -253,7 +253,7 @@ type HistoryLastGood struct {
 
 // PendingEditNotice preserves the old proven context's facts across the
 // history reset, so the once-per-edit notice can still fire on the next
-// eligible result even though the entry was already replaced (round 10).
+// eligible result even though the entry was already replaced.
 type PendingEditNotice struct {
 	NewHash   string `json:"newHash"`
 	OldStarts uint64 `json:"oldStarts"`
@@ -272,7 +272,7 @@ type GameHistory struct {
 	// edit, not on every call (design/08).
 	NoticeShownForHash map[string]string `json:"noticeShownForHash,omitempty"`
 	// Pending preserves the pre-reset old-context facts per profile so the
-	// notice survives the entry replacement (round 10).
+	// notice survives the entry replacement.
 	Pending map[string]*PendingEditNotice `json:"pendingEditNotice,omitempty"`
 }
 
@@ -328,7 +328,7 @@ func EnsureBucketKey(gameID, configDir string) (string, error) {
 }
 
 // BucketKeyIfExists returns the per-game bucket key WITHOUT minting it or
-// creating the history file (round 12 F8) — for the read-only failure path,
+// creating the history file — for the read-only failure path,
 // which must compare a proven input combination's digest without mutating
 // history. Empty when no key has been minted: the combination is genuinely
 // unproven.
@@ -379,7 +379,7 @@ func emptyHistory() *GameHistory {
 }
 
 // saveHistoryFailHook forces saveHistory to fail — test-only, to exercise the
-// round-14 F5 record-first ordering (a history-write failure must abort the
+// record-first ordering (a history-write failure must abort the
 // runtime transition so a retry re-credits exactly once, never losing the
 // event). Guarded by the caller's transition lock, so no synchronization is
 // needed on the var itself.
@@ -452,7 +452,7 @@ func mutateHistory(gameID, configDir string, mutate func(*GameHistory)) error {
 // applyHistoryLocked runs one history RMW assuming the caller ALREADY holds
 // the per-game transition lock (the flock is not re-entrant). Used inside a
 // runtime-state transition so history and claim stay consistent under one
-// lock acquisition (review round 10).
+// lock acquisition.
 func applyHistoryLocked(gameID, configDir string, mutate func(*GameHistory)) error {
 	h, err := LoadHistory(gameID, configDir)
 	if err != nil {
@@ -470,7 +470,7 @@ func applyHistoryLocked(gameID, configDir string, mutate func(*GameHistory)) err
 
 // mutateHistoryFenced runs a history RMW under the transition lock, but only
 // while the current claim still carries expectLaunchID — a stale event from
-// a superseded launch must never reset a successor's history (round 10).
+// a superseded launch must never reset a successor's history.
 // A missing claim or a launch mismatch skips silently.
 func mutateHistoryFenced(gameID, configDir, expectLaunchID string, mutate func(*GameHistory)) error {
 	if expectLaunchID == "" {
@@ -495,7 +495,7 @@ func mutateHistoryFenced(gameID, configDir, expectLaunchID string, mutate func(*
 // resetting it (counters zeroed, buckets dropped) when the stored hash
 // differs — the context-level reset (design/08). Before replacing a proven
 // entry whose last outcome was a non-config failure, it arms the pending
-// edit notice so the notice survives the reset (round 10).
+// edit notice so the notice survives the reset.
 func (h *GameHistory) entryForContext(profile, contextHash string) *HistoryEntry {
 	e := h.Profiles[profile]
 	if e == nil || e.ContextHash != contextHash {
@@ -525,7 +525,7 @@ type SuccessBucket struct {
 // lastGood snapshot) pinned in the runtime claim at publication so ANY Stage 4
 // promotion path — synchronous start, passive status observation, bridge
 // attachment, restart recovery — can record this launch's verified start from
-// the claim alone, never a hot-config recompute (round 11 P1-2).
+// the claim alone, never a hot-config recompute.
 type HistorySuccessIdentity struct {
 	Snapshot ContextSnapshot `json:"snapshot"`
 	Bucket   SuccessBucket   `json:"bucket"`
@@ -574,7 +574,7 @@ func RecordDeliveryVerified(gameID, configDir, launchID, profile, contextHash st
 
 // applyCleanStop records a verified stop (cleanStops++) using an already held
 // transition lock, idempotent by operationID and recorded BEFORE the claim is
-// removed (round 14 F5) — so a history-write failure aborts the removal and a
+// removed — so a history-write failure aborts the removal and a
 // retry re-credits at most once. Returns the write error to the caller so the
 // removal is gated on the credit committing.
 func applyCleanStop(gameID, configDir, profile, contextHash, operationID string, at time.Time) error {
@@ -589,9 +589,8 @@ func applyCleanStop(gameID, configDir, profile, contextHash, operationID string,
 // ApplyBridgeConnectLocked records bridgeConnects++ using an already held
 // transition lock, idempotent by connectionID — called INSIDE the attachment-
 // publication transition, so it fires exactly once per credential-bound
-// attachment across all connect paths (round 10) and across a retry or
-// crash-replay (round 14 F5). Returns the write error so the runtime commit is
-// gated on the credit.
+// attachment across all connect paths and across a retry or crash-replay.
+// Returns the write error so the runtime commit is gated on the credit.
 func ApplyBridgeConnectLocked(gameID, configDir, profile, contextHash, connectionID string) error {
 	return applyHistoryLocked(gameID, configDir, func(h *GameHistory) {
 		e := h.entryForContext(profile, contextHash)
@@ -606,7 +605,7 @@ func ApplyBridgeConnectLocked(gameID, configDir, profile, contextHash, connectio
 // transition lock — called INSIDE the fenced transition that flips a completed
 // starting claim to active, so EVERY Stage 4 promotion (synchronous start,
 // passive status observation, bridge attachment, restart recovery) credits the
-// start exactly once (round 11 P1-2). The identity is the one pinned in the
+// start exactly once. The identity is the one pinned in the
 // claim at publication, never recomputed from hot config.
 func ApplyWorkloadStartLocked(gameID, configDir, profile, contextHash, launchID string, snap ContextSnapshot, bucket SuccessBucket, at time.Time) error {
 	if contextHash == "" {
@@ -614,7 +613,7 @@ func ApplyWorkloadStartLocked(gameID, configDir, profile, contextHash, launchID 
 	}
 	return applyHistoryLocked(gameID, configDir, func(h *GameHistory) {
 		e := h.entryForContext(profile, contextHash)
-		// Idempotent by launchID (round 12 F9): if this launch's start was
+		// Idempotent by launchID: if this launch's start was
 		// already credited (a retried promote after a runtime-save failure, or
 		// a passive promotion after a crash between the history and runtime
 		// writes), do not double-count.
@@ -654,7 +653,7 @@ const creditedLaunchCap = 16
 
 // ApplyPinnedWorkloadStartLocked records a Stage 4 verified start from the
 // identity pinned in the claim, using an already-held runtime-state transition
-// lock (round 11 P1-2). No-op for a claim without a pinned identity. The caller
+// lock. No-op for a claim without a pinned identity. The caller
 // MUST invoke this only when the transition actually flips starting→active for
 // a start (never for a recovered stop/kill, whose workload started earlier).
 func ApplyPinnedWorkloadStartLocked(gameID, configDir string, st *RuntimeState, at time.Time) error {
@@ -668,9 +667,9 @@ func ApplyPinnedWorkloadStartLocked(gameID, configDir string, st *RuntimeState, 
 // ApplyActionFailureLocked records a terminal failure of an accepted attempt
 // (a stop/kill action failure, or an unobserved start) using an already held
 // transition lock, fenced by the caller's own launch/operation identity — so
-// a stale completion can never bump a successor's history (rounds 10-11). The
+// a stale completion can never bump a successor's history. The
 // supplied input names are recorded so an input-bearing attempt does not
-// serialize as if no inputs were supplied (round 12 F7; design/08:20).
+// serialize as if no inputs were supplied (design/08:20).
 func ApplyActionFailureLocked(gameID, configDir, profile, contextHash, outcome, class string, inputNames []string, at time.Time) {
 	_ = applyHistoryLocked(gameID, configDir, func(h *GameHistory) {
 		e := h.entryForContext(profile, contextHash)
@@ -709,8 +708,7 @@ func InvalidateChangedInputDeclarations(gameID, configDir, profile string, curre
 				// A declaration that was REMOVED (absent from the current map)
 				// invalidates its bucket exactly like a changed hash — else a
 				// deleted-then-readded declaration would resurrect proof for
-				// values that belonged to the earlier generation (round 11
-				// P2-4).
+				// values that belonged to the earlier generation.
 				cur, ok := currentDecls[name]
 				if !ok || cur != recordedDecl {
 					changed = true

@@ -21,8 +21,8 @@ const lifecycleLockTimeout = 5 * time.Second
 
 // bridgeAttachmentRef is the atomic in-process binding published ONLY
 // after handshake authentication and successful attachment publication:
-// the exact client plus the launch and connection identities it persisted
-// (review round 9). Detach callbacks carry it so an old disconnect can
+// the exact client plus the launch and connection identities it persisted.
+// Detach callbacks carry it so an old disconnect can
 // never clear a newer connection (design/06); every consumer lookup
 // requires the exact client, a matching claim launchID, the matching
 // persisted Attachment.ConnectionID, and a live authenticated socket.
@@ -40,7 +40,7 @@ var errAttachmentSkipped = errors.New("attachment record skipped")
 // errAttachmentSuperseded: the claim vanished, was replaced, could not be
 // written, or the connection stopped being current before publication — the
 // connection has no persisted binding and must not survive to mirror tools
-// or count as evidence (review round 8).
+// or count as evidence.
 var errAttachmentSuperseded = errors.New("attachment publication superseded")
 
 // claimBoundClient returns the game's live GABP client only when it is
@@ -167,7 +167,7 @@ func (s *Server) recordBridgeAttachment(gameID string, client *gabp.Client, endp
 		}
 		return nil
 	}, func(st *process.RuntimeState) error {
-		// Credit BEFORE the runtime save (round 14 F5), still under the
+		// Credit BEFORE the runtime save, still under the
 		// transition lock and fenced to this launch: recorded first and
 		// idempotent, so a history-write failure aborts the attachment persist
 		// (retry re-credits exactly once) and no counter is ever lost or
@@ -192,7 +192,7 @@ func (s *Server) recordBridgeAttachment(gameID string, client *gabp.Client, endp
 		}
 		// The claim disappeared during the handshake, could not be read, or
 		// the write failed: the connection has no binding and must not
-		// survive (review round 8).
+		// survive.
 		if !errors.Is(terr, process.ErrNoRuntimeClaim) {
 			s.log.Warnw("failed to persist bridge attachment", "gameId", gameID, "error", terr)
 		}
@@ -233,7 +233,7 @@ func (s *Server) recordBridgeAttachment(gameID string, client *gabp.Client, endp
 // refreshBridgeAttachmentLease renews the persisted lease while the socket
 // stays connected (design/04); it stops the moment the connection dies, the
 // identity rotates, the fenced write is rejected, or the server shuts down
-// (round 12 F4 — so it never writes runtime.json during TempDir teardown).
+// (so it never writes runtime.json during TempDir teardown).
 func (s *Server) refreshBridgeAttachmentLease(gameID, launchID, connID string, isConnected func() bool, lease time.Duration) {
 	interval := lease / 3
 	if interval < time.Second {
@@ -276,7 +276,7 @@ func (s *Server) clearBridgeAttachment(gameID, launchID, connID string) {
 	}
 	// The detach completion uses the no-create transition lock: a detach
 	// racing directory teardown finds nothing and, crucially, never
-	// recreates the game directory or lock file (review round 8).
+	// recreates the game directory or lock file.
 	err := process.ClearAttachmentIfCurrent(gameID, s.configDir, launchID, connID, lifecycleLockTimeout)
 	if err != nil && !errors.Is(err, process.ErrFencingViolation) && !errors.Is(err, process.ErrNoRuntimeClaim) {
 		s.log.Warnw("failed to clear bridge attachment", "gameId", gameID, "error", err)
@@ -334,7 +334,7 @@ func (s *Server) lifecycleActionResult(game config.GameConfig, action, configRev
 	claim, err := process.LoadRuntimeState(game.ID, s.configDir)
 	if err != nil {
 		// An unreadable claim is a GABS-side state situation to resolve first
-		// (round 13 F2: authorized code blocked_unknown_state; dispatch fills
+		// (authorized code blocked_unknown_state; dispatch fills
 		// causeClass/track record/next actions).
 		return &ToolResult{
 			Content:           []Content{{Type: "text", Text: fmt.Sprintf("The runtime claim for '%s' is unreadable: %v. Inspect it, or use 'gabs games repair %s --forget-runtime' if the game is provably gone.", game.ID, err, game.ID)}},
@@ -367,7 +367,7 @@ func (s *Server) lifecycleActionResult(game config.GameConfig, action, configRev
 
 	// The claim's PINNED track-record coordinates (never recomputed from
 	// hot config) so a verified stop / failed action credits THIS launch
-	// (design/20; round 10).
+	// (design/20).
 	stopProfile := process.EffectiveClaimProfile(claim)
 	stopHash := claim.HistoryContextHash
 
@@ -387,7 +387,7 @@ func (s *Server) lifecycleActionResult(game config.GameConfig, action, configRev
 	if err != nil {
 		// An internal execution error (lock/persistence/system failure) leaves
 		// GABS runtime state unresolved — the authorized state-class code is
-		// blocked_unknown_state (round 12 F3; not an invented code). It carries
+		// blocked_unknown_state (not an invented code). It carries
 		// attribution with the pinned context's track record; no history write.
 		structured := map[string]interface{}{"code": "blocked_unknown_state", "gameId": game.ID, "action": action}
 		s.attachStructuredFailureAttribution(structured, game, "blocked_unknown_state",
@@ -468,7 +468,7 @@ func (s *Server) stopOutcomeResult(game config.GameConfig, action string, profil
 		"action":       action,
 		"claimRemoved": outcome.ClaimRemoved,
 	}
-	// A clean success (terminated) carries NO failure cause (round 11 P2-6):
+	// A clean success (terminated) carries NO failure cause:
 	// Classify returns an empty class for it, and we omit the field entirely.
 	if class := process.Classify(outcome.Code, process.ClassifyContext{}).Class; class != "" {
 		structured["causeClass"] = class
@@ -676,8 +676,8 @@ func attachStatusEvidence(statusItem map[string]interface{}, ev *process.Livenes
 // finalizeStartFailure RENDERS a start failure's attribution — causeClass,
 // track record, class-keyed actions, edit notice — reading the history the
 // record step (in startGame, while the claim was alive) already wrote. It
-// never mutates history (round 10: the write and render are split by the
-// claim lifetime).
+// never mutates history (the write and render are split by the claim
+// lifetime).
 func (s *Server) finalizeStartFailure(structured map[string]interface{}, game config.GameConfig, hc historyContext, code string) {
 	cls := process.Classify(code, process.ClassifyContext{
 		Proven:                s.contextProven(game.ID, hc),
@@ -690,7 +690,7 @@ func (s *Server) finalizeStartFailure(structured map[string]interface{}, game co
 // coreManagementTools are the GABS core game-management tools — the ones that
 // return the stable-code failures the attribution contract governs (design/20:
 // 220). Mirrored game/GABP tools are deliberately excluded: their result's
-// `code` field is game-defined and must not be attributed (round 13 F2). Both
+// `code` field is game-defined and must not be attributed. Both
 // the dotted and strict-safe spellings are listed since either reaches dispatch.
 var coreManagementTools = map[string]bool{
 	"games.list": true, "games_list": true,
@@ -709,7 +709,7 @@ var coreManagementTools = map[string]bool{
 }
 
 // completeFailureAttribution is the single central completion step applied at
-// dispatch to EVERY core-management ToolResult (round 13 F2): any stable
+// dispatch to EVERY core-management ToolResult: any stable
 // FAILURE result gets causeClass, a neutral track-record line, and class-keyed
 // next actions — INDEPENDENTLY, so a partially-attributed result (e.g. one that
 // set causeClass at its branch but no track line) cannot escape. Branches that
@@ -724,8 +724,8 @@ func (s *Server) completeFailureAttribution(toolName string, result *ToolResult)
 	}
 	// A bridge-returned payload (games_call_tool forwarding a game's GABP result)
 	// is passed through UNCHANGED regardless of its keys or error flag: its
-	// `code` is game-defined and must never be read as a GABS stable code (round
-	// 14 F2). GABS-owned games_call_tool failures are attributed at their own
+	// `code` is game-defined and must never be read as a GABS stable code.
+	// GABS-owned games_call_tool failures are attributed at their own
 	// branch instead, so they are not marked passthrough.
 	if result.BridgePassthrough {
 		return
@@ -751,7 +751,7 @@ func (s *Server) completeFailureAttribution(toolName string, result *ToolResult)
 }
 
 // gabsCallToolFailure builds a GABS-OWNED games_call_tool failure with direct
-// class attribution (round 14 F2). A malformed tool argument, no live GABP
+// class attribution. A malformed tool argument, no live GABP
 // connection, and a GABP transport error are GABS's own failures, not the
 // game's payload, so they must carry attribution — but they have no stable
 // lifecycle code and none is minted, so causeClass, a neutral track line, and
@@ -776,7 +776,7 @@ func (s *Server) gabsCallToolFailure(gameID, message, class string) *ToolResult 
 
 // attachStructuredFailureAttribution is the SINGLE mandatory read-only
 // attribution path for every structured failure result (design/20: "every
-// failure result gets causeClass and one track-record line"; round 11 P1-1).
+// failure result gets causeClass and one track-record line").
 // It classifies the code — proof-adjusted when a resolved context is present
 // (so a target that vanished after 14 successful starts is environment, not
 // unclassified) — attaches causeClass, a track-record line and edit notice
@@ -799,7 +799,7 @@ func (s *Server) attachStructuredFailureAttribution(structured map[string]interf
 // one-line track record. Per design/08 §"call-class" the response still
 // carries track-record evidence even for a pre-resolution error: with no
 // resolved context, TrackRecordLine(nil) renders the neutral "no successful
-// starts recorded for this context" form (round 12 F2). The once-per-edit
+// starts recorded for this context" form. The once-per-edit
 // visibility notice only applies to a resolved context.
 func (s *Server) attachFailureAttribution(structured map[string]interface{}, game config.GameConfig, hc historyContext, class, secondaryNote string) {
 	structured["causeClass"] = class
@@ -875,7 +875,7 @@ func (s *Server) editNoticeFor(gameID string, hc historyContext) string {
 // connection that produced the report: the caller passes the publication
 // result, never a reacquired "current" reference — a report from
 // connection A must not be persisted under a connection B that published
-// meanwhile (review round 9).
+// meanwhile.
 func (s *Server) recordContextDelivery(gameID string, ref bridgeAttachmentRef, obs *gabp.ObservedContext) {
 	if ref.launchID == "" || ref.connectionID == "" {
 		return
@@ -886,7 +886,7 @@ func (s *Server) recordContextDelivery(gameID string, ref bridgeAttachmentRef, o
 	}
 	// The observed report is consumed by TakeObservedContext and cannot be
 	// replayed, so the derived VERDICT is persisted as a self-contained pending
-	// event bound to THIS connectionID (round 16 F5) — not to the live
+	// event bound to THIS connectionID — not to the live
 	// Attachment, which a successor connection replaces. The deliveriesVerified++
 	// credit is reconciled from that pending event, immediately here and by any
 	// later games_status or claim removal, idempotent by connectionID. Only the
@@ -927,7 +927,7 @@ func (s *Server) attachStartContextDelivery(structured map[string]interface{}, g
 }
 
 // buildTrackRecordSummary returns the per-profile proof and counters for
-// games_show (design/08; round 10 P2-12). For each launchable context —
+// games_show (design/08). For each launchable context —
 // the default context plus every named profile — it reports whether the
 // CURRENT resolved context is proven, the split counters, and whether the
 // recorded proof belongs to a now-superseded context (a config edit). An
@@ -998,8 +998,8 @@ func (s *Server) buildTrackRecordSummary(snap *config.Snapshot, game config.Game
 // result. A verified termination clears the claim (and often the history
 // entry stays), so the line reflects whatever proof the context still holds
 // — never mutating it here (design/08). It ALWAYS renders a line: the neutral
-// "no successful starts" form when the pinned context has no entry (round 12
-// F2), so every stop/kill failure carries track-record evidence.
+// "no successful starts" form when the pinned context has no entry, so every
+// stop/kill failure carries track-record evidence.
 func (s *Server) attachStopTrackRecord(structured map[string]interface{}, gameID, profile, contextHash string) {
 	var entry *process.HistoryEntry
 	if contextHash != "" {

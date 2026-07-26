@@ -208,7 +208,9 @@ func TestSuccessorPartialPreservesPendingVerified(t *testing.T) {
 func TestPendingDeliveryReconciledAtClaimRemoval(t *testing.T) {
 	dir := t.TempDir()
 	swapLivenessProbes(t,
-		func(*launch.ResolvedHook, string, string) (string, HookResult) { return StatusStopped, HookResult{ExitCode: 1} },
+		func(*launch.ResolvedHook, string, string) (string, HookResult) {
+			return StatusStopped, HookResult{ExitCode: 1}
+		},
 		nil, func(string) ([]int, error) { return nil, nil })
 
 	st := NewRuntimeState(m2Spec("g1"), RuntimeStateStatusRunning)

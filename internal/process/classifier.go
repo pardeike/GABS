@@ -50,7 +50,7 @@ func Classify(code string, ctx ClassifyContext) Classification {
 		"stop_unsupported", "kill_unsupported":
 		return Classification{Class: CauseConfig}
 
-	// Clean success / pending — no failure cause (round 11 P2-6, round 12 F3):
+	// Clean success / pending — no failure cause:
 	// a verified stop, a connected or pending start must never acquire a
 	// causeClass, or they would hit the environment default. Callers attach
 	// causeClass only when Class is non-empty.
@@ -92,7 +92,7 @@ func Classify(code string, ctx ClassifyContext) Classification {
 		return Classification{Class: CauseConfig}
 
 	default:
-		// An UNMAPPED code returns no class (round 13 F2) — it must NOT
+		// An UNMAPPED code returns no class — it must NOT
 		// silently default to environment, which masked codes the classifier
 		// was never taught. Every stable code is explicitly cased above; the
 		// exhaustiveness test (T-TRACK) fails visibly if a handler emits a code

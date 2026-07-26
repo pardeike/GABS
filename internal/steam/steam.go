@@ -120,7 +120,7 @@ func LibraryFolders() ([]string, error) {
 func ClientRunning() bool { return clientRunning() }
 
 // EnsureClientRunningWithin is bounded best-effort assistance to bring the Steam
-// client up (design/05, M2.15). It NEVER waits past budget — the caller charges
+// client up (design/05). It NEVER waits past budget — the caller charges
 // it against the persisted operation deadline so the accepted operation cannot
 // expire before spawn (the single-budget rule). Its failure or timeout is
 // advisory: the caller renders the single Stage-2 warning, never a start failure.

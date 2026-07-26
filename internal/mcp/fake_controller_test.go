@@ -89,9 +89,10 @@ func (f *fakeController) SetSpawnObservers(before func() error, after func(pid i
 	f.beforeObs = before
 	f.afterObs = after
 }
-func (f *fakeController) DirectChildExited() bool                       { return !f.running }
-func (f *fakeController) ExitCode() int                                 { return f.exitCode }
-func (f *fakeController) TerminateDirectChild()                         {}
+func (f *fakeController) DirectChildExited() bool { return !f.running }
+func (f *fakeController) ExitCode() int           { return f.exitCode }
+func (f *fakeController) TerminateDirectChild()   {}
+
 // MaterializeSpawnSpec echoes the configured spec (like the real Controller's
 // DirectPath/URL path), so digesting and sizing see exactly what production
 // would for a non-Steam-resolved launch — the fake never does real resolution.

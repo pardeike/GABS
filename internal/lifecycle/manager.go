@@ -93,7 +93,7 @@ func (m *Manager) InstanceID() string { return m.instanceID }
 func isURLMode(mode string) bool { return mode == "SteamAppId" || mode == "EpicAppId" }
 
 // isSteamMode is true for both Steam launch modes — both get the store-launcher
-// advisory scan (design/05, M2.15), though only SteamManaged runs assistance.
+// advisory scan (design/05), though only SteamManaged runs assistance.
 func isSteamMode(mode string) bool { return mode == "SteamAppId" || mode == "SteamManaged" }
 
 // SteamNotRunningAdvisory is the single Stage-2 warning when the Steam client is
@@ -106,7 +106,7 @@ const SteamNotRunningAdvisory = "Steam does not appear to be running; the launch
 const steamAssistSpawnHeadroom = 2 * time.Second
 
 // minStageFourBudget is the smallest remaining operation budget worth spawning
-// against (M2.15): below it the deadline is effectively consumed, so the
+// against: below it the deadline is effectively consumed, so the
 // operation is treated as supersedable rather than spawning with a uselessly
 // tiny — or, if negative, silently full-defaulted — Stage-4 budget.
 const minStageFourBudget = 200 * time.Millisecond
@@ -171,7 +171,7 @@ type HistoryContext struct {
 }
 
 // ComputeHistoryContext derives the input-free context coordinates and the
-// bucket IDENTITY with ZERO history mutation (round 11 P1-1/P1-2): the hash,
+// bucket IDENTITY with ZERO history mutation: the hash,
 // the last-good snapshot, and the per-input declaration identity. It performs
 // NO key creation and NO bucket invalidation, so it is safe on a pre-accept
 // failure path (launch_spec_unresolvable, resolver/call-class errors) where a
@@ -208,8 +208,8 @@ func (m *Manager) ComputeHistoryContext(snap *config.Snapshot, game config.GameC
 		hc.Bucket.InputNames = inputNames
 		hc.Bucket.DeclHash = process.InputDeclHash(game, inputNames)
 		hc.Bucket.PerInputDecl = perInputDeclHashes(game, inputNames)
-		// Compute the value digest READ-ONLY when a bucket key already exists
-		// (round 12 F8), so a pre-accept failure (launch_spec_unresolvable) on
+		// Compute the value digest READ-ONLY when a bucket key already exists,
+		// so a pre-accept failure (launch_spec_unresolvable) on
 		// a previously proven exact input combination is recognized as proven
 		// rather than always "first run". If no key exists, the combination is
 		// genuinely unproven and the digest stays empty — no key is minted.
@@ -243,7 +243,7 @@ func (m *Manager) BuildHistoryContext(snap *config.Snapshot, game config.GameCon
 	// per-input declaration changed — or was REMOVED — since it was recorded;
 	// a value that "worked" under an old declaration is not proof under the
 	// new one. Runs even when every input was removed (empty current map), so
-	// a re-added declaration never resurrects stale proof (round 11 P2-4).
+	// a re-added declaration never resurrects stale proof.
 	currentDecls := make(map[string]string, len(game.LaunchInputs))
 	for name := range game.LaunchInputs {
 		currentDecls[name] = process.InputDeclHash(game, []string{name})
@@ -269,7 +269,7 @@ func perInputDeclHashes(game config.GameConfig, names []string) map[string]strin
 }
 
 // ApplyPinnedWorkloadStart records this launch's Stage 4 verified start from
-// the identity PINNED in the claim (round 11 P1-2), using an already-held
+// the identity PINNED in the claim, using an already-held
 // runtime-state transition lock — so every promotion path (synchronous start,
 // passive status observation, attachment, recovery) credits the start exactly
 // once, atomically with the phase flip, from the claim alone. No-op for a
@@ -281,7 +281,7 @@ func (m *Manager) ApplyPinnedWorkloadStart(gameID string, st *process.RuntimeSta
 
 // RecordTerminalStartFailure writes a terminal accepted-attempt failure to
 // history while the claim is still alive (called from Start before the deferred
-// claim release), fenced to the launch (design/08, design/20; round 10).
+// claim release), fenced to the launch (design/08, design/20).
 // Returns the classification so the caller can carry it to the render step.
 // Only design-eligible codes write; the pure classification is always returned.
 func (m *Manager) RecordTerminalStartFailure(game config.GameConfig, hc HistoryContext, code string) process.Classification {
@@ -353,8 +353,7 @@ func computeSpawnDigests(spec process.LaunchSpec, controller process.ControllerI
 	// Channel membership is decided HERE, from the resolved spec — the
 	// config-declared context keys are the contextEnv channel; every other
 	// forwarded name (GABS_*/GABP_*, SteamAppId/SteamGameId, SystemRoot) is the
-	// managed layer (review round 9: prefix guessing is not a persistable
-	// contract).
+	// managed layer (prefix guessing is not a persistable contract).
 	contextKeys := map[string]bool{}
 	for _, k := range spec.ContextEnvKeys {
 		contextKeys[k] = true

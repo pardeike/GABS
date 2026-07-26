@@ -35,14 +35,14 @@ func (c *spyMaterializeController) Start() error {
 	}
 	return &process.ProcessError{Type: process.ProcessErrorTypeStart, Context: "spy stop", Err: errors.New("captured")}
 }
-func (c *spyMaterializeController) Stop(grace time.Duration) error { return nil }
-func (c *spyMaterializeController) Kill() error                    { return nil }
-func (c *spyMaterializeController) IsRunning() bool                { return false }
-func (c *spyMaterializeController) GetPID() int                    { return 0 }
-func (c *spyMaterializeController) GetLaunchMode() string          { return "SteamManaged" }
-func (c *spyMaterializeController) GetStopProcessName() string     { return "" }
-func (c *spyMaterializeController) IsLauncherProcessRunning() bool { return false }
-func (c *spyMaterializeController) FinalEnvironment() []string     { return nil }
+func (c *spyMaterializeController) Stop(grace time.Duration) error      { return nil }
+func (c *spyMaterializeController) Kill() error                         { return nil }
+func (c *spyMaterializeController) IsRunning() bool                     { return false }
+func (c *spyMaterializeController) GetPID() int                         { return 0 }
+func (c *spyMaterializeController) GetLaunchMode() string               { return "SteamManaged" }
+func (c *spyMaterializeController) GetStopProcessName() string          { return "" }
+func (c *spyMaterializeController) IsLauncherProcessRunning() bool      { return false }
+func (c *spyMaterializeController) FinalEnvironment() []string          { return nil }
 func (c *spyMaterializeController) LaunchLogTail(maxBytes int64) string { return "" }
 func (c *spyMaterializeController) SetSpawnObservers(before func() error, after func(pid int, startTime int64, spawnErr error)) {
 }
