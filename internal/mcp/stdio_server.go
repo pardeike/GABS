@@ -1017,7 +1017,6 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 
 			// Get status once to avoid double mutex lock
 			status, statusEv := s.checkGameStatusObserved(game.ID)
-			statusDesc := s.getStatusDescriptionFromStatus(status, game)
 			statusItem := s.gameStatusStructured(*game, status)
 			statusItem["currentConfigRevision"] = configRevision
 			attachStatusEvidence(statusItem, statusEv)
@@ -1029,7 +1028,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				applyRuntimeSourceGuidance(statusItem, game.ID, rs)
 			}
 			attachConfigHealth(statusItem, gamesConfig, cfgErr)
-			content.WriteString(fmt.Sprintf("**%s** (%s): %s\n", game.ID, game.Name, statusDesc))
+			// Read the description from the item AFTER the source-aware
+			// guidance ran, so the text line agrees with the corrected
+			// structured content.
+			content.WriteString(fmt.Sprintf("**%s** (%s): %v\n", game.ID, game.Name, statusItem["statusDescription"]))
 			if diagnosticMessage := gameStateDiagnosticMessage(statusItem); diagnosticMessage != "" {
 				content.WriteString(fmt.Sprintf("\nDiagnosis: %s\n", diagnosticMessage))
 			}
@@ -1110,7 +1112,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 							attachRuntimeLifecycle(statusItem, rs)
 							applyRuntimeSourceGuidance(statusItem, game.ID, rs)
 						}
-						rows[i] = gameStatusRow{desc: s.getStatusDescriptionFromStatus(status, &game), item: statusItem}
+						// The item's description reflects the source-aware
+						// correction; the row text must agree with it.
+						rows[i] = gameStatusRow{desc: fmt.Sprintf("%v", statusItem["statusDescription"]), item: statusItem}
 						return
 					}
 					item := s.runtimeOnlyStatusItem(sp.gameID)
@@ -4543,6 +4547,12 @@ func applyRuntimeSourceGuidance(item map[string]interface{}, gameID string, rs *
 		return
 	}
 	item["source"] = process.SourceExternal
+	// The generic descriptions for a live shared claim suggest games_connect;
+	// for an external snapshot that suggestion is impossible, so the text
+	// surface must agree with the corrected next actions below.
+	if st, _ := item["status"].(string); st == "shared-running" || st == "running" || st == "running-disconnected" {
+		item["statusDescription"] = "running (externally started; observed by ID — status/stop/kill work, attachment is unavailable)"
+	}
 	gameArg := map[string]interface{}{"gameId": gameID}
 	next := []map[string]interface{}{
 		mcpNextAction("games_status", gameArg, "Re-check the externally observed instance."),

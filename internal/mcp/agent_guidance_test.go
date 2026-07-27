@@ -52,6 +52,15 @@ func TestExternalSnapshotStatusSuppressesConnect(t *testing.T) {
 	if !strings.Contains(statusText, `"source":"external"`) {
 		t.Fatalf("the snapshot's source must be exposed: %s", statusText)
 	}
+	// The TEXT description must agree with the corrected actions: the
+	// generic shared-claim wording suggests games_connect, which is
+	// impossible here.
+	if strings.Contains(statusText, "use games_connect to attach") {
+		t.Fatalf("the status description must not suggest an impossible connect: %s", statusText)
+	}
+	if !strings.Contains(statusText, "attachment is unavailable") {
+		t.Fatalf("the description must state the attachment limitation: %s", statusText)
+	}
 
 	// The same runtime state must give the same guidance from EVERY view:
 	// games_show and aggregate status must not advertise connect either.
@@ -62,6 +71,9 @@ func TestExternalSnapshotStatusSuppressesConnect(t *testing.T) {
 	aggText := marshalMessage(t, server.HandleMessage(noArgStatusMessage("agg")))
 	if strings.Contains(aggText, `"tool":"games_connect"`) {
 		t.Fatalf("aggregate status must apply the same source-aware guidance: %s", aggText)
+	}
+	if strings.Contains(aggText, "use games_connect to attach") {
+		t.Fatalf("the aggregate row text must not suggest an impossible connect: %s", aggText)
 	}
 }
 
