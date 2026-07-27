@@ -180,9 +180,14 @@ func TestJSONPointerEscaping(t *testing.T) {
 // that map to the same runtime directory on a case-insensitive filesystem must
 // be rejected at load — uniformly, so a config is portable across filesystems.
 func TestGameIDDirectoryCollisionRejected(t *testing.T) {
-	cases := []struct{ name, json string }{
-		{"case variants", `{"version":"1.0","games":{"Adventure":{"id":"Adventure","name":"A","launchMode":"DirectPath","target":"/x"},"adventure":{"id":"adventure","name":"a","launchMode":"DirectPath","target":"/y"}}}`},
-		{"path-normalizing alias", `{"version":"1.0","games":{"factory/../adventure":{"id":"a","name":"A","launchMode":"DirectPath","target":"/x"},"adventure":{"id":"b","name":"B","launchMode":"DirectPath","target":"/y"}}}`},
+	cases := []struct{ name, json, wants string }{
+		{"case variants", `{"version":"1.0","games":{"Adventure":{"id":"Adventure","name":"A","launchMode":"DirectPath","target":"/x"},"adventure":{"id":"adventure","name":"a","launchMode":"DirectPath","target":"/y"}}}`,
+			"same runtime directory"},
+		// A path-normalizing spelling is now rejected by the per-ID
+		// addressability rule itself — the more precise error, since
+		// ClaimRuntimeState would refuse the same ID at every start.
+		{"path-normalizing alias", `{"version":"1.0","games":{"factory/../adventure":{"id":"factory/../adventure","name":"A","launchMode":"DirectPath","target":"/x"},"adventure":{"id":"adventure","name":"B","launchMode":"DirectPath","target":"/y"}}}`,
+			"not addressable at runtime"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -191,10 +196,39 @@ func TestGameIDDirectoryCollisionRejected(t *testing.T) {
 			if err == nil {
 				t.Fatal("game IDs that map to the same runtime directory must be rejected")
 			}
-			if !strings.Contains(err.Error(), "same runtime directory") {
-				t.Fatalf("error should explain the directory collision, got: %v", err)
+			if !strings.Contains(err.Error(), c.wants) {
+				t.Fatalf("error should contain %q, got: %v", c.wants, err)
 			}
 		})
+	}
+}
+
+// TestUnaddressableGameIDRejectedAtLoad pins the load-time gate: an ID that
+// runtime-state creation would reject must fail validation with its exact
+// config path instead of loading, resolving, and then failing every start
+// while the config still reads as valid.
+func TestUnaddressableGameIDRejectedAtLoad(t *testing.T) {
+	p := writeTemp(t, `{"version":"1.0","games":{"adventure/":{"id":"adventure/","name":"A","launchMode":"DirectPath","target":"/x"}}}`)
+	_, err := LoadGamesConfigFromPath(p)
+	if err == nil {
+		t.Fatal("a trailing-slash game ID must be rejected at load")
+	}
+	if !strings.Contains(err.Error(), "/games/adventure~1") || !strings.Contains(err.Error(), "not addressable") {
+		t.Fatalf("the error must name the exact config path and the addressability rule, got: %v", err)
+	}
+}
+
+// TestMismatchedGameIDKeyRejectedAtLoad pins identity coherence: lookups
+// resolve by the map key while runtime claims use the declared id, so a
+// divergence would address different games' state.
+func TestMismatchedGameIDKeyRejectedAtLoad(t *testing.T) {
+	p := writeTemp(t, `{"version":"1.0","games":{"adventure":{"id":"quest","name":"A","launchMode":"DirectPath","target":"/x"}}}`)
+	_, err := LoadGamesConfigFromPath(p)
+	if err == nil {
+		t.Fatal("a key/id mismatch must be rejected at load")
+	}
+	if !strings.Contains(err.Error(), "must match") {
+		t.Fatalf("the error must explain the mismatch, got: %v", err)
 	}
 }
 

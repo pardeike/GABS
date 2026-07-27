@@ -327,6 +327,108 @@ func TestForgetDiscardsPermissionUnreadableClaim(t *testing.T) {
 	}
 }
 
+// TestCheckRuntimeClaimClassifications pins the three-way contract behind
+// alias fallback: authoritative absence (clean not-found, unsafe ID) allows a
+// caller to resolve another referent, an addressable claim wins, and any
+// other failure is an error the caller must not treat as absence.
+func TestCheckRuntimeClaimClassifications(t *testing.T) {
+	dir := t.TempDir()
+
+	if exists, err := CheckRuntimeClaim("absent", dir); exists || err != nil {
+		t.Fatalf("a cleanly absent claim is authoritative: exists=%v err=%v", exists, err)
+	}
+	if exists, err := CheckRuntimeClaim("../escape", dir); exists || err != nil {
+		t.Fatalf("an unsafe ID can never address a claim: exists=%v err=%v", exists, err)
+	}
+
+	writeClaim(t, dir, "corrupt", "{corrupt")
+	if exists, err := CheckRuntimeClaim("corrupt", dir); !exists || err != nil {
+		t.Fatalf("a corrupt but regular claim is addressable: exists=%v err=%v", exists, err)
+	}
+
+	// A directory named runtime.json is a non-regular leaf on every OS: its
+	// absence-as-a-claim cannot be established, so the answer is an error.
+	if err := os.MkdirAll(filepath.Join(dir, "broken", "runtime.json"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if exists, err := CheckRuntimeClaim("broken", dir); exists || err == nil {
+		t.Fatalf("a non-regular leaf must surface as an error, not absence: exists=%v err=%v", exists, err)
+	}
+}
+
+// TestLockedHelpersDoNotSelfLockOnCorruptClaim sweeps the lock-holding
+// helpers: each acquires the transition lock and then loads the claim, so a
+// corrupt claim must fail immediately through the locked loader instead of
+// stalling on a re-acquire of the caller's own lock.
+func TestLockedHelpersDoNotSelfLockOnCorruptClaim(t *testing.T) {
+	dir := t.TempDir()
+	writeClaim(t, dir, "g", "{corrupt")
+
+	begin := time.Now()
+	if err := ReconcilePendingCredits("g", dir, "launch-x"); err == nil {
+		t.Fatal("reconcile on a corrupt claim must error")
+	}
+	if err := RemoveRuntimeStateIfCurrent("g", dir, "inst", "launch-x", nil); err == nil {
+		t.Fatal("fenced removal on a corrupt claim must error")
+	}
+	if err := ClearAttachmentIfCurrent("g", dir, "launch-x", "conn", 2*time.Second); err == nil {
+		t.Fatal("detach completion on a corrupt claim must error")
+	}
+	if _, _, err := NormalizeLegacyClaimCapturingEndpoint("g", dir, "DirectPath", "rev"); err == nil {
+		t.Fatal("legacy normalization on a corrupt claim must error")
+	}
+	if elapsed := time.Since(begin); elapsed > 1500*time.Millisecond {
+		t.Fatalf("lock-holding helpers stalled %v on their own transition lock", elapsed)
+	}
+}
+
+// TestForgetCorruptClaimDoesNotSelfLockStall pins the repair latency: the
+// forget flow holds the transition lock, so reconciling a corrupt claim must
+// parse the bytes it already read instead of calling a loader whose recovery
+// re-acquires — and then times out on — the caller's own lock. Pre-fix, the
+// two calls below stalled ~2 seconds each on self-lock timeouts.
+func TestForgetCorruptClaimDoesNotSelfLockStall(t *testing.T) {
+	dir := t.TempDir()
+	writeClaim(t, dir, "g", "{corrupt")
+
+	data, digest, found, err := ReadRuntimeClaim("g", dir)
+	if err != nil || !found || data == nil {
+		t.Fatalf("corrupt claim must be readable as bytes: data=%v found=%v err=%v", data, found, err)
+	}
+
+	begin := time.Now()
+	if err := ForceForgetRuntimeClaim("g", dir, digest, false); !errors.Is(err, ErrForgetCorruptClaim) {
+		t.Fatalf("a corrupt claim must require the discard confirmation, got %v", err)
+	}
+	if err := ForceForgetRuntimeClaim("g", dir, digest, true); err != nil {
+		t.Fatalf("the confirmed discard must remove the corrupt claim: %v", err)
+	}
+	if elapsed := time.Since(begin); elapsed > 1500*time.Millisecond {
+		t.Fatalf("the forget flow stalled %v — it must not wait on its own transition lock", elapsed)
+	}
+	if RuntimeClaimExists("g", dir) {
+		t.Fatal("the corrupt claim must be gone")
+	}
+}
+
+// TestTransitionOnCorruptClaimDoesNotSelfLockStall pins the same property for
+// fenced transitions: the transition already holds the lock, so loading a
+// corrupt claim must fail immediately instead of waiting out a re-acquire of
+// the caller's own lock.
+func TestTransitionOnCorruptClaimDoesNotSelfLockStall(t *testing.T) {
+	dir := t.TempDir()
+	writeClaim(t, dir, "g", "{corrupt")
+
+	begin := time.Now()
+	_, err := TransitionRuntimeState("g", dir, 2*time.Second, func(*RuntimeState) error { return nil })
+	if err == nil {
+		t.Fatal("a corrupt claim must fail the transition")
+	}
+	if elapsed := time.Since(begin); elapsed > 1500*time.Millisecond {
+		t.Fatalf("the transition stalled %v on its own lock", elapsed)
+	}
+}
+
 func TestForgetRemovesSymlinkedLeafAsCorruptDiscard(t *testing.T) {
 	requireSymlinks(t)
 	dir := t.TempDir()

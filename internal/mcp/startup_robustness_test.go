@@ -246,8 +246,18 @@ func TestGamesStartRejectsOccupiedEndpointCache(t *testing.T) {
 	if !strings.Contains(startText, `"status":"endpoint_cache_in_use"`) {
 		t.Fatalf("expected endpoint_cache_in_use status, got: %s", startText)
 	}
-	if !strings.Contains(startText, `"resetEndpoint":true`) || !strings.Contains(startText, "games_connect") {
-		t.Fatalf("expected connect and reset next actions, got: %s", startText)
+	// Neither games_connect (requires a claim) nor games_status (reports
+	// stopped without inspecting the socket) can answer anything here, so
+	// neither may be a recommended action; the honest diagnostic is an
+	// OS-level port inspection named in the text.
+	if strings.Contains(startText, `"tool":"games_connect"`) || strings.Contains(startText, `"tool":"games_status"`) {
+		t.Fatalf("no-op recovery tools must not be recommended for an occupied endpoint cache, got: %s", startText)
+	}
+	if !strings.Contains(startText, "lsof") || !strings.Contains(startText, "netstat") {
+		t.Fatalf("the result must name an OS-level port inspection, got: %s", startText)
+	}
+	if !strings.Contains(startText, `"resetEndpoint":true`) {
+		t.Fatalf("expected the reset next action, got: %s", startText)
 	}
 	if runtimeState, err := process.LoadRuntimeState(game.ID, tmpDir); err != nil {
 		t.Fatalf("failed to inspect runtime state: %v", err)

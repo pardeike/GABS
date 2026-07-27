@@ -68,10 +68,12 @@ func TestHoistGlobalFlagsPosition(t *testing.T) {
 			rest:    []string{"doctor", "adventure"},
 		},
 		{
-			name:    "a literal -- stops hoisting",
+			// The marker is passed through, not consumed: the subcommand layer
+			// honors it too, so a dash-prefixed game ID stays addressable.
+			name:    "a literal -- stops hoisting and is passed through",
 			args:    []string{"start", "adventure", "--", "--configDir", "/cfg"},
 			globals: nil,
-			rest:    []string{"start", "adventure", "--configDir", "/cfg"},
+			rest:    []string{"start", "adventure", "--", "--configDir", "/cfg"},
 		},
 		{
 			name:    "no globals present",
@@ -121,7 +123,7 @@ func TestGamesActionsRejectTrailingArgs(t *testing.T) {
 	}
 	for _, args := range cases {
 		t.Run(args[0], func(t *testing.T) {
-			if err := checkNoTrailingArgs(args[0], args[1:], trailingAllowanceFor(args[0])); err == nil {
+			if err := checkNoTrailingArgs(args[0], args[1:], nil, trailingAllowanceFor(args[0])); err == nil {
 				t.Fatalf("expected %q to reject trailing arguments", args)
 			}
 		})
@@ -142,7 +144,7 @@ func TestActionsWithOwnParserAreLeftAlone(t *testing.T) {
 	}
 	for _, args := range cases {
 		t.Run(args[0]+"/"+strings.Join(args[1:], "_"), func(t *testing.T) {
-			if err := checkNoTrailingArgs(args[0], args[1:], trailingAllowanceFor(args[0])); err != nil {
+			if err := checkNoTrailingArgs(args[0], args[1:], nil, trailingAllowanceFor(args[0])); err != nil {
 				t.Fatalf("%q must be left to the action parser, got %v", args, err)
 			}
 		})
@@ -153,8 +155,36 @@ func TestActionsWithOwnParserAreLeftAlone(t *testing.T) {
 // on actions with no flag surface of their own; globals are hoisted before this
 // runs, so anything remaining is genuinely unrecognized.
 func TestUnknownFlagOnSimpleActionIsLoud(t *testing.T) {
-	if err := checkNoTrailingArgs("list", []string{"--nope"}, trailingAllowanceFor("list")); err == nil {
+	if err := checkNoTrailingArgs("list", []string{"--nope"}, nil, trailingAllowanceFor("list")); err == nil {
 		t.Fatal("expected an unknown-flag error for `games list --nope`")
+	}
+}
+
+// TestDoubleDashEscapesDashPrefixedIDs pins the "--" contract: hoisting keeps
+// the marker and everything after it — even a token spelled like a global
+// flag — and the trailing check accepts escaped tokens as positionals while
+// still counting them against the action's arity.
+func TestDoubleDashEscapesDashPrefixedIDs(t *testing.T) {
+	globals, rest, err := hoistGlobalFlags([]string{"games", "stop", "--", "-grace"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(globals) != 0 {
+		t.Fatalf("a token behind \"--\" must never be hoisted as a global flag, got %v", globals)
+	}
+	want := []string{"games", "stop", "--", "-grace"}
+	if strings.Join(rest, " ") != strings.Join(want, " ") {
+		t.Fatalf("hoisting must pass \"--\" through for the subcommand layer, got %v", rest)
+	}
+
+	if err := checkNoTrailingArgs("stop", nil, []string{"-dash"}, 1); err != nil {
+		t.Fatalf("an escaped dash-prefixed ID must be accepted as a positional: %v", err)
+	}
+	if err := checkNoTrailingArgs("stop", []string{"-dash"}, nil, 1); err == nil {
+		t.Fatal("an unescaped dash token must stay a loud unknown flag")
+	}
+	if err := checkNoTrailingArgs("stop", []string{"id"}, []string{"extra"}, 1); err == nil {
+		t.Fatal("escaped tokens must still count against the action's arity")
 	}
 }
 
@@ -171,7 +201,7 @@ func TestGamesActionsAcceptTheirOwnArity(t *testing.T) {
 	}
 	for _, args := range cases {
 		t.Run(args[0], func(t *testing.T) {
-			if err := checkNoTrailingArgs(args[0], args[1:], trailingAllowanceFor(args[0])); err != nil {
+			if err := checkNoTrailingArgs(args[0], args[1:], nil, trailingAllowanceFor(args[0])); err != nil {
 				t.Fatalf("%q should be accepted, got %v", args, err)
 			}
 		})

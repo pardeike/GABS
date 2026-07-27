@@ -1,12 +1,14 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // ProfileConfig is a named launch-context overlay. It may vary launch
@@ -130,6 +132,32 @@ func escapePointerToken(s string) string {
 	return strings.ReplaceAll(s, "/", "~1")
 }
 
+// ModeIncompatibleIssues returns the rendered issues when cfgErr's validation
+// failure consists purely of launch-mode incompatibilities owned by gameID —
+// the stable launch_mode_incompatible outcome both frontends must emit
+// (design/05) instead of the generic config_invalid. Any mixed failure returns
+// nil: an issue with a different code, or ANY issue owned by another game or
+// the top level, means the selected game's incompatibility is not the whole
+// story, and reporting only it would hide the other validation error.
+func ModeIncompatibleIssues(cfgErr *ConfigError, gameID string) []string {
+	var ve *ValidationError
+	if cfgErr == nil || !errors.As(cfgErr.Err, &ve) {
+		return nil
+	}
+	prefix := "/games/" + escapePointerToken(gameID)
+	var msgs []string
+	for _, is := range ve.Issues {
+		if is.Path != prefix && !strings.HasPrefix(is.Path, prefix+"/") {
+			return nil // mixed failure: the generic stale-config refusal stands
+		}
+		if is.Code != IssueCodeModeIncompatible {
+			return nil // mixed failure: the generic stale-config refusal stands
+		}
+		msgs = append(msgs, is.String())
+	}
+	return msgs
+}
+
 func hasNUL(s string) bool { return strings.ContainsRune(s, 0) }
 
 func isURLLaunchMode(mode string) bool {
@@ -178,7 +206,7 @@ func ValidateGameExtensions(gameID string, g *GameConfig, opts ValidationOptions
 		// One observation/control mechanism stays mandatory for URL modes:
 		// the URL-opener helper PID proves nothing about the workload. Hooks
 		// (status + stop-or-kill) may satisfy it in place of stopProcessName.
-		if g.StopProcessName == "" && !g.hasURLHookAlternative() {
+		if g.StopProcessName == "" && !g.HasURLHookAlternative() {
 			addErr(base, g.LaunchMode+" games must declare stopProcessName, or a game-level status hook plus a stop or kill hook")
 		}
 		return errs, warns
@@ -316,10 +344,12 @@ func validateEnvKey(memberPath, key string) []ConfigIssue {
 	return nil
 }
 
-// hasURLHookAlternative reports whether lifecycle hooks satisfy the URL-mode
+// HasURLHookAlternative reports whether lifecycle hooks satisfy the URL-mode
 // observation/control requirement in place of stopProcessName: a game-level
-// status hook plus a stop or kill hook.
-func (g *GameConfig) hasURLHookAlternative() bool {
+// status hook plus a stop or kill hook. Exported so user-facing surfaces can
+// stop warning about a missing stopProcessName when hooks already provide
+// lifecycle control.
+func (g *GameConfig) HasURLHookAlternative() bool {
 	return g.Lifecycle != nil && g.Lifecycle.Status != nil &&
 		(g.Lifecycle.Stop != nil || g.Lifecycle.Kill != nil)
 }
@@ -392,6 +422,18 @@ func validateLaunchInput(ipath, name string, in *LaunchInputConfig, profiles map
 		}
 	}
 	if in.Type == "string" {
+		// Every enum member must satisfy the declared length and pattern:
+		// runtime resolution enforces all constraints together, so a member
+		// that violates them is advertised as a choice every start rejects —
+		// and an all-invalid enum makes the input impossible to satisfy.
+		maxLen := InputMaxLengthDefault
+		if in.MaxLength != nil {
+			maxLen = *in.MaxLength
+		}
+		var enumRe *regexp.Regexp
+		if in.Pattern != "" {
+			enumRe, _ = regexp.Compile("^(?:" + in.Pattern + ")$") // a compile failure was reported above
+		}
 		seen := map[string]bool{}
 		for i, e := range in.Enum {
 			if hasNUL(e) {
@@ -401,6 +443,12 @@ func validateLaunchInput(ipath, name string, in *LaunchInputConfig, profiles map
 				add(fmt.Sprintf("%s/enum/%d", ipath, i), fmt.Sprintf("duplicate enum value %q", e))
 			}
 			seen[e] = true
+			if utf8.RuneCountInString(e) > maxLen {
+				add(fmt.Sprintf("%s/enum/%d", ipath, i), fmt.Sprintf("enum value %q exceeds maxLength %d; every start would reject it", e, maxLen))
+			}
+			if enumRe != nil && !enumRe.MatchString(e) {
+				add(fmt.Sprintf("%s/enum/%d", ipath, i), fmt.Sprintf("enum value %q does not match the declared pattern; every start would reject it", e))
+			}
 		}
 	}
 

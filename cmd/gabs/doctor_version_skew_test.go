@@ -44,6 +44,22 @@ func TestDoctorVersionSkewAdvisoryIsNonFatal(t *testing.T) {
 	}
 }
 
+// TestDoctorWarnsForEnvOnlyGame covers the same silent-drop hazard for the
+// remaining 1.1 launch-context fields: a game using only game-level env (or
+// unsetEnv) loses its environment to a pre-1.1 binary exactly like
+// profile-contributed arguments, so it must receive the same advisory.
+func TestDoctorWarnsForEnvOnlyGame(t *testing.T) {
+	dir := t.TempDir()
+	writeCLIConfig(t, dir, `{"version":"1.0","games":{"g":{"id":"g","name":"G","launchMode":"DirectPath","target":"/bin/true","env":{"DATA_ROOT":"/srv/data"}}}}`)
+	log := util.NewLogger("error")
+
+	out := captureStdout(t, func() { runDoctor(log, "g", dir, false) })
+
+	if !strings.Contains(out, "silently ignore") {
+		t.Fatalf("an env-only game must get the version-skew advisory:\n%s", out)
+	}
+}
+
 // TestDoctorNoVersionAdviceForLegacyGames protects the compatibility promise: a
 // game with no profiles, inputs or hooks is readable by any GABS, so there is
 // nothing to advise about.

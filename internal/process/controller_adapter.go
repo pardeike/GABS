@@ -11,6 +11,7 @@ type ControllerInterface interface {
 	Kill() error
 	IsRunning() bool
 	GetPID() int
+	SpawnFingerprint() (pid int, startTime int64)
 	GetLaunchMode() string
 	GetStopProcessName() string
 	IsLauncherProcessRunning() bool

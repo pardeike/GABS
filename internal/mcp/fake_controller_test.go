@@ -73,6 +73,12 @@ func (f *fakeController) IsRunning() bool {
 	return f.running
 }
 func (f *fakeController) GetPID() int { return deadFakePID }
+
+func (f *fakeController) SpawnFingerprint() (int, int64) {
+	// The fake's dead PID doubles as its spawn fingerprint with a fixed
+	// start time, mirroring a pinned-at-spawn identity.
+	return deadFakePID, 1
+}
 func (f *fakeController) GetLaunchMode() string {
 	if f.mode != "" {
 		return f.mode

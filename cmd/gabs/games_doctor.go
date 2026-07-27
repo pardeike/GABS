@@ -111,16 +111,21 @@ const firstProfileAwareRelease = "1.1.0"
 // only available protection is telling the operator to upgrade every binary
 // that reads this config directory, at the one place they ask for diagnostics.
 func doctorVersionSkew(d *doctorReport, game *config.GameConfig) {
-	usesNewFields := len(game.Profiles) > 0 || len(game.LaunchInputs) > 0 || game.Lifecycle != nil
+	// env and unsetEnv are 1.1 launch-context fields exactly like profiles:
+	// an env-only game can lose a data-root or isolation environment to an
+	// old binary the same silent way.
+	usesNewFields := len(game.Profiles) > 0 || len(game.LaunchInputs) > 0 || game.Lifecycle != nil ||
+		len(game.Env) > 0 || len(game.UnsetEnv) > 0
 	if !usesNewFields {
 		return
 	}
 
-	d.warn("this game uses profiles/launch inputs/lifecycle hooks, which GABS releases before %s "+
-		"silently ignore: an older binary reads this config without complaint and drops every "+
-		"argument a profile contributes, so a launch can hit the wrong data root with nothing "+
-		"logged. Upgrade every GABS that reads this config directory to %s or newer (this binary "+
-		"is %s). Releases before %s cannot detect this and will not warn.",
+	d.warn("this game uses launch-context fields (profiles, launch inputs, lifecycle hooks, or "+
+		"game-level env/unsetEnv), which GABS releases before %s silently ignore: an older binary "+
+		"reads this config without complaint and drops every argument and environment variable "+
+		"those fields contribute, so a launch can hit the wrong data root with nothing logged. "+
+		"Upgrade every GABS that reads this config directory to %s or newer (this binary is %s). "+
+		"Releases before %s cannot detect this and will not warn.",
 		firstProfileAwareRelease, firstProfileAwareRelease, version.Get(), firstProfileAwareRelease)
 }
 

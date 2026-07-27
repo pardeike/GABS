@@ -478,11 +478,22 @@ func TestRemoveEvaluatedClaimFenced(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := removeEvaluatedClaim(g, &evaluated); err != nil {
+	// The claim advanced (attach + detach bumped the generation) since the
+	// original evaluation: launch/operation identity alone must no longer
+	// authorize the removal — the gate loop re-evaluates instead, exactly
+	// what protects a re-stamped, now-spawning claim from a stale judgment.
+	if err := removeEvaluatedClaim(g, &evaluated); err != ErrFencingViolation {
+		t.Fatalf("a claim that advanced since evaluation must fence the removal: %v", err)
+	}
+	fresh, err := LoadRuntimeState("g14", dir)
+	if err != nil || fresh == nil {
+		t.Fatalf("the claim must survive the fenced removal: %v", err)
+	}
+	if err := removeEvaluatedClaim(g, fresh); err != nil {
 		t.Fatal(err)
 	}
 	if claim, _ := LoadRuntimeState("g14", dir); claim != nil {
-		t.Fatalf("matching identity must remove")
+		t.Fatalf("a re-evaluated current snapshot must remove")
 	}
 }
 

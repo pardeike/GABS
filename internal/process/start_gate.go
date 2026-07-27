@@ -68,7 +68,9 @@ type StartRefusal struct {
 }
 
 // StartGateResult carries either a fresh claim (start may proceed) or a
-// refusal — never both.
+// refusal — never both. When GateStart returns an error it may still return a
+// non-nil result carrying only the warnings earned before the failure, so the
+// probe evidence is never lost with the error.
 type StartGateResult struct {
 	Claim    *RuntimeState
 	Warnings []string
@@ -118,7 +120,7 @@ func GateStart(g StartGate) (*StartGateResult, error) {
 				if errors.Is(rerr, ErrFencingViolation) {
 					continue // someone replaced it mid-evaluation; re-evaluate
 				}
-				return nil, fmt.Errorf("failed to clear stale claim for %s: %w", g.GameID, rerr)
+				return &StartGateResult{Warnings: warnings}, fmt.Errorf("failed to clear stale claim for %s: %w", g.GameID, rerr)
 			}
 		}
 
@@ -129,12 +131,15 @@ func GateStart(g StartGate) (*StartGateResult, error) {
 		state.HistorySuccess = g.HistorySuccess
 		execPID := os.Getpid()
 		execStart, _ := ProcessStartTime(execPID)
-		// The deadline stamped at publication covers only the probe phase:
-		// claim evaluation may already have consumed real time (a slow status
-		// hook), and the probes below run under their own hook timeouts. The
-		// full process-start budget is re-stamped once Stage 2 completes, so
-		// evaluation and probe time are never charged against the Stage 4
-		// verification window.
+		// The deadline stamped at publication is the configured process-start
+		// budget on a fresh clock: claim evaluation before this point is not
+		// charged, and the same full budget is re-stamped once the probes
+		// complete so probe time never consumes the Stage 4 verification
+		// window. The probes themselves are bounded only by their own hook
+		// timeouts (design/12: no derived probe budget); a probe phase that
+		// outlives the published deadline leaves the claim honestly
+		// supersedable, and the fenced re-stamp below then reports the
+		// supersession instead of spawning.
 		state.Operation = &RuntimeOperation{
 			OperationID:          NewFencingID(),
 			Action:               OperationActionStart,
@@ -142,7 +147,7 @@ func GateStart(g StartGate) (*StartGateResult, error) {
 			ExecutorPID:          execPID,
 			ExecutorPIDStartTime: execStart,
 			AttemptStartedAt:     now,
-			Deadline:             time.Now().UTC().Add(preflightProbeBudget(g)),
+			Deadline:             time.Now().UTC().Add(g.Budget),
 		}
 		state.ProcessStartDeadline = state.Operation.Deadline
 
@@ -152,7 +157,7 @@ func GateStart(g StartGate) (*StartGateResult, error) {
 			break
 		}
 		if !errors.Is(cerr, ErrRuntimeStateExists) {
-			return nil, cerr
+			return &StartGateResult{Warnings: warnings}, cerr
 		}
 		// Lost the claim race: loop and judge the winner like any existing
 		// claim — it may be a preflight start, an external snapshot, or
@@ -174,7 +179,7 @@ func GateStart(g StartGate) (*StartGateResult, error) {
 	warnings = append(warnings, probeWarnings...)
 	if err != nil {
 		_ = removeRuntimeStateGuarded(g.GameID, g.ConfigDir, g.InstanceID, state.LaunchID, state.Operation.OperationID, gateSelfLive(g, state.LaunchID), nil)
-		return nil, err
+		return &StartGateResult{Warnings: warnings}, err
 	}
 	if refusal != nil {
 		return &StartGateResult{Refusal: refusal, Warnings: warnings}, nil
@@ -192,7 +197,7 @@ func GateStart(g StartGate) (*StartGateResult, error) {
 		if errors.Is(rerr, ErrFencingViolation) || errors.Is(rerr, ErrNoRuntimeClaim) {
 			return &StartGateResult{Refusal: supersededDuringProbeRefusal(g), Warnings: warnings}, nil
 		}
-		return nil, rerr
+		return &StartGateResult{Warnings: warnings}, rerr
 	}
 	return &StartGateResult{Claim: restamped, Warnings: warnings}, nil
 }
@@ -351,7 +356,7 @@ func removeEvaluatedClaim(g StartGate, evaluated *RuntimeState) error {
 		return err
 	}
 	defer lock.Release()
-	cur, err := LoadRuntimeState(g.GameID, g.ConfigDir)
+	cur, err := loadRuntimeStateLocked(g.GameID, g.ConfigDir)
 	if err != nil {
 		return err
 	}
@@ -367,6 +372,15 @@ func removeEvaluatedClaim(g StartGate, evaluated *RuntimeState) error {
 	default:
 		return ErrFencingViolation
 	}
+	if cur.Generation != evaluated.Generation {
+		// The claim advanced since this evaluation — a probing executor
+		// re-stamped its deadline, or the spawn state moved. Launch and
+		// operation IDs survive those transitions, so they alone cannot
+		// prove the judgment is still current: deleting here could unclaim a
+		// process that is now spawning and admit a duplicate launch.
+		// Re-evaluate the advanced claim instead.
+		return ErrFencingViolation
+	}
 	if attachmentBlocksRemoval(cur.Attachment, g.InstanceID, func(connectionID string) bool {
 		return g.BridgeBound != nil && g.BridgeBound(evaluated.LaunchID, connectionID)
 	}) {
@@ -378,26 +392,6 @@ func removeEvaluatedClaim(g StartGate, evaluated *RuntimeState) error {
 	// the claim and none replays. A credit-write failure persists
 	// the pending lists and aborts, leaving the claim for a later retry.
 	return creditPendingThenRemoveLocked(g.GameID, g.ConfigDir, cur)
-}
-
-// preflightProbeMargin covers the stopProcessName scan and the fenced claim
-// rewrites of the probe phase beyond the hook timeouts themselves.
-const preflightProbeMargin = 10 * time.Second
-
-// preflightProbeBudget bounds the operation deadline for the probe phase:
-// probes run concurrently, so the slowest configured status-hook timeout
-// dominates, plus the fixed margin.
-func preflightProbeBudget(g StartGate) time.Duration {
-	budget := preflightProbeMargin
-	for _, lc := range g.Probes {
-		if lc == nil || lc.Status == nil {
-			continue
-		}
-		if t := time.Duration(lc.Status.TimeoutSeconds)*time.Second + preflightProbeMargin; t > budget {
-			budget = t
-		}
-	}
-	return budget
 }
 
 // runPreStartProbes probes every profile's status hook concurrently, each
@@ -558,9 +552,72 @@ func persistExternalSnapshot(g StartGate, state *RuntimeState, observedProfile s
 		// External snapshots persist the explicit unknown verdict: GABS
 		// never delivered context to this workload, and status must render
 		// that distinction rather than silently omitting it (design/07).
+		// The REFUSED request's track-record identity must not follow the
+		// external workload: crediting or resetting profile A's history for a
+		// launch GABS never performed corrupts the record.
+		s.HistoryContextHash = ""
+		s.HistorySuccess = nil
 		s.ContextDelivery = &RuntimeContextDelivery{
 			Overall: DeliveryUnknown,
 			Reasons: map[string]string{"overall": "externally started instance: GABS delivered no launch context"},
+		}
+		s.UpdatedAt = now
+		return nil
+	})
+	return err
+}
+
+// PublishTrackedControllerSnapshot rewrites a fresh preflight claim into an
+// explicitly UNATTRIBUTED active snapshot for a live controller the calling
+// server still tracks in memory after the original claim was lost. The fresh
+// claim was built from the NEW start request, so none of its launch context —
+// requested profile, pinned lifecycle hooks, history coordinates — describes
+// the old process; stamping them would make status report the wrong profile
+// and stop run the wrong pinned hook. Everything attributable is therefore
+// unknown or absent, exactly like an external snapshot (design/07). The two
+// published facts must come from the TRACKED CONTROLLER, never the new
+// request or the current (possibly hot-edited) config: pid is a PID actually
+// observed alive for the workload (0 after adoption, when only a name lookup
+// proved liveness — the stored PID would be the exited wrapper's), and
+// stopProcessName is the name pinned in the controller's launch spec.
+func PublishTrackedControllerSnapshot(gameID, configDir, launchID, operationID string, pid int, pidStartTime int64, stopProcessName string, now time.Time) error {
+	_, err := FencedTransition(gameID, configDir, launchID, operationID, func(s *RuntimeState) error {
+		s.Status = RuntimeStateStatusRunning
+		s.Phase = PhaseActive
+		s.Source = SourceExternal
+		s.SpawnState = ""
+		s.Operation = nil
+		s.ProcessStartDeadline = time.Time{}
+		if pid > 0 && pidStartTime != 0 {
+			// Only the fingerprint pinned at spawn is published — a fresh
+			// start-time lookup here could fingerprint an unrelated reuse of
+			// the number, and a missing fingerprint would degrade liveness to
+			// existence-only against a possibly reused PID.
+			s.GamePID = pid
+			s.PIDRole = PIDRoleWorkload
+			s.PIDStartTime = pidStartTime
+		} else {
+			s.GamePID = 0
+			s.PIDStartTime = 0
+		}
+		s.Endpoint = nil
+		s.Profile = ""
+		s.ObservedProfile = ObservedProfileUnknown
+		s.AppliedInputNames = nil
+		s.AppliedInputsState = AppliedInputsStateUnavailable
+		s.Lifecycle = nil
+		s.StopProcessName = stopProcessName
+		// The new request's track-record identity must not credit or blame
+		// the old process's context.
+		s.HistoryContextHash = ""
+		s.HistorySuccess = nil
+		// The fresh gate state carried the DUPLICATE request's config
+		// revision; the surviving process was launched under some earlier,
+		// unknown revision, so the field must read unknown, not current.
+		s.ConfigRevision = ""
+		s.ContextDelivery = &RuntimeContextDelivery{
+			Overall: DeliveryUnknown,
+			Reasons: map[string]string{"overall": "in-process controller with a lost claim: the original launch context is unattributable"},
 		}
 		s.UpdatedAt = now
 		return nil

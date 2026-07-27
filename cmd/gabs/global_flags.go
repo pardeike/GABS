@@ -28,13 +28,15 @@ var globalFlags = map[string]bool{
 // FlagSet and the tokens belonging to the subcommand. Subcommand flags
 // (--profile, --input, --show-last-good, ...) are left untouched in rest so
 // each action keeps parsing its own surface. A literal "--" ends hoisting and
-// every remaining token is passed through verbatim.
+// is passed through WITH every remaining token, so the subcommand layer can
+// honor it too — a canonical dash-prefixed game ID (even one spelled like a
+// global flag) stays addressable behind it.
 func hoistGlobalFlags(args []string) (globals, rest []string, err error) {
 	for i := 0; i < len(args); i++ {
 		tok := args[i]
 
 		if tok == "--" {
-			rest = append(rest, args[i+1:]...)
+			rest = append(rest, args[i:]...)
 			return globals, rest, nil
 		}
 
@@ -107,18 +109,21 @@ func trailingAllowanceFor(action string) int {
 // checkNoTrailingArgs rejects leftovers beyond what an action takes. Actions
 // read a fixed argument index and previously ignored the remainder, so a
 // misplaced token or a typo vanished silently. Global flags are already hoisted
-// out by the time this runs, so a flag-like token here is simply unknown.
-func checkNoTrailingArgs(action string, args []string, allowance int) error {
+// out by the time this runs, so a flag-like token in args is simply unknown —
+// while every token in escaped (those after a literal "--") is a positional
+// regardless of dashes, so a canonical dash-prefixed game ID stays usable.
+func checkNoTrailingArgs(action string, args, escaped []string, allowance int) error {
 	if allowance < 0 {
 		return nil
 	}
 	var extra []string
 	for _, a := range args {
 		if strings.HasPrefix(a, "-") {
-			return fmt.Errorf("unknown %s flag: %s", action, a)
+			return fmt.Errorf("unknown %s flag: %s (place a dash-prefixed game ID after \"--\")", action, a)
 		}
 		extra = append(extra, a)
 	}
+	extra = append(extra, escaped...)
 	if len(extra) > allowance {
 		return fmt.Errorf("games %s takes at most %d argument(s); unexpected: %s",
 			action, allowance, strings.Join(extra[allowance:], " "))

@@ -578,12 +578,19 @@ type startupConnectResult struct {
 }
 
 func bridgeEndpointInUseResult(game config.GameConfig, endpointErr *config.BridgeEndpointInUseError) *ToolResult {
-	gameArg := map[string]interface{}{"gameId": game.ID}
 	resetArg := map[string]interface{}{"gameId": game.ID, "resetEndpoint": true}
+	// games_connect is deliberately NOT recommended here: reaching endpoint
+	// preparation means no runtime claim existed (a claim would have refused
+	// the start earlier), the failed attempt's fresh claim is released, and
+	// connect requires a claim. games_status is equally useless for the
+	// stated question: with no claim it reports the game stopped and never
+	// inspects the socket or its owner — reading that "stopped" as permission
+	// to reset would rotate the endpoint out from under a lost instance. The
+	// only honest diagnostic is an OS-level port inspection.
 	return &ToolResult{
 		Content: []Content{{
 			Type: "text",
-			Text: fmt.Sprintf("GABS endpoint cache for game '%s' uses port %d, but that port is already listening. This session did not start another process because the cached endpoint may belong to an already-running game-side bridge. Use games_connect to attach, or start again with resetEndpoint only after confirming that the cached endpoint should be rotated.", game.ID, endpointErr.Port),
+			Text: fmt.Sprintf("GABS endpoint cache for game '%s' uses port %d, but that port is already listening. This session did not start another process. No runtime claim exists, so games_status will report this game stopped and CANNOT identify the port's listener, and games_connect cannot attach without a claim. Identify the listener with an OS tool first — e.g. `lsof -nP -iTCP:%d -sTCP:LISTEN` (macOS/Linux) or `netstat -ano | findstr :%d` (Windows). If it is a lost instance of this game, stop that process externally; only if the listener is unrelated or gone should you start again with resetEndpoint to rotate the cached endpoint.", game.ID, endpointErr.Port, endpointErr.Port, endpointErr.Port),
 		}},
 		StructuredContent: map[string]interface{}{
 			"code":   "endpoint_unavailable",
@@ -591,9 +598,7 @@ func bridgeEndpointInUseResult(game config.GameConfig, endpointErr *config.Bridg
 			"status": "endpoint_cache_in_use",
 			"port":   endpointErr.Port,
 			"nextActions": []map[string]interface{}{
-				mcpNextAction("games_status", gameArg, "Inspect runtime ownership and process status."),
-				mcpNextAction("games_connect", gameArg, "Attach if an already-running game-side bridge owns the cached endpoint."),
-				mcpNextAction("games_start", resetArg, "Rotate the endpoint cache and start a new process only after confirming the cached endpoint is not an existing game."),
+				mcpNextAction("games_start", resetArg, "Rotate the endpoint cache and start a new process ONLY after an OS-level port inspection (lsof/netstat) confirmed the listener is not a lost instance of this game."),
 			},
 		},
 		IsError: true,
@@ -813,7 +818,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}
 
 		return &ToolResult{
-			Content:           []Content{{Type: "text", Text: content.String()}},
+			Content:           []Content{{Type: "text", Text: content.String() + configHealthTextNotice(cfgErr)}},
 			StructuredContent: structured,
 		}, nil
 	}, normalizationConfig)
@@ -870,11 +875,17 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		// Validation status for launcher-based games
 		if game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId" {
 			content.WriteString("\nGame Termination Configuration:\n")
-			if game.StopProcessName != "" {
+			switch {
+			case game.StopProcessName != "":
 				content.WriteString(fmt.Sprintf("  ✓ Configured for proper game termination (process: %s)\n", game.StopProcessName))
-			} else {
+			case game.HasURLHookAlternative():
+				// Hook-based lifecycle control is the validator-accepted
+				// alternative; telling the user to add stopProcessName here
+				// would direct them to change a working configuration.
+				content.WriteString("  ✓ Configured for proper game termination via lifecycle hooks (status + stop/kill)\n")
+			default:
 				content.WriteString(fmt.Sprintf("  ⚠️  Missing stopProcessName - GABS can start but cannot properly stop %s games\n", game.LaunchMode))
-				content.WriteString(fmt.Sprintf("     Add stopProcessName to your game configuration for proper termination.\n"))
+				content.WriteString("     Add stopProcessName — or a game-level status hook plus a stop or kill hook — for proper termination.\n")
 			}
 		} else if game.StopProcessName != "" {
 			content.WriteString(fmt.Sprintf("  Stop Process Name: %s\n", game.StopProcessName))
@@ -892,9 +903,17 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 
 		status := s.checkGameStatus(game.ID)
 		validationWarnings := gameValidationWarnings(*game)
-		if len(validationWarnings) > 0 {
+		// Per-game load warnings (unknown keys like a typo'd "envv") join the
+		// validation warnings in TEXT: they are the only signal that the next
+		// launch will silently not use the intended context, and some MCP
+		// clients never surface structured content.
+		cfgWarns := gameConfigWarnings(gamesConfig, game.ID)
+		if len(validationWarnings) > 0 || len(cfgWarns) > 0 {
 			content.WriteString("\nConfiguration Warnings:\n")
 			for _, warning := range validationWarnings {
+				content.WriteString(fmt.Sprintf("  - %s\n", warning))
+			}
+			for _, warning := range cfgWarns {
 				content.WriteString(fmt.Sprintf("  - %s\n", warning))
 			}
 		}
@@ -908,9 +927,14 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		structured["currentConfigRevision"] = configRevision
 		// activeConfigRevision: the revision the RUNNING launch was resolved
 		// from (persisted in the claim), distinct from what the next start
-		// would use (design/09).
-		if rs, rsErr := process.LoadRuntimeState(game.ID, s.configDir); rsErr == nil && rs != nil && rs.ConfigRevision != "" {
-			structured["activeConfigRevision"] = rs.ConfigRevision
+		// would use (design/09). The same claim drives the source-aware next
+		// actions: an external snapshot must not advertise games_connect from
+		// any view.
+		if rs, rsErr := process.LoadRuntimeState(game.ID, s.configDir); rsErr == nil && rs != nil {
+			if rs.ConfigRevision != "" {
+				structured["activeConfigRevision"] = rs.ConfigRevision
+			}
+			applyRuntimeSourceGuidance(structured, game.ID, rs)
 		}
 		if len(game.Profiles) > 0 {
 			structured["profiles"] = profilesStructured(game.Profiles)
@@ -927,13 +951,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				structured["trackRecord"] = tr
 			}
 		}
-		if warns := gameConfigWarnings(gamesConfig, game.ID); len(warns) > 0 {
-			structured["configWarnings"] = warns
+		if len(cfgWarns) > 0 {
+			structured["configWarnings"] = cfgWarns
 		}
 		attachConfigHealth(structured, gamesConfig, cfgErr)
 
 		return &ToolResult{
-			Content:           []Content{{Type: "text", Text: content.String()}},
+			Content:           []Content{{Type: "text", Text: content.String() + configHealthTextNotice(cfgErr)}},
 			StructuredContent: structured,
 		}, nil
 	}, normalizationConfig)
@@ -964,25 +988,31 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 
 		var content strings.Builder
 		if hasGameID {
-			// Check specific game
-			game, resolveFail := resolveGameResult(gamesConfig, gameIdOrTarget)
+			// Check specific game; an exact runtime-claim ID outranks a
+			// configured target alias (resolveLifecycleGame).
+			game, runtimeOnly, resolveFail := s.resolveLifecycleGame(gamesConfig, gameIdOrTarget)
 			if resolveFail != nil {
+				return resolveFail, nil
+			}
+			if runtimeOnly {
 				// A game removed from config but still holding a runtime claim
 				// stays addressable by ID (design/07:62): report the claim's
 				// status instead of not-found, so a fresh agent can stop it.
-				if process.RuntimeClaimExists(gameIdOrTarget, s.configDir) {
-					item := s.runtimeOnlyStatusItem(gameIdOrTarget)
-					item["currentConfigRevision"] = configRevision
-					text := fmt.Sprintf("**%s** (unconfigured): %v\n", gameIdOrTarget, item["statusDescription"])
-					if diagnosticMessage := gameStateDiagnosticMessage(item); diagnosticMessage != "" {
-						text += fmt.Sprintf("\nDiagnosis: %s\n", diagnosticMessage)
-					}
-					return &ToolResult{
-						Content:           []Content{{Type: "text", Text: text}},
-						StructuredContent: item,
-					}, nil
+				item := s.runtimeOnlyStatusItem(game.ID)
+				item["currentConfigRevision"] = configRevision
+				// The active config error must not depend on which status form
+				// the agent used: a hot-invalid edit surfaces here exactly as
+				// it does on configured and aggregate status.
+				attachConfigHealth(item, gamesConfig, cfgErr)
+				text := fmt.Sprintf("**%s** (unconfigured): %v\n", game.ID, item["statusDescription"])
+				if diagnosticMessage := gameStateDiagnosticMessage(item); diagnosticMessage != "" {
+					text += fmt.Sprintf("\nDiagnosis: %s\n", diagnosticMessage)
 				}
-				return resolveFail, nil
+				text += configHealthTextNotice(cfgErr)
+				return &ToolResult{
+					Content:           []Content{{Type: "text", Text: text}},
+					StructuredContent: item,
+				}, nil
 			}
 
 			// Get status once to avoid double mutex lock
@@ -996,6 +1026,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 					statusItem["activeConfigRevision"] = rs.ConfigRevision
 				}
 				attachRuntimeLifecycle(statusItem, rs)
+				applyRuntimeSourceGuidance(statusItem, game.ID, rs)
 			}
 			attachConfigHealth(statusItem, gamesConfig, cfgErr)
 			content.WriteString(fmt.Sprintf("**%s** (%s): %s\n", game.ID, game.Name, statusDesc))
@@ -1009,14 +1040,15 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			// Add helpful info for launcher games ONLY when we cannot track them
 			if game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId" {
 				if status == "launcher-triggered" {
-					// Only show the warning if we don't have stopProcessName configured
-					if game.StopProcessName == "" {
-						content.WriteString(fmt.Sprintf("\nNote: %s game was launched, but GABS cannot track whether it's still running because no 'stopProcessName' is configured.\nCheck Steam/Epic or your system processes to verify the actual game status.\n", game.LaunchMode))
+					// Hook-based lifecycle control replaces stopProcessName;
+					// only warn when NEITHER is configured.
+					if game.StopProcessName == "" && !game.HasURLHookAlternative() {
+						content.WriteString(fmt.Sprintf("\nNote: %s game was launched, but GABS cannot track whether it's still running because neither 'stopProcessName' nor game-level lifecycle hooks are configured.\nCheck Steam/Epic or your system processes to verify the actual game status.\n", game.LaunchMode))
 					}
 				}
 			}
 			return &ToolResult{
-				Content:           []Content{{Type: "text", Text: content.String()}},
+				Content:           []Content{{Type: "text", Text: content.String() + configHealthTextNotice(cfgErr)}},
 				StructuredContent: statusItem,
 			}, nil
 		} else {
@@ -1076,6 +1108,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 								statusItem["activeConfigRevision"] = rs.ConfigRevision
 							}
 							attachRuntimeLifecycle(statusItem, rs)
+							applyRuntimeSourceGuidance(statusItem, game.ID, rs)
 						}
 						rows[i] = gameStatusRow{desc: s.getStatusDescriptionFromStatus(status, &game), item: statusItem}
 						return
@@ -1111,7 +1144,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}
 			attachConfigHealth(structuredAll, gamesConfig, cfgErr)
 			return &ToolResult{
-				Content:           []Content{{Type: "text", Text: content.String()}},
+				Content:           []Content{{Type: "text", Text: content.String() + configHealthTextNotice(cfgErr)}},
 				StructuredContent: structuredAll,
 			}, nil
 		}
@@ -1164,13 +1197,21 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 		if cfgErr != nil {
+			// The stable outcome must not depend on whether the caller
+			// referenced the game by ID or target: resolve a target alias
+			// against the last-good snapshot before classifying, since the
+			// validation issues are pathed by game ID.
+			refID := gameIdOrTarget
+			if g, ok := s.resolveGameId(snap.Config, gameIdOrTarget); ok {
+				refID = g.ID
+			}
 			// A hot edit that gave a URL-mode game context fields is the
 			// specific, stable outcome — not a generic stale-config refusal.
-			if issues := modeIncompatibleIssues(cfgErr, gameIdOrTarget); len(issues) > 0 {
+			if issues := modeIncompatibleIssues(cfgErr, refID); len(issues) > 0 {
 				structured := map[string]interface{}{"code": "launch_mode_incompatible", "issues": issues, "invalidRevision": cfgErr.Revision}
-				s.attachStructuredFailureAttribution(structured, config.GameConfig{ID: gameIdOrTarget}, "launch_mode_incompatible", historyContext{})
+				s.attachStructuredFailureAttribution(structured, config.GameConfig{ID: refID}, "launch_mode_incompatible", historyContext{})
 				return &ToolResult{
-					Content:           []Content{{Type: "text", Text: fmt.Sprintf("The launch mode of %q cannot deliver launch context; remove the incompatible fields or switch modes:\n  %s", gameIdOrTarget, strings.Join(issues, "\n  "))}},
+					Content:           []Content{{Type: "text", Text: fmt.Sprintf("The launch mode of %q cannot deliver launch context; remove the incompatible fields or switch modes:\n  %s", refID, strings.Join(issues, "\n  "))}},
 					IsError:           true,
 					StructuredContent: structured,
 				}, nil
@@ -1178,7 +1219,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			// Starts are refused on stale config: launching from an outdated
 			// snapshot is worse than failing with the exact error (design/09).
 			structured := map[string]interface{}{"code": "config_invalid", "lastGoodRevision": snap.Revision, "invalidRevision": cfgErr.Revision}
-			s.attachStructuredFailureAttribution(structured, config.GameConfig{ID: gameIdOrTarget}, "config_invalid", historyContext{})
+			s.attachStructuredFailureAttribution(structured, config.GameConfig{ID: refID}, "config_invalid", historyContext{})
 			return &ToolResult{
 				Content:           []Content{{Type: "text", Text: fmt.Sprintf("Configuration on disk is invalid; refusing to start from a stale snapshot. Fix the config (it reloads automatically): %v", cfgErr.Err)}},
 				IsError:           true,
@@ -1305,6 +1346,19 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		hctx := s.buildHistoryContext(snap, *game, resolved, inputsArg)
 		startResult, err := s.startGame(*game, backoffMin, backoffMax, startupGABPTimeout, resetEndpoint, resolved, hctx)
 		if err != nil {
+			// An accepted attempt that failed before the unobserved/exited
+			// branches carries its earned warnings in the wrapper; surface
+			// them on whichever classified outcome renders below.
+			var attemptWarnings []string
+			var attemptErr *lifecycle.StartAttemptError
+			if errors.As(err, &attemptErr) {
+				attemptWarnings = attemptErr.Warnings
+			}
+			addAttemptWarnings := func(structured map[string]interface{}) {
+				if len(attemptWarnings) > 0 {
+					structured["startWarnings"] = attemptWarnings
+				}
+			}
 			var refusalErr *lifecycle.StartRefusalError
 			if errors.As(err, &refusalErr) {
 				return s.startRefusalResult(*game, refusalErr, hctx, validationWarnings), nil
@@ -1325,7 +1379,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				addValidationWarnings(structured, validationWarnings)
 				addResolvedContext(structured, resolved)
 				return &ToolResult{
-					Content:           []Content{{Type: "text", Text: fmt.Sprintf("Nothing observable for '%s' within the start budget — the store launcher may be updating the game or showing a dialog (login, EULA); check the desktop and re-check games_status. The claim is kept while the launch may still appear.", game.ID)}},
+					Content:           []Content{{Type: "text", Text: appendWarningsText(fmt.Sprintf("Nothing observable for '%s' within the start budget — the store launcher may be updating the game or showing a dialog (login, EULA); check the desktop and re-check games_status. The claim is kept while the launch may still appear.", game.ID), unobsErr.Warnings)}},
 					StructuredContent: structured,
 				}, nil
 			}
@@ -1353,7 +1407,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				addValidationWarnings(structured, validationWarnings)
 				addResolvedContext(structured, resolved)
 				return &ToolResult{
-					Content:           []Content{{Type: "text", Text: fmt.Sprintf("'%s' exited during start (exit code %d). This is attributed to the workload; read the output tail below for the exact cause — a game crash, missing/corrupt data or save, mod loader failure, DRM refusing to run outside its launcher, anti-cheat rejecting a modified process, a required online login, or (if this launch is a wrapper/container) the wrapper's own error. Output tail:\n%s", game.ID, exitedErr.ExitCode, exitedErr.Tail)}},
+					Content:           []Content{{Type: "text", Text: appendWarningsText(fmt.Sprintf("'%s' exited during start (exit code %d). This is attributed to the workload; read the output tail below for the exact cause — a game crash, missing/corrupt data or save, mod loader failure, DRM refusing to run outside its launcher, anti-cheat rejecting a modified process, a required online login, or (if this launch is a wrapper/container) the wrapper's own error. Output tail:\n%s", game.ID, exitedErr.ExitCode, exitedErr.Tail), exitedErr.Warnings)}},
 					IsError:           true,
 					StructuredContent: structured,
 				}, nil
@@ -1364,34 +1418,47 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				if status == "" {
 					status = s.checkGameStatus(game.ID)
 				}
+				// The in-process fast path is still the already_running
+				// refusal: it must carry the stable code, causeClass, and
+				// track record the exhaustive-outcome contract requires,
+				// exactly like the claim-based refusal path renders them.
+				refErr := &lifecycle.StartRefusalError{
+					Refusal: &process.StartRefusal{
+						Code:    process.RefusalAlreadyRunning,
+						Message: activeErr.ToolMessage(*game),
+					},
+					Warnings: attemptWarnings,
+				}
+				res := s.startRefusalResult(*game, refErr, hctx, validationWarnings)
 				toolCount := len(s.getGameSpecificTools(game.ID))
-				structured := map[string]interface{}{
-					"gameId":      game.ID,
-					"status":      status,
-					"toolCount":   toolCount,
-					"nextActions": s.nextActionsForGameStatus(*game, status, toolCount),
-				}
+				res.StructuredContent["status"] = status
+				res.StructuredContent["toolCount"] = toolCount
+				res.StructuredContent["nextActions"] = s.nextActionsForGameStatus(*game, status, toolCount)
 				if profileArg != "" {
-					structured["requestedProfile"] = profileArg
+					res.StructuredContent["requestedProfile"] = profileArg
 				}
-				addValidationWarnings(structured, validationWarnings)
-				return &ToolResult{
-					Content:           []Content{{Type: "text", Text: activeErr.ToolMessage(*game)}},
-					StructuredContent: structured,
-				}, nil
+				return res, nil
 			}
 			var endpointErr *config.BridgeEndpointInUseError
 			if errors.As(err, &endpointErr) {
-				return bridgeEndpointInUseResult(*game, endpointErr), nil
+				// This special case returns before the generic endpoint
+				// branch, so it must attach the attempt's warnings itself.
+				res := bridgeEndpointInUseResult(*game, endpointErr)
+				addAttemptWarnings(res.StructuredContent)
+				if len(attemptWarnings) > 0 && len(res.Content) > 0 {
+					res.Content[0].Text = appendWarningsText(res.Content[0].Text, attemptWarnings)
+				}
+				return res, nil
 			}
 			var epErr *lifecycle.EndpointUnavailableError
 			if errors.As(err, &epErr) {
 				structured := map[string]interface{}{
 					"code": "endpoint_unavailable", "gameId": game.ID, "detail": epErr.Err.Error(),
 				}
+				addAttemptWarnings(structured)
 				s.finalizeStartFailure(structured, *game, hctx, "endpoint_unavailable")
 				return &ToolResult{
-					Content:           []Content{{Type: "text", Text: fmt.Sprintf("Cannot start %s: %v", game.ID, epErr)}},
+					Content:           []Content{{Type: "text", Text: appendWarningsText(fmt.Sprintf("Cannot start %s: %v", game.ID, epErr), attemptWarnings)}},
 					IsError:           true,
 					StructuredContent: structured,
 				}, nil
@@ -1401,9 +1468,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				structured := map[string]interface{}{
 					"code": "spec_too_large", "part": sizeIssue.Part, "gameId": game.ID,
 				}
+				addAttemptWarnings(structured)
 				s.finalizeStartFailure(structured, *game, hctx, "spec_too_large")
 				return &ToolResult{
-					Content:           []Content{{Type: "text", Text: fmt.Sprintf("Refusing to start %s: %s", game.ID, sizeIssue.Message)}},
+					Content:           []Content{{Type: "text", Text: appendWarningsText(fmt.Sprintf("Refusing to start %s: %s", game.ID, sizeIssue.Message), attemptWarnings)}},
 					IsError:           true,
 					StructuredContent: structured,
 				}, nil
@@ -1414,6 +1482,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			// spawn_failed.
 			if errors.Is(err, process.ErrFencingViolation) || errors.Is(err, process.ErrNoRuntimeClaim) {
 				if refErr, ok := s.supersededStartRefusal(game.ID).(*lifecycle.StartRefusalError); ok {
+					// The refusal is synthesized fresh here, so the warnings
+					// the wrapped attempt earned must be carried onto it.
+					refErr.Warnings = append(refErr.Warnings, attemptWarnings...)
 					return s.startRefusalResult(*game, refErr, hctx, validationWarnings), nil
 				}
 			}
@@ -1424,9 +1495,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				structured := map[string]interface{}{
 					"code": "spawn_failed", "gameId": game.ID, "osError": procErr.Err.Error(),
 				}
+				addAttemptWarnings(structured)
 				s.finalizeStartFailure(structured, *game, hctx, "spawn_failed")
 				return &ToolResult{
-					Content:           []Content{{Type: "text", Text: fmt.Sprintf("Failed to start %s: %v", game.ID, err)}},
+					Content:           []Content{{Type: "text", Text: appendWarningsText(fmt.Sprintf("Failed to start %s: %v", game.ID, err), attemptWarnings)}},
 					IsError:           true,
 					StructuredContent: structured,
 				}, nil
@@ -1437,9 +1509,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			// blocked_unknown_state, and it carries attribution like every
 			// other stable start failure.
 			structured := map[string]interface{}{"code": "blocked_unknown_state", "gameId": game.ID}
+			addAttemptWarnings(structured)
 			s.attachStructuredFailureAttribution(structured, *game, "blocked_unknown_state", hctx)
 			return &ToolResult{
-				Content:           []Content{{Type: "text", Text: fmt.Sprintf("Failed to start %s: %v", game.ID, err)}},
+				Content:           []Content{{Type: "text", Text: appendWarningsText(fmt.Sprintf("Failed to start %s: %v", game.ID, err), attemptWarnings)}},
 				IsError:           true,
 				StructuredContent: structured,
 			}, nil
@@ -1538,16 +1611,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		game, resolveFail := resolveGameResult(gamesConfig, gameIdOrTarget)
+		// A removed-but-claimed game stays addressable for stop (design/07),
+		// and its exact claim ID outranks a configured target alias
+		// (resolveLifecycleGame); the synthetic entry drives the same
+		// claim-based pipeline below.
+		game, _, resolveFail := s.resolveLifecycleGame(gamesConfig, gameIdOrTarget)
 		if resolveFail != nil {
-			// A removed-but-claimed game stays addressable for stop (design/07):
-			// the claim carries the pinned lifecycle, so a synthetic entry drives
-			// the same claim-based pipeline below.
-			if !process.RuntimeClaimExists(gameIdOrTarget, s.configDir) {
-				return resolveFail, nil
-			}
-			synthetic := config.GameConfig{ID: gameIdOrTarget, Name: gameIdOrTarget}
-			game = &synthetic
+			return resolveFail, nil
 		}
 
 		// Any persisted claim goes through the design/06 pipeline (legacy
@@ -1562,7 +1632,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			// Check if this is a launcher-specific configuration issue
 			if strings.Contains(err.Error(), "Configure 'stopProcessName'") {
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("⚠️ %s\n\nTo fix this, update your game configuration to include a 'stopProcessName'. Use: gabs games show %s", err.Error(), game.ID)}},
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("⚠️ %s\n\nTo fix this, update your game configuration to include a 'stopProcessName' (or a game-level status hook plus a stop or kill hook). Use: gabs games show %s", err.Error(), game.ID)}},
 					IsError: true,
 				}, nil
 			}
@@ -1609,15 +1679,12 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		game, resolveFail := resolveGameResult(gamesConfig, gameIdOrTarget)
+		// A removed-but-claimed game stays addressable for kill (design/07),
+		// and its exact claim ID outranks a configured target alias
+		// (resolveLifecycleGame).
+		game, _, resolveFail := s.resolveLifecycleGame(gamesConfig, gameIdOrTarget)
 		if resolveFail != nil {
-			// A removed-but-claimed game stays addressable for kill
-			// (design/07): the claim carries the pinned lifecycle.
-			if !process.RuntimeClaimExists(gameIdOrTarget, s.configDir) {
-				return resolveFail, nil
-			}
-			synthetic := config.GameConfig{ID: gameIdOrTarget, Name: gameIdOrTarget}
-			game = &synthetic
+			return resolveFail, nil
 		}
 
 		if res := s.lifecycleActionResult(*game, process.OperationActionKill, configRevision); res != nil {
@@ -1629,7 +1696,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			// Check if this is a launcher-specific configuration issue
 			if strings.Contains(err.Error(), "Configure 'stopProcessName'") {
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("⚠️ %s\n\nTo fix this, update your game configuration to include a 'stopProcessName'. Use: gabs games show %s", err.Error(), game.ID)}},
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("⚠️ %s\n\nTo fix this, update your game configuration to include a 'stopProcessName' (or a game-level status hook plus a stop or kill hook). Use: gabs games show %s", err.Error(), game.ID)}},
 					IsError: true,
 				}, nil
 			}
@@ -3287,6 +3354,46 @@ func (s *Server) resolveGameId(gamesConfig *config.GamesConfig, gameIdOrTarget s
 	return game, game != nil
 }
 
+// resolveLifecycleGame resolves a specific status/stop/kill reference with
+// claim precedence: an exact configured ID wins, then an exact persisted
+// runtime claim — aggregate games_status advertises claim IDs, and a
+// removed-but-claimed game must stay addressable by exactly that ID
+// (design/07:62) — and only then a configured target alias. A target alias
+// must never capture a claim ID: it would route a destructive lifecycle
+// action to another configured game while the intended claim stays untouched.
+// runtimeOnly reports the synthetic unconfigured case; the claim carries the
+// pinned lifecycle, so the synthetic entry drives the same claim-based
+// pipeline as a configured game.
+func (s *Server) resolveLifecycleGame(gamesConfig *config.GamesConfig, ref string) (game *config.GameConfig, runtimeOnly bool, fail *ToolResult) {
+	if g, exists := gamesConfig.GetGame(ref); exists {
+		return g, false, nil
+	}
+	exists, cerr := process.CheckRuntimeClaim(ref, s.configDir)
+	if cerr != nil {
+		// Exact-claim absence could not be established: falling through to a
+		// target alias here could route a destructive action to another
+		// configured game while a claim sits unreadable at this exact ID.
+		// Uncertainty blocks (design/04) — never guesses a referent.
+		return nil, false, &ToolResult{
+			Content: []Content{{Type: "text", Text: fmt.Sprintf("Cannot determine whether %q addresses a runtime claim: %v. Refusing to resolve it as a target alias; inspect the claim path, or use 'gabs games repair %s --forget-runtime' if the claim is provably malformed.", ref, cerr, ref)}},
+			IsError: true,
+			StructuredContent: map[string]interface{}{
+				"code":   "blocked_unknown_state",
+				"gameId": ref,
+			},
+		}
+	}
+	if exists {
+		synthetic := config.GameConfig{ID: ref, Name: ref}
+		return &synthetic, true, nil
+	}
+	g, fail := resolveGameResult(gamesConfig, ref)
+	if fail != nil {
+		return nil, false, fail
+	}
+	return g, false, nil
+}
+
 func mcpNextAction(tool string, arguments map[string]interface{}, reason string) map[string]interface{} {
 	action := map[string]interface{}{
 		"tool":      tool,
@@ -3326,8 +3433,8 @@ func gameConfigStructured(game config.GameConfig) map[string]interface{} {
 
 func gameValidationWarnings(game config.GameConfig) []string {
 	warnings := make([]string, 0, 2)
-	if (game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId") && game.StopProcessName == "" {
-		warnings = append(warnings, fmt.Sprintf("%s games need stopProcessName for reliable games_stop and games_kill.", game.LaunchMode))
+	if (game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId") && game.StopProcessName == "" && !game.HasURLHookAlternative() {
+		warnings = append(warnings, fmt.Sprintf("%s games need stopProcessName — or a game-level status hook plus a stop or kill hook — for reliable games_stop and games_kill.", game.LaunchMode))
 	}
 	if launcherModeIgnoresConfiguredArgs(game) {
 		if game.LaunchMode == "SteamAppId" {
@@ -3466,22 +3573,7 @@ func gameConfigWarnings(cfg *config.GamesConfig, gameID string) []string {
 // launch_mode_incompatible must be emitted for "mode rejects profiles/
 // inputs/env" instead of the generic config_invalid (design/05).
 func modeIncompatibleIssues(cfgErr *config.ConfigError, gameID string) []string {
-	var ve *config.ValidationError
-	if cfgErr == nil || !errors.As(cfgErr.Err, &ve) {
-		return nil
-	}
-	prefix := "/games/" + escapeJSONPointerToken(gameID)
-	var msgs []string
-	for _, is := range ve.Issues {
-		if is.Path != prefix && !strings.HasPrefix(is.Path, prefix+"/") {
-			continue
-		}
-		if is.Code != config.IssueCodeModeIncompatible {
-			return nil // mixed failure: the generic stale-config refusal stands
-		}
-		msgs = append(msgs, is.String())
-	}
-	return msgs
+	return config.ModeIncompatibleIssues(cfgErr, gameID)
 }
 
 // attachConfigHealth adds global config warnings (those without an owning
@@ -3505,6 +3597,16 @@ func attachConfigHealth(structured map[string]interface{}, cfg *config.GamesConf
 		structured["configError"] = cfgErr.Err.Error()
 		structured["invalidRevision"] = cfgErr.Revision
 	}
+}
+
+// configHealthTextNotice renders the active config error for TEXT content:
+// clients that never surface structured content must not mistake the stale
+// last-good values for the current configuration.
+func configHealthTextNotice(cfgErr *config.ConfigError) string {
+	if cfgErr == nil {
+		return ""
+	}
+	return fmt.Sprintf("\n\n⚠️ The configuration file on disk is INVALID (revision %s); values shown come from the last-good configuration and edits are NOT active. Error: %v", cfgErr.Revision, cfgErr.Err)
 }
 
 func (s *Server) gameStatusStructured(game config.GameConfig, status string) map[string]interface{} {
@@ -4287,7 +4389,7 @@ func (s *Server) getStatusDescriptionFromStatus(status string, gameConfig *confi
 	case "launcher-running":
 		return fmt.Sprintf("launcher active (game may be starting via %s)", gameConfig.LaunchMode)
 	case "launcher-triggered":
-		return fmt.Sprintf("launched via %s (GABS cannot track the game process - no stopProcessName configured)", gameConfig.LaunchMode)
+		return fmt.Sprintf("launched via %s (GABS cannot track the game process - configure stopProcessName or game-level lifecycle hooks)", gameConfig.LaunchMode)
 	default:
 		return status
 	}
@@ -4430,6 +4532,47 @@ func (s *Server) resolveSharedRuntimeStatus(gameID string, gabpLive bool) string
 	return ""
 }
 
+// applyRuntimeSourceGuidance overrides the pre-claim next actions whenever
+// the runtime source is external: such a snapshot has no bridge endpoint, so
+// the generic games_connect recommendation would always answer
+// attachment-unavailable, and only the actions the pinned lifecycle can
+// actually execute may be advertised. Shared by every status surface so the
+// same runtime state never advertises different capabilities per view.
+func applyRuntimeSourceGuidance(item map[string]interface{}, gameID string, rs *process.RuntimeState) {
+	if rs == nil || rs.Source != process.SourceExternal {
+		return
+	}
+	item["source"] = process.SourceExternal
+	gameArg := map[string]interface{}{"gameId": gameID}
+	next := []map[string]interface{}{
+		mcpNextAction("games_status", gameArg, "Re-check the externally observed instance."),
+	}
+	if process.ClaimActionSupported(rs, process.OperationActionStop) {
+		next = append(next, mcpNextAction("games_stop", gameArg, "Stop the external instance to free the game."))
+	}
+	if process.ClaimActionSupported(rs, process.OperationActionKill) {
+		next = append(next, mcpNextAction("games_kill", gameArg, "Force-terminate it if a graceful stop fails."))
+	}
+	item["nextActions"] = next
+}
+
+// appendWarningsText renders warnings into a textual result so clients that
+// surface only MCP text content — a limitation games_show explicitly accounts
+// for — still see them alongside the primary outcome.
+func appendWarningsText(text string, warnings []string) string {
+	if len(warnings) == 0 {
+		return text
+	}
+	var b strings.Builder
+	b.WriteString(text)
+	b.WriteString("\n\nWarnings:")
+	for _, w := range warnings {
+		b.WriteString("\n  - ")
+		b.WriteString(w)
+	}
+	return b.String()
+}
+
 // addStartAdoption renders the Stage 4 adoption verdict and Stage 2 probe
 // warnings into a start result (design/05): adoption means the injected
 // context may not have survived a launcher re-exec.
@@ -4516,8 +4659,11 @@ func (s *Server) startRefusalResult(game config.GameConfig, e *lifecycle.StartRe
 			next = append(next,
 				mcpNextAction("games_status", map[string]interface{}{"gameId": game.ID}, "The external instance is tracked by ID."),
 				mcpNextAction("games_stop", map[string]interface{}{"gameId": game.ID}, "Stop the external instance to free the game."))
-		} else {
-			next = append(next, mcpNextAction("games_status", map[string]interface{}{"gameId": game.ID}, "Resolve the candidates manually; GABS never guesses."))
+		} else if len(ref.Candidates) > 0 {
+			// No claim was persisted, so games_status would rerun no probes
+			// and simply report stopped — a loop, not a resolution. Surface
+			// the candidate evidence; the fix is manual and outside GABS.
+			structured["candidates"] = ref.Candidates
 		}
 	case process.RefusalOperationInFlight:
 		next = append(next, mcpNextAction("games_status", map[string]interface{}{"gameId": game.ID}, "Re-check once the in-flight operation finishes."))
@@ -4529,11 +4675,16 @@ func (s *Server) startRefusalResult(game config.GameConfig, e *lifecycle.StartRe
 	}
 	addValidationWarnings(structured, validationWarnings)
 
+	text := ref.Message
+	if ref.Code == process.RefusalExternalInstance && !ref.SnapshotPersisted && len(ref.Candidates) > 0 {
+		text += "\nResolve manually: stop the surplus instance(s) with OS tools (GABS deliberately tracks none of them), or narrow profiles/stopProcessName so exactly one candidate matches; then start again. games_status will not help here — no claim was persisted, so it reports the game stopped."
+	}
+
 	// already_running and operation_in_progress are informational: the game
 	// is (or is becoming) available, which is what the caller wanted.
 	isError := ref.Code != process.RefusalAlreadyRunning && ref.Code != process.RefusalOperationInFlight
 	return &ToolResult{
-		Content:           []Content{{Type: "text", Text: ref.Message}},
+		Content:           []Content{{Type: "text", Text: appendWarningsText(text, e.Warnings)}},
 		IsError:           isError,
 		StructuredContent: structured,
 	}
@@ -4934,15 +5085,32 @@ func (s *Server) startGame(game config.GameConfig, backoffMin, backoffMax time.D
 		StartupGABPTimeout: startupGABPTimeout,
 		HistoryContext:     hc,
 		BridgeBound:        s.bridgeBound(game.ID),
-		CheckInProcessActive: func() (string, bool) {
+		CheckInProcessActive: func() (lifecycle.InProcessFacts, bool) {
 			s.mu.Lock()
 			defer s.mu.Unlock()
 			if tracked, ok := s.games[game.ID]; ok && tracked != nil && tracked.IsRunning() {
-				return "running", true
+				// Report the CONTROLLER's facts, not this request's. The PID
+				// is the fingerprint pinned at spawn — never a fresh lookup,
+				// which after a wrapper exit could identify an unrelated
+				// reuse of the number — and it is suppressed entirely once
+				// the direct child is known exited. The stop name is the one
+				// pinned in the controller's launch spec; the current config
+				// may have been hot-edited to a name that does not describe
+				// the old workload.
+				pid, pidStart := tracked.SpawnFingerprint()
+				if tracked.DirectChildExited() {
+					pid, pidStart = 0, 0
+				}
+				return lifecycle.InProcessFacts{
+					Status:          "running",
+					PID:             pid,
+					PIDStartTime:    pidStart,
+					StopProcessName: tracked.GetStopProcessName(),
+				}, true
 			}
 			// Clean up any stale controller reference.
 			delete(s.games, game.ID)
-			return "", false
+			return lifecycle.InProcessFacts{}, false
 		},
 	})
 	if err != nil {

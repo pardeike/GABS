@@ -319,15 +319,52 @@ func manageGames(ctx context.Context, log util.Logger, opts options, args []stri
 		return 2
 	}
 
-	action := args[0]
+	// A literal "--" ends flag interpretation: every later token is a
+	// positional, so a canonical dash-prefixed game ID (e.g. "-dash") stays
+	// addressable by every action. The marker is removed before dispatch —
+	// actions read fixed argument indexes.
+	tokens := args
+	var escaped []string
+	for i, a := range tokens {
+		if a == "--" {
+			escaped = append([]string{}, tokens[i+1:]...)
+			tokens = tokens[:i]
+			break
+		}
+	}
+	if len(tokens) == 0 {
+		// The "--" preceded even the action; an action name is an operand,
+		// so take it from the escaped tokens (`gabs games -- stop -dash`).
+		if len(escaped) == 0 {
+			fmt.Fprintf(os.Stderr, "Please specify what you'd like to do with games.\n\n")
+			showGamesUsage()
+			return 2
+		}
+		tokens, escaped = escaped[:1], escaped[1:]
+	}
+	action := tokens[0]
+	rest := tokens[1:]
 
 	// Reject positionals beyond the action's arity. Actions read a fixed index
 	// and previously ignored the remainder, so a misplaced token disappeared
 	// without a word.
-	if err := checkNoTrailingArgs(action, args[1:], trailingAllowanceFor(action)); err != nil {
+	if err := checkNoTrailingArgs(action, rest, escaped, trailingAllowanceFor(action)); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 2
 	}
+	if trailingAllowanceFor(action) < 0 && len(escaped) > 1 {
+		// Self-parsing actions read exactly one positional (the game ID) and
+		// then flags. Every token after "--" is a positional, so surplus
+		// escaped tokens must never fall back into the flag parser — a
+		// re-interpreted "--forget-runtime" would follow the destructive path.
+		fmt.Fprintf(os.Stderr, "games %s takes only the game ID after \"--\"; place flags before it (unexpected: %s)\n",
+			action, strings.Join(escaped[1:], " "))
+		return 2
+	}
+	// Escaped tokens are positionals: they fill the positional slots FIRST so
+	// an action's own flag parser, which reads everything after the game ID,
+	// can never re-interpret them as options.
+	args = append(append([]string{action}, escaped...), rest...)
 
 	switch action {
 	case "list":

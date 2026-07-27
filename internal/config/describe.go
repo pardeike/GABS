@@ -90,9 +90,12 @@ func describeInputConstraints(in LaunchInputConfig) string {
 	case in.Maximum != nil:
 		parts = append(parts, fmt.Sprintf("maximum %d", *in.Maximum))
 	}
-	// An enum already enumerates every valid value, so length and pattern add
-	// nothing a caller can act on. They stay in structuredContent regardless.
-	if in.Type == "string" && len(in.Enum) == 0 {
+	// Length and pattern are rendered even when an enum is declared:
+	// configuration validation does not force enum members through these
+	// constraints, while every start enforces all of them together — an enum
+	// member that fails the pattern is rejected at call time, and a caller
+	// who cannot see the pattern cannot discover a usable value.
+	if in.Type == "string" {
 		maxLen := InputMaxLengthDefault
 		if in.MaxLength != nil {
 			maxLen = *in.MaxLength

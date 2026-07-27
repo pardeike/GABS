@@ -131,14 +131,40 @@ func readRegularClaim(gameID, configDir string) ([]byte, error) {
 	return data, nil
 }
 
-// RuntimeClaimExists reports whether gameID has an addressable regular
-// runtime.json — true even for a corrupt/unreadable claim, so a
-// removed-but-claimed game stays addressable by ID (design/07) and can still
-// be forgotten via repair. Unsafe IDs, symlinked path components, and
-// symlinked or otherwise non-regular claim files are never addressable.
+// CheckRuntimeClaim reports whether gameID has an addressable regular
+// runtime.json — true even for corrupt/unreadable content, so a
+// removed-but-claimed game stays addressable by ID (design/07) — while
+// preserving errors: the answer is authoritative only when err is nil. An
+// unsafe ID and a cleanly absent path are authoritatively absent. Anything
+// else — an unreadable directory, a symlinked component, a non-regular leaf,
+// a replacement race that outlives the bounded retry — returns an error,
+// because a caller whose fallback would address a DIFFERENT referent must
+// never take that fallback when absence could not be established.
+func CheckRuntimeClaim(gameID, configDir string) (bool, error) {
+	for attempt := 0; ; attempt++ {
+		_, _, err := regularClaimPath(gameID, configDir)
+		if err == nil {
+			return true, nil
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		if config.ValidateGameID(gameID) != nil {
+			return false, nil // an unsafe ID can never address a claim
+		}
+		if isTransientClaimReadError(err) && attempt < maxClaimReadAttempts {
+			time.Sleep(claimReadRetryDelay)
+			continue
+		}
+		return false, err
+	}
+}
+
+// RuntimeClaimExists is CheckRuntimeClaim for callers that need only the
+// positive answer; every failure reads as "not addressable".
 func RuntimeClaimExists(gameID, configDir string) bool {
-	_, _, err := regularClaimPath(gameID, configDir)
-	return err == nil
+	exists, err := CheckRuntimeClaim(gameID, configDir)
+	return err == nil && exists
 }
 
 // ListRuntimeClaimIDs returns, sorted, every game ID that has a persisted
@@ -650,29 +676,12 @@ func SaveRuntimeState(gameID, configDir string, state RuntimeState) error {
 // symlink is never read through, so an unsafe path or non-regular leaf returns
 // an error and the claim's status resolves to unknown with the repair path.
 func LoadRuntimeState(gameID, configDir string) (*RuntimeState, error) {
-	// Read through a gated handle under a bounded retry: on Windows a
-	// concurrent writer's rename/replace briefly holds runtime.json without
-	// read-sharing (a sharing violation), and on every OS a legitimate publish
-	// swaps the inode between the gate and the open (errClaimReplaced). Both
-	// are transient — the write window is a single tmp+rename — so retry
-	// rather than surface a spurious hard error. A removed file is no claim; a
-	// non-regular leaf and a legitimate loose-permission file that cannot be
-	// tightened still surface (the token must not stay world-readable).
-	var data []byte
-	for attempt := 0; ; attempt++ {
-		var rerr error
-		data, rerr = readRegularClaim(gameID, configDir)
-		if rerr != nil {
-			if errors.Is(rerr, os.ErrNotExist) {
-				return nil, nil
-			}
-			if (errors.Is(rerr, errClaimReplaced) || isTransientClaimReadError(rerr)) && attempt < maxClaimReadAttempts {
-				time.Sleep(claimReadRetryDelay)
-				continue
-			}
-			return nil, fmt.Errorf("failed to read runtime state: %w", rerr)
+	data, err := readClaimBytesRetry(gameID, configDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
 		}
-		break
+		return nil, fmt.Errorf("failed to read runtime state: %w", err)
 	}
 
 	state, perr := parseRuntimeState(data)
@@ -686,19 +695,54 @@ func LoadRuntimeState(gameID, configDir string) (*RuntimeState, error) {
 		if lerr != nil {
 			return nil, fmt.Errorf("failed to parse runtime state (and could not take the transition lock to re-read): %w", perr)
 		}
-		data, rerr := readRegularClaim(gameID, configDir)
+		state, rerr := loadRuntimeStateLocked(gameID, configDir)
 		lock.Release()
-		if rerr != nil {
-			if errors.Is(rerr, os.ErrNotExist) {
-				return nil, nil
-			}
-			return nil, fmt.Errorf("failed to read runtime state: %w", rerr)
-		}
-		if state, perr = parseRuntimeState(data); perr != nil {
-			return nil, fmt.Errorf("failed to parse runtime state: %w", perr)
-		}
+		return state, rerr
 	}
 	return state, nil
+}
+
+// loadRuntimeStateLocked is LoadRuntimeState for a caller that already holds
+// the game's transition lock: the torn-claim recovery needs no re-lock — the
+// lock holder excludes the link-less publication window a torn read could
+// race — and re-acquiring would only stall on the caller's own lock before
+// failing. A claim that still fails to parse under the lock is genuinely
+// corrupt.
+func loadRuntimeStateLocked(gameID, configDir string) (*RuntimeState, error) {
+	data, err := readClaimBytesRetry(gameID, configDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read runtime state: %w", err)
+	}
+	state, perr := parseRuntimeState(data)
+	if perr != nil {
+		return nil, fmt.Errorf("failed to parse runtime state: %w", perr)
+	}
+	return state, nil
+}
+
+// readClaimBytesRetry reads the gated claim under a bounded retry: on Windows
+// a concurrent writer's rename/replace briefly holds runtime.json without
+// read-sharing (a sharing violation), and on every OS a legitimate publish
+// swaps the inode between the gate and the open (errClaimReplaced). Both are
+// transient — the write window is a single tmp+rename — so retry rather than
+// surface a spurious hard error. A removed file surfaces as os.ErrNotExist; a
+// non-regular leaf and a legitimate loose-permission file that cannot be
+// tightened still surface as errors (the token must not stay world-readable).
+func readClaimBytesRetry(gameID, configDir string) ([]byte, error) {
+	for attempt := 0; ; attempt++ {
+		data, rerr := readRegularClaim(gameID, configDir)
+		if rerr != nil {
+			if (errors.Is(rerr, errClaimReplaced) || isTransientClaimReadError(rerr)) && !errors.Is(rerr, os.ErrNotExist) && attempt < maxClaimReadAttempts {
+				time.Sleep(claimReadRetryDelay)
+				continue
+			}
+			return nil, rerr
+		}
+		return data, nil
+	}
 }
 
 func parseRuntimeState(data []byte) (*RuntimeState, error) {
@@ -904,7 +948,9 @@ func TransitionRuntimeStateWithCredit(gameID, configDir string, lockTimeout time
 	}
 	defer lock.Release()
 
-	state, err := LoadRuntimeState(gameID, configDir)
+	// The locked loader: this function already holds the transition lock, so
+	// LoadRuntimeState's corrupt-claim recovery would stall on our own lock.
+	state, err := loadRuntimeStateLocked(gameID, configDir)
 	if err != nil {
 		return nil, err
 	}

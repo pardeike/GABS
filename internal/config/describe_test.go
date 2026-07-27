@@ -116,12 +116,18 @@ func TestDescribeLaunchContextsShowsInputConstraints(t *testing.T) {
 		t.Error("an input's profile restriction must be visible")
 	}
 
-	// An enum already enumerates every valid value, so a length bound beside it
-	// is noise in the text surface.
+	// Length and pattern stay visible next to an enum: validation does not
+	// force enum members through those constraints, while every start
+	// enforces all of them together — a caller who cannot see them cannot
+	// tell why an enum member is rejected at call time.
+	scenarioShowsLength := false
 	for _, line := range strings.Split(got, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "scenario:") && strings.Contains(line, "maxLength") {
-			t.Errorf("maxLength is redundant next to an enum, got %q", line)
+			scenarioShowsLength = true
 		}
+	}
+	if !scenarioShowsLength {
+		t.Errorf("the enum input must still show its enforced length bound\n--- got ---\n%s", got)
 	}
 
 	// A string input WITHOUT an enum still needs its effective bound stated, so

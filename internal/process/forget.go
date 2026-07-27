@@ -159,7 +159,7 @@ func ForceForgetRuntimeClaim(gameID, configDir, expectedDigest string, discardPe
 	}
 	defer lock.Release()
 
-	_, digest, found, err := ReadRuntimeClaim(gameID, configDir)
+	data, digest, found, err := ReadRuntimeClaim(gameID, configDir)
 	if err != nil {
 		return err
 	}
@@ -170,8 +170,15 @@ func ForceForgetRuntimeClaim(gameID, configDir, expectedDigest string, discardPe
 		return ErrForgetClaimChanged
 	}
 
-	cur, loadErr := LoadRuntimeState(gameID, configDir)
-	if loadErr == nil && cur != nil {
+	// Parse the exact bytes read under this lock. Calling LoadRuntimeState
+	// here would stall: its corrupt-claim recovery re-acquires the transition
+	// lock this function already holds. Parsing the same bytes also keeps the
+	// reconciled state identical to the evidence whose digest was confirmed.
+	var cur *RuntimeState
+	if data != nil {
+		cur, _ = parseRuntimeState(data)
+	}
+	if cur != nil {
 		// Readable: credit the pending facts, then remove. A history-write
 		// failure persists the claim and aborts (the reconcile-failed signal).
 		if err := creditPendingThenRemoveLocked(gameID, configDir, cur); err != nil {

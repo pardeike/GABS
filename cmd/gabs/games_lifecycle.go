@@ -103,6 +103,19 @@ func coerceInputValue(decl config.LaunchInputConfig, raw string) (any, error) {
 func startGameCLI(log util.Logger, gameID, configDir, profile string, rawInputs map[string]string) int {
 	snap, err := loadCLISnapshot(configDir)
 	if err != nil {
+		// A URL-mode game holding context fields is the specific, stable
+		// outcome (design/05) — the CLI must emit the same code the MCP
+		// handler does, not the generic config_invalid.
+		var cfgErr *config.ConfigError
+		if errors.As(err, &cfgErr) {
+			if issues := config.ModeIncompatibleIssues(cfgErr, gameID); len(issues) > 0 {
+				fmt.Fprintf(os.Stderr, "launch_mode_incompatible: the launch mode of %q cannot deliver launch context; remove the incompatible fields or switch modes:\n", gameID)
+				for _, is := range issues {
+					fmt.Fprintf(os.Stderr, "  %s\n", is)
+				}
+				return 1
+			}
+		}
 		fmt.Fprintf(os.Stderr, "config_invalid: %v\n", err)
 		return 1
 	}
@@ -159,6 +172,12 @@ func startGameCLI(log util.Logger, gameID, configDir, profile string, rawInputs 
 		CheckInProcessActive: nil,
 	})
 	if serr != nil {
+		// The typed lifecycle errors preserve the warnings the attempt earned
+		// (probe evidence, the Steam advisory); the CLI surfaces them like the
+		// MCP frontend does for the same Stages 1–4 outcome.
+		for _, w := range cliStartErrorWarnings(serr) {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+		}
 		code, msg := cliStartFailureText(serr, *game)
 		fmt.Fprintf(os.Stderr, "%s: %s\n", code, msg)
 		return 1
@@ -167,10 +186,42 @@ func startGameCLI(log util.Logger, gameID, configDir, profile string, rawInputs 
 	for _, w := range sr.Warnings {
 		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 	}
-	fmt.Printf("started_attachment_deferred: '%s' verified (pid %d, bridge 127.0.0.1:%d). "+
+	verified := "verified"
+	if sr.Result != nil && sr.Result.Adopted {
+		// Adoption is not an ordinary verified start: the direct child exited
+		// and the workload was observed by name, so the printed PID may be the
+		// exited wrapper's and the injected context may not have survived.
+		verified = "verified via adoption"
+		fmt.Fprintf(os.Stderr, "warning: the launch was adopted — the direct child exited and the workload was observed by name; "+
+			"injected args/env (including GABS_PROFILE) may not have survived a launcher re-exec. "+
+			"A bridge connection proves the managed environment survived; a verified delivery report proves the full context did.\n")
+	}
+	fmt.Printf("started_attachment_deferred: '%s' %s (pid %d, bridge 127.0.0.1:%d). "+
 		"The workload is running and its runtime claim is active; attachment was not attempted. "+
-		"Attach from a server session with games_connect.\n", game.ID, sr.RuntimeState.GamePID, sr.Port)
+		"Attach from a server session with games_connect.\n", game.ID, verified, sr.RuntimeState.GamePID, sr.Port)
 	return 0
+}
+
+// cliStartErrorWarnings collects the warnings a typed Stage 1–4 failure
+// carries, so the one-shot CLI surfaces the same evidence as the MCP frontend.
+func cliStartErrorWarnings(err error) []string {
+	var attempt *lifecycle.StartAttemptError
+	if errors.As(err, &attempt) {
+		return attempt.Warnings
+	}
+	var refusal *lifecycle.StartRefusalError
+	if errors.As(err, &refusal) {
+		return refusal.Warnings
+	}
+	var unobs *lifecycle.UnobservedStartError
+	if errors.As(err, &unobs) {
+		return unobs.Warnings
+	}
+	var exited *lifecycle.ExitedDuringStartError
+	if errors.As(err, &exited) {
+		return exited.Warnings
+	}
+	return nil
 }
 
 // cliStartFailureText maps a Stage 1–4 failure to a stable code plus a
@@ -205,7 +256,11 @@ func cliStartFailureText(err error, game config.GameConfig) (string, string) {
 		// Error unwraps to the underlying BridgeEndpointInUseError.
 		var inUse *config.BridgeEndpointInUseError
 		if errors.As(err, &inUse) {
-			return "endpoint_unavailable", fmt.Sprintf("GABS endpoint cache for '%s' uses port %d, but that port is already listening (endpoint_cache_in_use). Attach from a server session with games_connect, or restart with a reset only after confirming the cached endpoint should be rotated.", game.ID, inUse.Port)
+			// No claim exists here (the failed attempt released its fresh
+			// claim): connect requires a claim, and status would just report
+			// stopped without inspecting the socket — only an OS-level port
+			// inspection can answer who owns the listener.
+			return "endpoint_unavailable", fmt.Sprintf("GABS endpoint cache for '%s' uses port %d, but that port is already listening (endpoint_cache_in_use). No runtime claim exists, so 'gabs games status' will report the game stopped and cannot identify the listener. Identify it with an OS tool first — e.g. `lsof -nP -iTCP:%d -sTCP:LISTEN` (macOS/Linux) or `netstat -ano | findstr :%d` (Windows). If it is a lost instance of this game, stop that process externally; only if the listener is unrelated or gone should you start again with a reset to rotate the cached endpoint.", game.ID, inUse.Port, inUse.Port, inUse.Port)
 		}
 		return "endpoint_unavailable", epErr.Error()
 	}
@@ -340,6 +395,12 @@ func stopGameCLI(log util.Logger, gameID, configDir, action string) int {
 	if refusal != nil {
 		fmt.Fprintf(os.Stderr, "%s: %s\n", refusal.Code, refusal.Message)
 		return 1
+	}
+	// A terminated outcome can still carry the only explanation of a
+	// superseded or failed claim removal; dropping it would report an
+	// unqualified termination while a claim may still be active.
+	for _, w := range outcome.Warnings {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 	}
 	fmt.Printf("%s: %s", gameID, outcome.Code)
 	if outcome.Detail != "" {

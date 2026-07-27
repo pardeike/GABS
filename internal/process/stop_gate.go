@@ -318,6 +318,18 @@ func actionCapability(s *RuntimeState, action string) (*launch.ResolvedHook, boo
 	return hook, builtinTargetExists(s)
 }
 
+// ClaimActionSupported reports whether stop or kill has ANY mechanism on
+// this claim — a pinned lifecycle hook for the action, or the built-in
+// fallback (workload PID / stopProcessName). Status surfaces consult it so
+// nextActions only advertise executable operations.
+func ClaimActionSupported(s *RuntimeState, action string) bool {
+	if s == nil {
+		return false
+	}
+	hook, builtinOK := actionCapability(s, action)
+	return hook != nil || builtinOK
+}
+
 // builtinTargetExists reports whether the built-in fallback has anything to
 // act on: a pinned workload PID (helper PIDs are never the workload,
 // design/04) or a pinned stopProcessName.
@@ -418,7 +430,7 @@ func persistStopCompletion(req StopRequest, launchID, operationID, phase, status
 	if req.HistoryContextHash != "" && (result.Outcome == OutcomeActionFailed || result.Outcome == OutcomeActionTimedOut) {
 		lock, lerr := AcquireTransitionLock(req.GameID, req.ConfigDir, transitionLockGateTimeout)
 		if lerr == nil {
-			if cur, cerr := LoadRuntimeState(req.GameID, req.ConfigDir); cerr == nil && cur != nil && cur.LaunchID == launchID {
+			if cur, cerr := loadRuntimeStateLocked(req.GameID, req.ConfigDir); cerr == nil && cur != nil && cur.LaunchID == launchID {
 				class := Classify(result.Outcome, ClassifyContext{}).Class
 				// The pinned input-name set (names only, never values) so an
 				// input-bearing launch's failure records its inputs.
@@ -472,7 +484,7 @@ func removeRuntimeStateGuarded(gameID, configDir, instanceID, launchID, operatio
 		return err
 	}
 	defer lock.Release()
-	cur, err := LoadRuntimeState(gameID, configDir)
+	cur, err := loadRuntimeStateLocked(gameID, configDir)
 	if err != nil {
 		return err
 	}
@@ -559,7 +571,7 @@ func RemoveRuntimeStateIfCurrent(gameID, configDir, instanceID, launchID string,
 		return err
 	}
 	defer lock.Release()
-	cur, err := LoadRuntimeState(gameID, configDir)
+	cur, err := loadRuntimeStateLocked(gameID, configDir)
 	if err != nil {
 		return err
 	}

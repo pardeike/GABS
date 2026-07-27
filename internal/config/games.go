@@ -183,6 +183,27 @@ func parseGamesConfig(data []byte) (*GamesConfig, error) {
 	// fold key is the cleaned, lower-cased directory-relative path.
 	dirOwner := make(map[string]string, len(gameIDs))
 	for _, id := range gameIDs {
+		// Every entry must be addressable at runtime: an ID that
+		// ClaimRuntimeState would reject as non-canonical ("adventure/",
+		// "factory/../adventure") must fail HERE with its exact config path,
+		// not load, resolve, and then fail every start while the config
+		// still reads as valid.
+		if verr := ValidateGameID(id); verr != nil {
+			extErrs = append(extErrs, ConfigIssue{
+				Path:    "/games/" + escapePointerToken(id),
+				Message: fmt.Sprintf("game ID is not addressable at runtime: %v", verr),
+			})
+			continue
+		}
+		if g := config.Games[id]; g.ID != "" && g.ID != id {
+			// Lookups resolve by the map key while runtime claims use the
+			// declared id; diverging identities would address different
+			// games' state.
+			extErrs = append(extErrs, ConfigIssue{
+				Path:    "/games/" + escapePointerToken(id) + "/id",
+				Message: fmt.Sprintf("entry is keyed %q but declares id %q; they must match", id, g.ID),
+			})
+		}
 		key := strings.ToLower(path.Clean("/" + id))
 		if other, ok := dirOwner[key]; ok {
 			extErrs = append(extErrs, ConfigIssue{
@@ -366,7 +387,7 @@ func (g *GameConfig) Validate() error {
 	// SteamManaged launches the resolved game executable directly, so it can be
 	// tracked like DirectPath while still using the Steam app id for discovery.
 	if g.LaunchMode == "SteamAppId" || g.LaunchMode == "EpicAppId" {
-		if g.StopProcessName == "" && !g.hasURLHookAlternative() {
+		if g.StopProcessName == "" && !g.HasURLHookAlternative() {
 			return fmt.Errorf("stopProcessName is required for %s games to enable proper game termination (or a game-level status hook plus a stop or kill hook). Without it, GABS can only stop the launcher process, not the actual game", g.LaunchMode)
 		}
 	}

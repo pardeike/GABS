@@ -481,7 +481,7 @@ func mutateHistoryFenced(gameID, configDir, expectLaunchID string, mutate func(*
 		return err
 	}
 	defer lock.Release()
-	claim, err := LoadRuntimeState(gameID, configDir)
+	claim, err := loadRuntimeStateLocked(gameID, configDir)
 	if err != nil {
 		return err
 	}

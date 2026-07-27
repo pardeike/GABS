@@ -20,9 +20,11 @@ Each launch resolves along one axis:
     stable game identity  →  optional named profile  →  optional declared, typed launch inputs
 
 - **Games** are declared in a config file. GABS re-reads it on the next call —
-  **edits apply automatically**, with no GABS or MCP-client restart. After an
-  edit, `games_show <id>` shows the new profiles, inputs, warnings, or the exact
-  error.
+  **edits to game entries apply automatically**, with no GABS or MCP-client
+  restart. After an edit, `games_show <id>` shows the new profiles, inputs,
+  warnings, or the exact error. Top-level settings (`apiKey`,
+  `toolNormalization`, `portRanges`, `timeouts`, `stripOutputSchema`) are read
+  at startup only and still require a GABS restart.
 - **Profiles** select a repeatable launch context (args, env, working directory,
   lifecycle overrides) without changing the game's identity or transport. A bare
   start uses the `defaultProfile`.
@@ -116,9 +118,11 @@ game with launch inputs and lifecycle hooks:
 
 `launchMode` may be a direct path, a managed Steam game, an Epic App ID, or a
 custom command. For launcher URL modes such as `SteamAppId` and `EpicAppId`,
-`stopProcessName` is required so `games_stop` and `games_kill` know the real game
-process. Because config edits apply automatically, `gabs games show mygame`
-always reflects what an edit would launch.
+`games_stop` and `games_kill` need a way to reach the real game process:
+declare `stopProcessName`, or a game-level `status` hook plus a `stop` or
+`kill` hook — either satisfies the requirement. Because game-entry edits apply
+automatically, `gabs games show mygame` always reflects what an edit would
+launch.
 
 ### 3. Add GABS to your AI client
 

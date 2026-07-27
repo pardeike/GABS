@@ -39,6 +39,7 @@ func (c *spyMaterializeController) Stop(grace time.Duration) error      { return
 func (c *spyMaterializeController) Kill() error                         { return nil }
 func (c *spyMaterializeController) IsRunning() bool                     { return false }
 func (c *spyMaterializeController) GetPID() int                         { return 0 }
+func (c *spyMaterializeController) SpawnFingerprint() (int, int64)      { return 0, 0 }
 func (c *spyMaterializeController) GetLaunchMode() string               { return "SteamManaged" }
 func (c *spyMaterializeController) GetStopProcessName() string          { return "" }
 func (c *spyMaterializeController) IsLauncherProcessRunning() bool      { return false }

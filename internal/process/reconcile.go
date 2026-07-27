@@ -151,7 +151,7 @@ func ReconcilePendingCredits(gameID, configDir, launchID string) error {
 		return err
 	}
 	defer lock.Release()
-	cur, err := LoadRuntimeState(gameID, configDir)
+	cur, err := loadRuntimeStateLocked(gameID, configDir)
 	if err != nil {
 		return err
 	}

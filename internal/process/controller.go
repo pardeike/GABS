@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -95,6 +96,17 @@ type Controller struct {
 	// must not run against an unpublished or superseded claim.
 	beforeSpawn func() error
 	afterSpawn  func(pid int, startTime int64, spawnErr error)
+
+	// spawnFingerprint is the (pid, startTime) captured at the moment of
+	// process creation — pinned once, read cross-goroutine, so a later
+	// publication can never fingerprint an unrelated reuse of the PID number.
+	spawnFingerprint atomic.Pointer[spawnIdentity]
+}
+
+// spawnIdentity is the immutable process identity captured at spawn.
+type spawnIdentity struct {
+	pid       int
+	startTime int64
 }
 
 // Configure sets up the controller with the given launch specification
@@ -260,13 +272,16 @@ func (c *Controller) Start() error {
 			Err:     err,
 		}
 	}
-	if c.afterSpawn != nil {
+	{
 		pid := c.cmd.Process.Pid
 		start, ferr := ProcessStartTime(pid)
 		if ferr != nil {
 			start = 0 // degrade to existence-only evidence, never block the spawn
 		}
-		c.afterSpawn(pid, start, nil)
+		c.spawnFingerprint.Store(&spawnIdentity{pid: pid, startTime: start})
+		if c.afterSpawn != nil {
+			c.afterSpawn(pid, start, nil)
+		}
 	}
 
 	c.waitOnce = sync.Once{}
@@ -691,6 +706,18 @@ func (c *Controller) GetPID() int {
 		return 0
 	}
 	return c.cmd.Process.Pid
+}
+
+// SpawnFingerprint returns the PID and start-time fingerprint captured at
+// process creation, or zeros when no spawn happened or the start time was
+// unavailable. It is the only identity safe to publish after the fact: a
+// fresh PID lookup once the child may have exited could fingerprint an
+// unrelated process that reused the number.
+func (c *Controller) SpawnFingerprint() (int, int64) {
+	if id := c.spawnFingerprint.Load(); id != nil {
+		return id.pid, id.startTime
+	}
+	return 0, 0
 }
 
 // GetLaunchMode returns the launch mode

@@ -102,7 +102,7 @@ func ClearAttachmentIfCurrent(gameID, configDir, launchID, connectionID string, 
 	}
 	defer lock.Release()
 
-	cur, err := LoadRuntimeState(gameID, configDir)
+	cur, err := loadRuntimeStateLocked(gameID, configDir)
 	if err != nil {
 		return err
 	}

@@ -40,6 +40,19 @@ func (e *ExitedDuringStartError) Error() string {
 	return fmt.Sprintf("exited during start (exit code %d)", e.ExitCode)
 }
 
+// StartAttemptError wraps an accepted-attempt failure with the warnings the
+// attempt had already earned (unprobeable-profile evidence, the Steam client
+// advisory), so neither frontend loses them when the attempt fails before the
+// unobserved/exited branches — those carry warnings natively. Unwrap keeps the
+// underlying classification (errors.As/Is) intact.
+type StartAttemptError struct {
+	Err      error
+	Warnings []string
+}
+
+func (e *StartAttemptError) Error() string { return e.Err.Error() }
+func (e *StartAttemptError) Unwrap() error { return e.Err }
+
 // EndpointUnavailableError is the structured Stage 2 endpoint-allocation
 // failure (design/05): port exhaustion, filesystem failure, occupied cache.
 type EndpointUnavailableError struct {

@@ -25,14 +25,30 @@ import (
 //     already tracks a running controller for this game (the same-process fast
 //     path). A server passes its games-map check; a CLI passes nil.
 type StartRequest struct {
-	Game                 config.GameConfig
-	LaunchSpec           process.LaunchSpec
-	Resolved             *launch.Resolved
-	ResetEndpoint        bool
-	StartupGABPTimeout   time.Duration
-	HistoryContext       HistoryContext
-	BridgeBound          func(launchID, connectionID string) bool
-	CheckInProcessActive func() (status string, active bool)
+	Game               config.GameConfig
+	LaunchSpec         process.LaunchSpec
+	Resolved           *launch.Resolved
+	ResetEndpoint      bool
+	StartupGABPTimeout time.Duration
+	HistoryContext     HistoryContext
+	BridgeBound        func(launchID, connectionID string) bool
+	// CheckInProcessActive reports the tracked controller's OWN facts, never
+	// the current request's — the current config may have been hot-edited to
+	// values that do not describe the old workload.
+	CheckInProcessActive func() (facts InProcessFacts, active bool)
+}
+
+// InProcessFacts are the tracked controller's own observations, used to
+// republish a truthful claim when the persisted one was lost. PID and
+// PIDStartTime are the fingerprint pinned at spawn (zeros when the child has
+// exited or the fingerprint was unavailable — a fresh lookup could identify
+// an unrelated reuse of the number), and StopProcessName is the name pinned
+// in the controller's launch spec.
+type InProcessFacts struct {
+	Status          string
+	PID             int
+	PIDStartTime    int64
+	StopProcessName string
 }
 
 // StartResult is a verified Stage 1–4 start. The workload is running and the
@@ -107,6 +123,11 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 		HistorySuccess:     &process.HistorySuccessIdentity{Snapshot: hc.Snapshot, Bucket: hc.Bucket},
 	})
 	if err != nil {
+		// A failed gate may still have earned probe warnings; carry them so
+		// neither frontend loses the evidence with the error.
+		if gateRes != nil && len(gateRes.Warnings) > 0 {
+			return nil, &StartAttemptError{Err: err, Warnings: gateRes.Warnings}
+		}
 		return nil, err
 	}
 	if gateRes.Refusal != nil {
@@ -133,6 +154,23 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 				}
 			}
 		}
+	}
+
+	// Accepted-attempt failures below must not lose the warnings the attempt
+	// has already earned; the typed unobserved/exited paths carry them
+	// natively, a refusal carries them in its own field, and everything else
+	// is wrapped. Every terminal error return after this point goes through
+	// this helper.
+	failWithWarnings := func(err error) error {
+		if len(startWarnings) == 0 {
+			return err
+		}
+		var refusal *StartRefusalError
+		if errors.As(err, &refusal) {
+			refusal.Warnings = append(refusal.Warnings, startWarnings...)
+			return err
+		}
+		return &StartAttemptError{Err: err, Warnings: startWarnings}
 	}
 
 	cleanupRuntimeState := true
@@ -164,8 +202,29 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 	// In-process fast path: a server whose registry already tracks a running
 	// controller refuses (a one-shot CLI passes nil and skips this).
 	if req.CheckInProcessActive != nil {
-		if status, active := req.CheckInProcessActive(); active {
-			return nil, &GameAlreadyActiveError{Status: status}
+		if facts, active := req.CheckInProcessActive(); active {
+			// This server tracks a live controller but the persisted claim
+			// was lost — GateStart just published a fresh preflight claim.
+			// Releasing that claim would present the workload as running
+			// while leaving it invisible to every other GABS process, which
+			// could then pass its own gate and launch a duplicate. Rewrite
+			// the fresh claim into an explicitly UNATTRIBUTED active snapshot
+			// of the tracked controller: the fresh claim carries THIS
+			// request's context (profile, hooks, history identity), none of
+			// which describes the old process.
+			if perr := process.PublishTrackedControllerSnapshot(game.ID, m.configDir, launchID, opID, facts.PID, facts.PIDStartTime, facts.StopProcessName, time.Now().UTC()); perr != nil {
+				if errors.Is(perr, process.ErrFencingViolation) || errors.Is(perr, process.ErrNoRuntimeClaim) {
+					return nil, failWithWarnings(m.SupersededStartRefusal(game.ID))
+				}
+				// The repair could not be durably published: without a claim
+				// the live workload stays invisible to other GABS processes,
+				// which could then start a duplicate. Uncertainty blocks —
+				// never report an unqualified already_running over a failed
+				// repair.
+				return nil, failWithWarnings(occupiedClaimRefusal(game.ID, "an in-process controller is running but its claim could not be republished", perr))
+			}
+			cleanupRuntimeState = false
+			return nil, failWithWarnings(&GameAlreadyActiveError{Status: facts.Status})
 		}
 	}
 
@@ -174,7 +233,7 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 	port, token, bridgePath, reusedBridge, err := config.PrepareBridgeEndpointForStart(game.ID, m.configDir, m.gamesConfig, resetEndpoint)
 	if err != nil {
 		pendingFailCode = "endpoint_unavailable"
-		return nil, &EndpointUnavailableError{GameID: game.ID, Err: err}
+		return nil, failWithWarnings(&EndpointUnavailableError{GameID: game.ID, Err: err})
 	}
 
 	if reusedBridge {
@@ -197,8 +256,8 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 		if errors.As(merr, &procErr) && (procErr.Type == process.ProcessErrorTypeStart || procErr.Type == process.ProcessErrorTypeConfiguration) {
 			pendingFailCode = "spawn_failed"
 		}
-		return nil, fmt.Errorf("failed to resolve the launch target for game '%s' (mode: %s, target: %s): %w",
-			game.ID, game.LaunchMode, game.Target, merr)
+		return nil, failWithWarnings(fmt.Errorf("failed to resolve the launch target for game '%s' (mode: %s, target: %s): %w",
+			game.ID, game.LaunchMode, game.Target, merr))
 	} else {
 		launchSpec.PathOrId = exe
 		launchSpec.WorkingDir = cwd
@@ -213,7 +272,7 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 		st.ContextDigests = spawnDigests
 		return nil
 	}); err != nil {
-		return nil, fmt.Errorf("failed to persist endpoint into runtime claim for '%s': %w", game.ID, err)
+		return nil, failWithWarnings(fmt.Errorf("failed to persist endpoint into runtime claim for '%s': %w", game.ID, err))
 	}
 
 	// Pre-spawn size check on the fully materialized spec: a structured
@@ -228,7 +287,7 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 		finalArgv := append([]string{launchSpec.PathOrId}, launchSpec.Args...)
 		if iss := launch.CheckProcessSize(finalArgv, finalEnv); iss != nil {
 			pendingFailCode = "spec_too_large"
-			return nil, iss
+			return nil, failWithWarnings(iss)
 		}
 	}
 
@@ -289,11 +348,11 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 	// If the deadline is already (near) consumed, do not spawn at all.
 	remaining := time.Until(runtimeState.Operation.Deadline)
 	if remaining < minStageFourBudget {
-		return nil, &process.ProcessError{
+		return nil, failWithWarnings(&process.ProcessError{
 			Type:    process.ProcessErrorTypeStart,
 			Context: fmt.Sprintf("the start budget for %s was consumed before spawn; the operation is now supersedable", game.ID),
 			Err:     process.ErrFencingViolation,
-		}
+		})
 	}
 	result := m.starter.StartWithVerificationWithTimeouts(controller, nil, game.ID, port, token, remaining, 0)
 	stampMu.Lock()
@@ -334,9 +393,9 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 			return nil
 		}); ferr != nil {
 			if errors.Is(ferr, process.ErrFencingViolation) || errors.Is(ferr, process.ErrNoRuntimeClaim) {
-				return m.SupersededStartRefusal(game.ID)
+				return failWithWarnings(m.SupersededStartRefusal(game.ID))
 			}
-			return occupiedClaimRefusal(game.ID, "the unobserved outcome could not be persisted", ferr)
+			return failWithWarnings(occupiedClaimRefusal(game.ID, "the unobserved outcome could not be persisted", ferr))
 		}
 		return &UnobservedStartError{Warnings: startWarnings}
 	}
@@ -374,15 +433,15 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 			}
 		} else if errors.Is(result.Error, process.ErrFencingViolation) {
 			cleanupRuntimeState = false
-			return nil, m.SupersededStartRefusal(game.ID)
+			return nil, failWithWarnings(m.SupersededStartRefusal(game.ID))
 		} else {
 			// Record spawn_failed ONLY when the handler will also render it as
 			// spawn_failed: a Start/Configuration ProcessError.
 			if procErr != nil && (procErr.Type == process.ProcessErrorTypeStart || procErr.Type == process.ProcessErrorTypeConfiguration) {
 				pendingFailCode = "spawn_failed"
 			}
-			return nil, fmt.Errorf("failed to start game '%s' (mode: %s, target: %s): %w",
-				game.ID, game.LaunchMode, game.Target, result.Error)
+			return nil, failWithWarnings(fmt.Errorf("failed to start game '%s' (mode: %s, target: %s): %w",
+				game.ID, game.LaunchMode, game.Target, result.Error))
 		}
 	}
 	if !result.GameStillRunning {
@@ -435,9 +494,9 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 	if err != nil {
 		cleanupRuntimeState = false
 		if errors.Is(err, process.ErrFencingViolation) || errors.Is(err, process.ErrNoRuntimeClaim) {
-			return nil, m.SupersededStartRefusal(game.ID)
+			return nil, failWithWarnings(m.SupersededStartRefusal(game.ID))
 		}
-		return nil, occupiedClaimRefusal(game.ID, "the running state could not be persisted", err)
+		return nil, failWithWarnings(occupiedClaimRefusal(game.ID, "the running state could not be persisted", err))
 	} else if promoted != nil {
 		runtimeState = *promoted
 	}
