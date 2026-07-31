@@ -46,6 +46,7 @@ Edit GABS config only when **(a)** the failure's `causeClass` is `config`, **(b)
 - Use normal `games_connect` to continue from a different live session after the previous session goes idle; GABS runtime ownership is a short active-use lease, not a permanent session lock.
 - Use `games_connect` with `forceTakeover: true` only when intentionally moving ownership away from another active GABS session before its lease expires.
 - For games with slow bridge startup, pass a larger `timeout` to `games_start` or configure `timeouts.startup.gabpConnectSeconds` to increase the total background connection budget. `games_start` still returns after a bounded initial wait; use `games_status` or `games_connect` while GABS keeps trying.
+- On macOS, the same `games_start.timeout` independently caps the pre-spawn `SteamManaged` readiness wait. `store_client_not_ready` means the game was not spawned: repeat the original call with the same profile and launch inputs after Steam settles. Increase `timeout` only for `reason: readiness_timeout`; `reason: probe_unavailable` needs the Steam client library/helper problem resolved first. Never change a proven game config for this environment-class result.
 - Do not inspect, edit, or base recovery on `bridge.json`; it is GABS' endpoint cache/debug artifact. Game-side bridge runtime configuration should come from `GABP_SERVER_PORT`, `GABP_TOKEN`, and `GABS_GAME_ID`.
 - If `games_start` reports `endpoint_cache_in_use`, use `games_connect` to attach to the already-listening endpoint. Use `games_start` with `resetEndpoint: true` only after confirming the cached endpoint should be rotated for a new process.
 - If `games_status` reports `process-bridge-environment-missing`, the running
@@ -78,6 +79,7 @@ Edit GABS config only when **(a)** the failure's `causeClass` is `config`, **(b)
 
 ## Recovery
 
+- For `store_client_not_ready`, do not use `games_connect` or edit the config — no game process or runtime claim exists. Reissue the original `games_start` request unchanged after Steam settles, preserving launch-input values from the original call rather than reconstructing them from diagnostics (GABS intentionally returns input names only).
 - If no bridge tools are listed, call `games_status` first, then `games_connect` if the game is running.
 - If GABP disconnected, call `games_status` to inspect the last disconnect note, then `games_connect` after the bridge is ready.
 - If a client rejected `tools/list`, check whether `stripOutputSchema` is enabled in GABS config.

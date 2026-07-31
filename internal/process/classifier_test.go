@@ -21,6 +21,7 @@ func TestClassifyStaticCodes(t *testing.T) {
 		"operation_in_progress":      CauseState,
 		"termination_unverified":     CauseState,
 		"spawn_failed":               CauseEnvironment,
+		"store_client_not_ready":     CauseEnvironment,
 		"endpoint_unavailable":       CauseEnvironment,
 		"exited_during_start":        CauseGame,
 		"stale_bridge_credential":    CauseEnvironment,
@@ -143,7 +144,8 @@ func TestClassifyExhaustiveOverStableCodes(t *testing.T) {
 		"termination_unverified": CauseState, "action_succeeded_running": CauseState,
 		// environment
 		"spawn_failed": CauseEnvironment, "stale_bridge_credential": CauseEnvironment,
-		"endpoint_unavailable": CauseEnvironment, "action_failed": CauseEnvironment,
+		"store_client_not_ready": CauseEnvironment,
+		"endpoint_unavailable":   CauseEnvironment, "action_failed": CauseEnvironment,
 		"action_timed_out": CauseEnvironment,
 		// evidence/proof-adjusted (never-proven defaults asserted here)
 		"exited_during_start": CauseGame, "launch_spec_unresolvable": CauseConfig,

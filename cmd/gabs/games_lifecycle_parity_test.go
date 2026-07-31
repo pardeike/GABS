@@ -26,6 +26,7 @@ func TestCLIStartFailureTextExhaustive(t *testing.T) {
 		{"unobserved", &lifecycle.UnobservedStartError{}, "unobserved", ""},
 		{"exited", &lifecycle.ExitedDuringStartError{ExitCode: 3}, "exited_during_start", "exit code 3"},
 		{"active", &lifecycle.GameAlreadyActiveError{Status: process.RuntimeStateStatusRunning}, "already_running", ""},
+		{"store-readiness", &lifecycle.StoreClientNotReadyError{Store: "steam", Reason: "readiness_timeout", Stage: "global_user", Retryable: true}, "store_client_not_ready", "global_user"},
 		{"cache-collision", &lifecycle.EndpointUnavailableError{GameID: "g", Err: &config.BridgeEndpointInUseError{Port: 8080}}, "endpoint_unavailable", "endpoint_cache_in_use"},
 		{"endpoint-generic", &lifecycle.EndpointUnavailableError{GameID: "g", Err: errors.New("disk full")}, "endpoint_unavailable", ""},
 		{"spec-too-large", &launch.SpecSizeIssue{Message: "too big", Part: "argv"}, "spec_too_large", ""},

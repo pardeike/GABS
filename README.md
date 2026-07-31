@@ -231,7 +231,11 @@ normalization. For the full MCP surface, see the
   name.
 - **Steam bridge games**: prefer `SteamManaged` launch. It resolves the Steam
   app manifest to the installed executable, starts Steam if needed, and launches
-  with GABP environment variables. Some managed apps can still relaunch the final
+  with GABP environment variables. On macOS, GABS first proves that Steam's
+  app-neutral client IPC/global-user interface is ready; a merely running Steam
+  process is not enough. `store_client_not_ready` means no game process was
+  started: retry the same request after Steam settles (a larger `timeout` can
+  help when the reason is `readiness_timeout`). Some managed apps can still relaunch the final
   process without those variables; `games_status` reports that as
   `process-bridge-environment-missing`. Use `gabs games doctor <id>` to inspect a
   config, `gabs games repair <id>` to convert an older `SteamAppId` launcher-URL

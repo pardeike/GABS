@@ -70,10 +70,17 @@ structured Stage 2 error naming the part, not E2BIG/spawn failure).
 - started_bridge_pending: helper runs, never connects →
   started_bridge_pending, background attach continues, later
   games_connect succeeds against a late-starting fake bridge.
-- Steam advisory: warning present when no steam-named process, absent
-  otherwise; never blocks; SteamManaged with Steam absent proceeds to
-  spawn with the Stage 2 warning (EnsureClientRunning failure never fails
-  the start).
+- Steam readiness: macOS SteamManaged does not spawn until a fresh hidden-child
+  probe proves both client-library pipe and global-user stages; cold-client
+  flow opens Steam once and eventually succeeds; permanently not-ready flow
+  waits to the caller deadline then returns retryable
+  `store_client_not_ready` with `processStarted=false`; absent/unloadable probe
+  returns the same stable code with non-retryable `probe_unavailable`; helper
+  crash/hang/malformed/oversized output is contained; App-ID environment is
+  scrubbed from the helper; failure releases the fresh claim and does not
+  mutate history. Success restamps the fenced deadline and preserves the full
+  Stage 4/GABP budget. SteamAppId and non-macOS paths retain their current
+  advisory/assistance behavior.
 - Pre-start probes: no claim + any profile's probe running →
   external_instance_detected (+ external snapshot); probes unknown →
   start proceeds with warning listing unprobeable profiles; with claim +

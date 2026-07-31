@@ -909,6 +909,31 @@ contract, not a scratchpad.
       operation_in_progress — it cannot replace the first while its executor
       legitimately proceeds. Full mcp suite green (the general pre-spawn deadline
       check introduced no fallout).)
+- [x] M2.17 (added) macOS SteamManaged functional-readiness gate — spec: 05
+      Stage 2, 08, 10, 11, 12, 20; tests: T-START (Steam readiness), T-MCP,
+      T-CLI, T-TRACK
+      (The macOS SteamManaged path now keeps the existing direct executable
+      launch/context-delivery design but refuses to spawn until Steam's installed
+      `steamclient.dylib` proves an app-neutral IPC pipe plus global user. Native
+      calls use purego and remain buildable with `CGO_ENABLED=0`; every probe is
+      isolated in a hidden, short-lived current-binary child with bounded output,
+      a per-child two-second/remaining-deadline cap, and Steam App-ID environment
+      variables removed. The parent probes immediately, opens Steam exactly once
+      when needed, and retries fresh children every 250 ms. Crash, hang, malformed
+      output, updater-time load/symbol failures, and absent libraries are contained.
+      A valid not-ready observation at the caller deadline yields retryable
+      `store_client_not_ready`/`readiness_timeout`; never reaching a callable
+      client interface yields non-retryable `probe_unavailable`. Both report the
+      furthest stage, waited/timeout milliseconds, `processStarted:false`,
+      environment attribution, and original-call retry guidance without input
+      values. The accepted claim is fenced to the independent readiness deadline;
+      success restamps a fresh full process-start budget, while failure releases
+      the claim, creates no unobserved state, and mutates no history. MCP's existing
+      `timeout` caps readiness independently and still supplies the full GABP wait;
+      omitted MCP/CLI timeout uses configured/default GABP startup time. SteamAppId
+      and non-macOS paths retain M2.15's advisory behavior. A macos-latest no-CGO
+      lane covers the platform path; the local no-CGO release-style binary's live
+      hidden probe returned `ready` at `global_user`.)
 
 ## Milestone 3 — CLI + docs + skill
 

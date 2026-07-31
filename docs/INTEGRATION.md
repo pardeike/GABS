@@ -53,6 +53,10 @@ GABS session is actively using a running or starting game:
 - if `games_start` reports `endpoint_cache_in_use`, use `games_connect` to
   attach to the already-listening endpoint or `resetEndpoint: true` only after
   confirming the cached endpoint should be rotated
+- if a macOS SteamManaged start reports `store_client_not_ready`, no game
+  process or runtime claim was created. Repeat the same `games_start` request
+  after Steam settles, preserving its profile and launch inputs; a larger
+  `timeout` may help only for `reason: readiness_timeout`
 
 Once the previous session is idle, `games_connect` naturally moves ownership to
 the current session. If you intentionally want the current GABS session to take

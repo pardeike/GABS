@@ -4,12 +4,14 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"runtime"
 
 	"github.com/pardeike/gabs/internal/config"
 	"github.com/pardeike/gabs/internal/launch"
 	"github.com/pardeike/gabs/internal/process"
+	"github.com/pardeike/gabs/internal/steam"
 	"github.com/pardeike/gabs/internal/util"
 )
 
@@ -50,8 +52,11 @@ func TestExitedDuringStartIsGameAcrossLaunchModes(t *testing.T) {
 			mode: "SteamManaged",
 			setup: func(t *testing.T) (string, func()) {
 				exe := execFile(t)
-				restore := launch.SetSteamResolveExecutableForTesting(func(appID string) (string, error) { return exe, nil })
-				return "480", restore // any app id; the resolver is pinned to exe
+				restoreResolve := launch.SetSteamResolveExecutableForTesting(func(appID string) (string, error) { return exe, nil })
+				restoreReady := steam.SetFunctionalReadinessForTesting(true, func(timeout time.Duration) steam.ReadinessResult {
+					return steam.ReadinessResult{Ready: true, Stage: steam.ReadinessStageGlobalUser, Timeout: timeout}
+				})
+				return "480", func() { restoreReady(); restoreResolve() } // any app id; the resolver is pinned to exe
 			},
 		},
 	}

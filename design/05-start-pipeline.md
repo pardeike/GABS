@@ -100,14 +100,33 @@ OS process creation — never for resolvability.
   claim is released. The fully resolved spec is also checked against
   platform argv/env-block size limits here — a structured error naming the
   oversized part beats an opaque `E2BIG` at exec.
-- Store-launcher advisory: for Steam modes, if no Steam client process is
-  observable, the result carries a warning ("Steam does not appear to be
-  running; the launch may stall at login/startup or the game may relaunch
-  itself through Steam"). Advisory only — `steam://` starts Steam itself,
-  so this must not block. Any pre-start store-client assistance GABS
-  performs (such as the existing ensure-Steam-is-running step for
-  SteamManaged) is best-effort and bounded: its failure becomes this
-  warning, never a start failure.
+- Store-client readiness is launch-mode and platform specific. URL modes keep
+  the process-presence advisory because `steam://` starts the client itself.
+  SteamManaged on macOS is stricter: before the direct executable spawn, GABS
+  must prove that the installed Steam client library can create an IPC pipe and
+  connect a global user. A running `steam_osx` process alone is not proof — the
+  client can exist before the Steamworks interface is usable, which makes a
+  direct game process start without Steam identity and breaks integrations that
+  depend on Steam. GABS probes immediately, asks macOS to open Steam once when
+  needed, then retries fresh probes until the independent caller readiness
+  deadline. Each native probe runs in a short-lived hidden GABS child so a
+  client-library hang, assertion, or crash cannot take down the lifecycle
+  owner. It uses Steam's installed `steamclient.dylib`, calls only the
+  app-neutral pipe/global-user primitives, releases both handles, and never
+  initializes a game API, sets an app ID, or requires online/logged-on state.
+  The game is not spawned until this proof succeeds.
+
+  A readiness timeout returns `store_client_not_ready` with
+  `reason: readiness_timeout`, the furthest readiness stage, elapsed/deadline
+  evidence, `retryable: true`, and `processStarted: false`. If no probe ever
+  loads and invokes the required client interface, the same code uses
+  `reason: probe_unavailable` and `retryable: false`. Both are
+  `causeClass: environment`, release the fresh preflight claim, create no
+  unobserved runtime, and do not mutate launch history because no workload was
+  attempted. On success the operation/process-start deadline is restamped
+  under the original fencing identity with a fresh normal Stage 3/4 budget;
+  `timeout` therefore caps readiness independently, then retains its existing
+  full GABP-wait meaning. Windows/Linux SteamManaged behavior is unchanged.
 
 ## Stage 3 — Spawn
 
@@ -225,7 +244,7 @@ Existing `timeout`/`resetEndpoint` semantics preserved. Outcomes:
 | Executable broken (arch, deps, Gatekeeper) | spawn error | `spawn_failed` + OS error | environment | fix binary/permissions |
 | Crash / bad save / add-on failure | early exit | `exited_during_start` + exit code + output tail | game | read output; fix game state |
 | Anti-cheat kills modified process | early exit or no bridge | `exited_during_start` / `started_bridge_pending` | game | hint lists anti-cheat as cause |
-| Steam not running (SteamManaged) | advisory + adoption/exit | warning; then normal outcomes | environment | start Steam; see adoption note |
+| Steam not functionally ready (macOS SteamManaged) | installed client-library pipe/global-user probe | `store_client_not_ready`, no process spawned | environment | retry the same start (optionally with a longer timeout); investigate Steam only if the non-timeout failure persists |
 | Steam re-exec drops context | adoption, delivery not verified | `adopted` warning, `started_bridge_pending` | environment | `steam_appid.txt`, Steam launch options, or wrapper |
 | Steam/Epic updating or dialog (URL modes) | nothing observable | `unobserved`, claim kept `starting` | environment | check desktop; re-check status |
 | Wrong app ID / not installed | nothing observable | `unobserved` | config; environment when proven | verify target in store |

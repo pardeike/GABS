@@ -32,7 +32,7 @@ the caller guidance.
 | Executable broken (arch, deps, Gatekeeper) | spawn error | `spawn_failed` + OS error | environment | fix binary/permissions |
 | Crash / bad save / add-on failure | early exit | `exited_during_start` + exit code + output tail | game | read output; fix game state |
 | Anti-cheat kills modified process | early exit or no bridge | `exited_during_start` / `started_bridge_pending` | game | hint lists anti-cheat as cause |
-| Steam not running (SteamManaged) | advisory + adoption/exit | warning; then normal outcomes | environment | start Steam; see adoption note |
+| Steam not functionally ready (macOS SteamManaged) | installed client-library pipe/global-user probe | `store_client_not_ready`, no process spawned | environment | retry the same start after Steam settles; a longer timeout may help only for `readiness_timeout` |
 | Steam re-exec drops context | adoption, delivery not verified | `adopted` warning, `started_bridge_pending` | environment | `steam_appid.txt`, Steam launch options, or wrapper |
 | Steam/Epic updating or dialog (URL modes) | nothing observable | `unobserved`, claim kept `starting` | environment | check desktop; re-check status |
 | Wrong app ID / not installed | nothing observable | `unobserved` | config; environment when proven | verify target in store |

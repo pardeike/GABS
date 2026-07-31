@@ -83,6 +83,12 @@ budget. `games_start` still returns after a bounded initial wait; GABS keeps
 trying in the background and `games_connect` can adopt a running process
 environment if a launcher reused older GABP values.
 
+On macOS SteamManaged starts, the same value independently caps the pre-spawn
+Steam readiness proof. If that returns `store_client_not_ready`, no game
+process exists to connect to: preserve the original profile/launch inputs and
+retry `games_start` after Steam settles. Only `reason: readiness_timeout` is a
+case where increasing the timeout may help.
+
 ## AI Discovery Strategies
 
 ### 1. The `games_tool_names` -> `games_tool_detail` Discovery Pattern (Recommended)

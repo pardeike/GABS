@@ -48,6 +48,11 @@ B does not touch A's proof. Proof is earned by successful operation and
 cannot be edited into existence — any edit of a proven context visibly
 resets it to "never proven".
 
+A failed pre-spawn store-readiness gate is likewise evidence about the host,
+not an attempted workload. `store_client_not_ready` still renders the resolved
+context's existing track record, but it does not write `history.json`, change
+the last failure, or advance `consecutiveFailures`.
+
 ## Failure attribution
 
 Every failure result carries a `causeClass`:

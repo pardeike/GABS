@@ -189,6 +189,16 @@ executable with GABP environment variables, and prepares `steam_appid.txt`
 when direct Steamworks startup requires it. Configured `args` and `env` are
 passed to the game in this mode.
 
+On macOS, GABS does not infer readiness from the Steam process alone. Before a
+`SteamManaged` spawn it loads Steam's installed client library in an isolated
+helper process and proves that an app-neutral IPC pipe and global user can be
+created. The helper does not initialize a game API, set an App ID, or require
+online mode. If the proof cannot complete, `games_start` returns
+`store_client_not_ready` with `processStarted: false`; the fresh runtime claim
+is released and the game is not launched. Repeat the same request after Steam
+settles. The call's `timeout` independently caps this readiness wait, and after
+success the full normal GABP startup budget still applies.
+
 **Re-exec caveat.** If Steam or the platform relaunches the final game process
 through its own client, the injected environment and argv can be dropped — see
 [Steam re-exec caveat and workarounds](#steam-re-exec-caveat-and-workarounds).
@@ -996,7 +1006,10 @@ takes longer to start listening, override the startup waits in
   only for a bounded initial slice, returns before MCP clients hit their own
   tool-call timeout, and continues connecting in the background. You can also
   pass a one-off `timeout` argument to `games_start` without changing the saved
-  config.
+  config. On macOS SteamManaged starts, that configured/default value (or the
+  one-off argument) also caps a separate pre-spawn Steam-readiness wait. Once
+  Steam is ready, GABS gives bridge startup the full connection budget; the
+  readiness wait does not consume it.
 
 `timeouts.session`:
 

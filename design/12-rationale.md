@@ -142,8 +142,12 @@ concurrent profiles ✗ (separate IDs; reserved extension).
   where it has no legacy blast radius.
 - **No new MCP tools** (`reload_config`, `doctor`, `recover` rejected);
   value folded into existing results, the CLI, or automatic behavior.
-- **No start auto-retry and no launcher-UI automation.** GABS reports
-  evidence and next actions; the operator (or agent) decides.
+- **No workload auto-retry and no launcher-UI automation.** GABS reports
+  evidence and next actions; the operator (or agent) decides whether to make
+  another game-start attempt. The macOS SteamManaged pre-spawn readiness gate
+  is not a workload retry: one accepted start operation may open Steam once and
+  poll its app-neutral client-library interface until the caller's bounded
+  readiness deadline. It never creates a game process before the proof.
 - **Required `defaultProfile`** eliminates the `profile_required` error
   path; the "explicit profile always" mode was considered again and
   rejected — callers wanting that discipline pass a profile explicitly.

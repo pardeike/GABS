@@ -30,8 +30,13 @@ type StartRequest struct {
 	Resolved           *launch.Resolved
 	ResetEndpoint      bool
 	StartupGABPTimeout time.Duration
-	HistoryContext     HistoryContext
-	BridgeBound        func(launchID, connectionID string) bool
+	// StoreReadinessTimeout independently caps a strict pre-spawn store-client
+	// readiness gate. Zero selects the configured/default GABP startup timeout;
+	// after readiness succeeds, StartupGABPTimeout retains its full existing
+	// Stage-5 meaning.
+	StoreReadinessTimeout time.Duration
+	HistoryContext        HistoryContext
+	BridgeBound           func(launchID, connectionID string) bool
 	// CheckInProcessActive reports the tracked controller's OWN facts, never
 	// the current request's — the current config may have been hot-edited to
 	// values that do not describe the old workload.
@@ -139,12 +144,14 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 	startWarnings := gateRes.Warnings
 	hc.LaunchID = launchID
 
-	// Stage 2 store-launcher advisory (design/05): for Steam modes, scan
+	strictSteamReadiness := game.LaunchMode == "SteamManaged" && steam.FunctionalReadinessSupported()
+	// Stage 2 store-launcher advisory (design/05): for Steam modes without the
+	// strict macOS SteamManaged readiness gate, scan
 	// once; if the Steam client is not observable, record the single advisory
 	// warning — and for SteamManaged only, run bounded best-effort assistance
 	// charged against THIS operation's persisted deadline so it cannot expire
 	// before spawn (the single-budget rule).
-	if isSteamMode(game.LaunchMode) && !steam.ClientRunning() {
+	if !strictSteamReadiness && isSteamMode(game.LaunchMode) && !steam.ClientRunning() {
 		startWarnings = append(startWarnings, SteamNotRunningAdvisory)
 		if game.LaunchMode == "SteamManaged" {
 			reserve := config.BridgeLockTimeout() + steamAssistSpawnHeadroom
@@ -288,6 +295,70 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 		if iss := launch.CheckProcessSize(finalArgv, finalEnv); iss != nil {
 			pendingFailCode = "spec_too_large"
 			return nil, failWithWarnings(iss)
+		}
+	}
+
+	// macOS SteamManaged must not create the game process until Steam's
+	// app-neutral client interface is functionally ready. Extend the accepted
+	// operation under its original fencing identity for this independent wait;
+	// on success, restamp a fresh full process-start budget before Stage 3.
+	if strictSteamReadiness {
+		readinessTimeout := req.StoreReadinessTimeout
+		if readinessTimeout <= 0 && m.gamesConfig != nil {
+			_, readinessTimeout = m.gamesConfig.GetStartupTimeouts()
+		}
+		if readinessTimeout <= 0 && m.starter != nil {
+			_, readinessTimeout = m.starter.GetTimeouts()
+		}
+		if readinessTimeout <= 0 {
+			readinessTimeout = 60 * time.Second
+		}
+		now := time.Now().UTC()
+		readinessDeadline := now.Add(readinessTimeout)
+		extended, terr := process.FencedTransition(game.ID, m.configDir, launchID, opID, func(st *process.RuntimeState) error {
+			if st.Operation == nil || !now.Before(st.Operation.Deadline) {
+				return process.ErrFencingViolation
+			}
+			st.Operation.Deadline = readinessDeadline
+			st.ProcessStartDeadline = readinessDeadline
+			return nil
+		})
+		if terr != nil {
+			if errors.Is(terr, process.ErrFencingViolation) || errors.Is(terr, process.ErrNoRuntimeClaim) {
+				return nil, failWithWarnings(m.SupersededStartRefusal(game.ID))
+			}
+			return nil, failWithWarnings(occupiedClaimRefusal(game.ID, "the Steam readiness deadline could not be persisted", terr))
+		}
+		if extended != nil {
+			runtimeState = *extended
+		}
+
+		readiness := steam.EnsureFunctionalReadinessWithin(readinessTimeout)
+		if !readiness.Ready {
+			return nil, failWithWarnings(&StoreClientNotReadyError{
+				Store: "steam", Reason: string(readiness.Reason), Stage: string(readiness.Stage),
+				Detail: readiness.Detail, Waited: readiness.Waited, Timeout: readiness.Timeout,
+				Retryable: readiness.Retryable, ProcessStarted: false,
+			})
+		}
+
+		spawnDeadline := time.Now().UTC().Add(startBudget)
+		restamped, rerr := process.FencedTransition(game.ID, m.configDir, launchID, opID, func(st *process.RuntimeState) error {
+			if st.Operation == nil || !time.Now().Before(st.Operation.Deadline) {
+				return process.ErrFencingViolation
+			}
+			st.Operation.Deadline = spawnDeadline
+			st.ProcessStartDeadline = spawnDeadline
+			return nil
+		})
+		if rerr != nil {
+			if errors.Is(rerr, process.ErrFencingViolation) || errors.Is(rerr, process.ErrNoRuntimeClaim) {
+				return nil, failWithWarnings(m.SupersededStartRefusal(game.ID))
+			}
+			return nil, failWithWarnings(occupiedClaimRefusal(game.ID, "the process-start deadline could not be restored after Steam became ready", rerr))
+		}
+		if restamped != nil {
+			runtimeState = *restamped
 		}
 	}
 

@@ -49,6 +49,10 @@ type options struct {
 }
 
 func main() {
+	if handled, exitCode := steam.RunReadinessProbeChild(os.Args[1:], os.Stdout); handled {
+		os.Exit(exitCode)
+	}
+
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	if len(os.Args) < 2 {

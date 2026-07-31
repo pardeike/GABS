@@ -66,6 +66,29 @@ func (e *EndpointUnavailableError) Error() string {
 
 func (e *EndpointUnavailableError) Unwrap() error { return e.Err }
 
+// StoreClientNotReadyError is the typed, pre-spawn failure from a strict
+// store-client readiness gate. No workload process exists when this is
+// returned, so the error is environment-class and excluded from launch-history
+// mutation (design/05, design/08).
+type StoreClientNotReadyError struct {
+	Store          string
+	Reason         string
+	Stage          string
+	Detail         string
+	Waited         time.Duration
+	Timeout        time.Duration
+	Retryable      bool
+	ProcessStarted bool
+}
+
+func (e *StoreClientNotReadyError) Error() string {
+	detail := ""
+	if e.Detail != "" {
+		detail = ": " + e.Detail
+	}
+	return fmt.Sprintf("%s client is not ready at %s (%s)%s", e.Store, e.Stage, e.Reason, detail)
+}
+
 // GameAlreadyActiveError is the in-process fast-path refusal: this server
 // already tracks a running controller for the game (never reached by a one-shot
 // CLI, whose in-process registry is empty).

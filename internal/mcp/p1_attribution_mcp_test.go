@@ -116,7 +116,7 @@ func TestFinalizerAttributesEveryStableFailureCode(t *testing.T) {
 		"timeout_out_of_range", "launch_spec_unresolvable", "profiles_not_configured",
 		"profile_not_found", "launch_input_not_declared", "launch_input_invalid",
 		"launch_mode_incompatible", "already_running", "blocked_unknown_state",
-		"external_instance_detected", "spawn_failed", "exited_during_start", "unobserved",
+		"external_instance_detected", "store_client_not_ready", "spawn_failed", "exited_during_start", "unobserved",
 		"operation_in_progress", "kill_unsupported", "stop_unsupported",
 		"termination_unverified", "stale_bridge_credential", "endpoint_unavailable",
 		"spec_too_large", "action_failed", "action_timed_out", "action_succeeded_running",

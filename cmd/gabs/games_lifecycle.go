@@ -248,6 +248,19 @@ func cliStartFailureText(err error, game config.GameConfig) (string, string) {
 	if errors.As(err, &active) {
 		return "already_running", active.ToolMessage(game)
 	}
+	var readiness *lifecycle.StoreClientNotReadyError
+	if errors.As(err, &readiness) {
+		message := fmt.Sprintf("%s readiness for '%s' could not be proven at %s (%s); no game process was started", readiness.Store, game.ID, readiness.Stage, readiness.Reason)
+		if readiness.Retryable {
+			message += "; retry the same command after the client settles (the configured startup timeout independently caps readiness)"
+		} else {
+			message += "; the installed client library or readiness helper must become usable before retrying the same command"
+		}
+		if readiness.Detail != "" {
+			message += ": " + readiness.Detail
+		}
+		return "store_client_not_ready", message
+	}
 	var epErr *lifecycle.EndpointUnavailableError
 	if errors.As(err, &epErr) {
 		// The exhaustive code list has only endpoint_unavailable; a cache

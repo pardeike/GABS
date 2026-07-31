@@ -18,6 +18,8 @@ type spyMaterializeController struct {
 	resolvedExe, resolvedCwd string
 	configDir, gameID        string
 	captured                 *process.RuntimeContextDigests
+	startCalled              bool
+	deadlineAtStart          time.Time
 }
 
 func (c *spyMaterializeController) Configure(spec process.LaunchSpec) error { return nil }
@@ -26,12 +28,16 @@ func (c *spyMaterializeController) MaterializeSpawnSpec() (string, string, error
 	return c.resolvedExe, c.resolvedCwd, nil
 }
 func (c *spyMaterializeController) Start() error {
+	c.startCalled = true
 	// computeSpawnDigests and the FencedTransition that persists them run BEFORE
 	// the starter calls Start(). Capture the persisted digests, then fail fast so
 	// the start ends here — the claim is cleaned, but we already have what we
 	// need to prove what was digested.
 	if st, _ := process.LoadRuntimeState(c.gameID, c.configDir); st != nil {
 		c.captured = st.ContextDigests
+		if st.Operation != nil {
+			c.deadlineAtStart = st.Operation.Deadline
+		}
 	}
 	return &process.ProcessError{Type: process.ProcessErrorTypeStart, Context: "spy stop", Err: errors.New("captured")}
 }
@@ -61,6 +67,8 @@ func TestStartMaterializesSteamManagedBeforeDigesting(t *testing.T) {
 	// assistance (no real side effects).
 	restore := steam.SetClientControlForTesting(nil, func() bool { return true }, 0, 0)
 	defer restore()
+	readyRestore := steam.SetFunctionalReadinessForTesting(false, nil)
+	defer readyRestore()
 
 	dir := t.TempDir()
 	appDir := t.TempDir() // the RESOLVED app working dir — distinct from os.Getwd()
@@ -89,5 +97,99 @@ func TestStartMaterializesSteamManagedBeforeDigesting(t *testing.T) {
 	del := process.EvaluateContextDelivery(spy.captured, &process.ObservedContext{Cwd: appDir})
 	if del.Channels[process.DeliveryChannelCwd] != process.DeliveryVerified {
 		t.Fatalf("the resolved app dir must verify against the persisted digest (materialize-before-digest); got %+v", del.Channels)
+	}
+}
+
+func TestMacSteamManagedReadinessFailureReleasesClaimWithoutSpawnOrHistory(t *testing.T) {
+	dir := t.TempDir()
+	appDir := t.TempDir()
+	spy := &spyMaterializeController{
+		resolvedExe: appDir + "/game", resolvedCwd: appDir,
+		configDir: dir, gameID: "factory",
+	}
+	m := NewManager(util.NewLogger("error"), dir, "inst-ready-fail", &config.GamesConfig{
+		Version:  "1.0",
+		Timeouts: &config.TimeoutsConfig{Startup: &config.StartupTimeoutsConfig{GABPConnectSeconds: 7}},
+	}, 0,
+		process.NewSerializedStarterForTesting(), func() process.ControllerInterface { return spy })
+
+	var receivedTimeout time.Duration
+	var readinessObservedAt, deadlineDuringReadiness, processDeadlineDuringReadiness time.Time
+	restore := steam.SetFunctionalReadinessForTesting(true, func(timeout time.Duration) steam.ReadinessResult {
+		receivedTimeout = timeout
+		readinessObservedAt = time.Now()
+		if claim, _ := process.LoadRuntimeState("factory", dir); claim != nil && claim.Operation != nil {
+			deadlineDuringReadiness = claim.Operation.Deadline
+			processDeadlineDuringReadiness = claim.ProcessStartDeadline
+		}
+		return steam.ReadinessResult{
+			Reason: steam.ReadinessReasonTimeout, Stage: steam.ReadinessStageGlobalUser,
+			Detail: "global user unavailable", Retryable: true,
+			Waited: 25 * time.Millisecond, Timeout: timeout,
+		}
+	})
+	t.Cleanup(restore)
+
+	_, err := m.Start(StartRequest{
+		Game:       config.GameConfig{ID: "factory", Name: "Factory", LaunchMode: "SteamManaged", Target: "123456"},
+		LaunchSpec: process.LaunchSpec{GameId: "factory", Mode: "SteamManaged", PathOrId: "123456"},
+	})
+	var readinessErr *StoreClientNotReadyError
+	if !errors.As(err, &readinessErr) {
+		t.Fatalf("Start error = %T %v, want StoreClientNotReadyError", err, err)
+	}
+	if readinessErr.Reason != string(steam.ReadinessReasonTimeout) || !readinessErr.Retryable || readinessErr.ProcessStarted {
+		t.Fatalf("readiness error = %+v", readinessErr)
+	}
+	if receivedTimeout != 7*time.Second {
+		t.Fatalf("omitted readiness timeout = %v, want configured GABP timeout 7s", receivedTimeout)
+	}
+	if deadlineDuringReadiness.Sub(readinessObservedAt) < 6*time.Second || !deadlineDuringReadiness.Equal(processDeadlineDuringReadiness) {
+		t.Fatalf("claim was not fenced to the readiness deadline: operation=%v process=%v", deadlineDuringReadiness, processDeadlineDuringReadiness)
+	}
+	if spy.startCalled {
+		t.Fatal("the game process was started before Steam readiness was proven")
+	}
+	if claim, loadErr := process.LoadRuntimeState("factory", dir); loadErr != nil || claim != nil {
+		t.Fatalf("fresh claim must be released: claim=%+v err=%v", claim, loadErr)
+	}
+	history, historyErr := process.LoadHistory("factory", dir)
+	if historyErr != nil {
+		t.Fatal(historyErr)
+	}
+	if len(history.Profiles) != 0 {
+		t.Fatalf("pre-spawn readiness failure mutated history: %+v", history.Profiles)
+	}
+}
+
+func TestMacSteamManagedReadinessSuccessRestampsFullProcessBudget(t *testing.T) {
+	dir := t.TempDir()
+	appDir := t.TempDir()
+	spy := &spyMaterializeController{
+		resolvedExe: appDir + "/game", resolvedCwd: appDir,
+		configDir: dir, gameID: "adventure",
+	}
+	m := NewManager(util.NewLogger("error"), dir, "inst-ready-success", &config.GamesConfig{Version: "1.0"}, 0,
+		process.NewSerializedStarterForTesting(), func() process.ControllerInterface { return spy })
+	restore := steam.SetFunctionalReadinessForTesting(true, func(timeout time.Duration) steam.ReadinessResult {
+		time.Sleep(25 * time.Millisecond)
+		return steam.ReadinessResult{Ready: true, Stage: steam.ReadinessStageGlobalUser, Waited: 25 * time.Millisecond, Timeout: timeout}
+	})
+	t.Cleanup(restore)
+
+	probeFinishedAt := time.Now().Add(25 * time.Millisecond)
+	_, err := m.Start(StartRequest{
+		Game:                  config.GameConfig{ID: "adventure", Name: "Adventure", LaunchMode: "SteamManaged", Target: "123456"},
+		LaunchSpec:            process.LaunchSpec{GameId: "adventure", Mode: "SteamManaged", PathOrId: "123456"},
+		StoreReadinessTimeout: 50 * time.Millisecond,
+	})
+	if err == nil {
+		t.Fatal("the spy fails spawn after capturing the restamped deadline")
+	}
+	if !spy.startCalled {
+		t.Fatal("ready SteamManaged start never reached process spawn")
+	}
+	if remaining := spy.deadlineAtStart.Sub(probeFinishedAt); remaining < 9*time.Second {
+		t.Fatalf("readiness consumed the normal process-start budget: remaining=%v deadline=%v", remaining, spy.deadlineAtStart)
 	}
 }

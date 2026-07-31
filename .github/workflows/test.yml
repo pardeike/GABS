@@ -68,3 +68,30 @@ jobs:
 
       - name: Run process, lifecycle, and CLI tests
         run: go test -v ./internal/process/ ./internal/lifecycle/ ./cmd/gabs/
+
+  # macOS owns the SteamManaged native readiness probe. Run the whole suite
+  # with the same no-CGO constraint used for release binaries so the purego
+  # client-library path cannot silently acquire a build-machine dependency.
+  test-macos:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@v6.3.0
+        with:
+          go-version: '1.22'
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build without CGO
+        env:
+          CGO_ENABLED: '0'
+        run: go build ./...
+
+      - name: Run tests without CGO
+        env:
+          CGO_ENABLED: '0'
+        run: go test -v ./...

@@ -3,6 +3,7 @@ module github.com/pardeike/gabs
 go 1.22
 
 require (
+	github.com/ebitengine/purego v0.10.2
 	github.com/google/uuid v1.6.0
 	github.com/pardeike/gabp-runtime v1.0.0
 	go.uber.org/zap v1.27.0

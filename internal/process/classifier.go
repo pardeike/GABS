@@ -67,7 +67,7 @@ func Classify(code string, ctx ClassifyContext) Classification {
 		return Classification{Class: CauseState}
 
 	// environment — host/store/network state; config edits cannot fix it.
-	case "spawn_failed", "endpoint_unavailable", "stale_bridge_credential",
+	case "spawn_failed", "store_client_not_ready", "endpoint_unavailable", "stale_bridge_credential",
 		"action_failed", "action_timed_out":
 		return Classification{Class: CauseEnvironment}
 

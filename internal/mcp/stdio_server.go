@@ -22,6 +22,7 @@ import (
 	"github.com/pardeike/gabs/internal/launch"
 	"github.com/pardeike/gabs/internal/lifecycle"
 	"github.com/pardeike/gabs/internal/process"
+	"github.com/pardeike/gabs/internal/steam"
 	"github.com/pardeike/gabs/internal/util"
 	"github.com/pardeike/gabs/internal/version"
 )
@@ -1168,7 +1169,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				},
 				"timeout": map[string]interface{}{
 					"type":        "integer",
-					"description": "Optional total GABP startup connection budget in seconds. The MCP call waits only for a bounded initial slice, then GABS continues connecting in the background.",
+					"description": "Optional total GABP startup connection budget in seconds. On macOS SteamManaged launches it independently caps the pre-spawn Steam readiness wait; after readiness succeeds the full GABP budget still applies. The MCP call waits only for a bounded initial GABP slice, then GABS continues connecting in the background.",
 				},
 				"resetEndpoint": map[string]interface{}{
 					"type":        "boolean",
@@ -1412,6 +1413,50 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				addResolvedContext(structured, resolved)
 				return &ToolResult{
 					Content:           []Content{{Type: "text", Text: appendWarningsText(fmt.Sprintf("'%s' exited during start (exit code %d). This is attributed to the workload; read the output tail below for the exact cause — a game crash, missing/corrupt data or save, mod loader failure, DRM refusing to run outside its launcher, anti-cheat rejecting a modified process, a required online login, or (if this launch is a wrapper/container) the wrapper's own error. Output tail:\n%s", game.ID, exitedErr.ExitCode, exitedErr.Tail), exitedErr.Warnings)}},
+					IsError:           true,
+					StructuredContent: structured,
+				}, nil
+			}
+			var readinessErr *lifecycle.StoreClientNotReadyError
+			if errors.As(err, &readinessErr) {
+				structured := map[string]interface{}{
+					"code":           "store_client_not_ready",
+					"gameId":         game.ID,
+					"store":          readinessErr.Store,
+					"reason":         readinessErr.Reason,
+					"readinessStage": readinessErr.Stage,
+					"waitedMs":       readinessErr.Waited.Milliseconds(),
+					"timeoutMs":      readinessErr.Timeout.Milliseconds(),
+					"retryable":      readinessErr.Retryable,
+					"processStarted": false,
+				}
+				if readinessErr.Detail != "" {
+					structured["detail"] = readinessErr.Detail
+				}
+				addAttemptWarnings(structured)
+				s.finalizeStartFailure(structured, *game, hctx, "store_client_not_ready")
+				addValidationWarnings(structured, validationWarnings)
+				addResolvedContext(structured, resolved)
+				retryArgs := map[string]interface{}{"gameId": game.ID}
+				if resolved != nil && resolved.Profile != "" {
+					retryArgs["profile"] = resolved.Profile
+				}
+				retryAction := mcpNextAction("games_start", retryArgs, "Repeat the original start request with the same profile and launch inputs; launch-input values are intentionally not echoed. A longer timeout may help only for readiness_timeout.")
+				if resolved != nil && len(resolved.AppliedInputs) > 0 {
+					retryAction["preserveOriginalLaunchInputs"] = resolved.AppliedInputs
+				}
+				structured["nextActions"] = []map[string]interface{}{retryAction}
+				message := fmt.Sprintf("Steam readiness for '%s' could not be proven at stage %s (%s); no game process was started. Repeat the original games_start request unchanged after Steam settles", game.ID, readinessErr.Stage, readinessErr.Reason)
+				if readinessErr.Reason == string(steam.ReadinessReasonTimeout) {
+					message += "; a longer timeout may help if Steam is still starting or updating"
+				} else {
+					message += "; the installed Steam client library or readiness helper must become usable before retrying"
+				}
+				if readinessErr.Detail != "" {
+					message += ". Detail: " + readinessErr.Detail
+				}
+				return &ToolResult{
+					Content:           []Content{{Type: "text", Text: appendWarningsText(message+".", attemptWarnings)}},
 					IsError:           true,
 					StructuredContent: structured,
 				}, nil
@@ -5088,13 +5133,14 @@ func (s *Server) startGame(game config.GameConfig, backoffMin, backoffMax time.D
 	// frontend stops after Stage 4 with started_attachment_deferred.
 	launchSpec := s.launchSpecWithRuntimeDir(launchSpecFromResolved(game, resolved))
 	sr, err := s.lifecycle().Start(lifecycle.StartRequest{
-		Game:               game,
-		LaunchSpec:         launchSpec,
-		Resolved:           resolved,
-		ResetEndpoint:      resetEndpoint,
-		StartupGABPTimeout: startupGABPTimeout,
-		HistoryContext:     hc,
-		BridgeBound:        s.bridgeBound(game.ID),
+		Game:                  game,
+		LaunchSpec:            launchSpec,
+		Resolved:              resolved,
+		ResetEndpoint:         resetEndpoint,
+		StartupGABPTimeout:    startupGABPTimeout,
+		StoreReadinessTimeout: startupGABPTimeout,
+		HistoryContext:        hc,
+		BridgeBound:           s.bridgeBound(game.ID),
 		CheckInProcessActive: func() (lifecycle.InProcessFacts, bool) {
 			s.mu.Lock()
 			defer s.mu.Unlock()
