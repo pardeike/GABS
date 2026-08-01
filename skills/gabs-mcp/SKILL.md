@@ -79,7 +79,7 @@ Edit GABS config only when **(a)** the failure's `causeClass` is `config`, **(b)
 
 ## Recovery
 
-- For `store_client_not_ready`, do not use `games_connect` or edit the config — no game process or runtime claim exists. Reissue the original `games_start` request unchanged after Steam settles, preserving launch-input values from the original call rather than reconstructing them from diagnostics (GABS intentionally returns input names only).
+- For `store_client_not_ready`, do not use `games_connect` or edit the config — no game process or runtime claim exists. On macOS `SteamManaged`, GABS has already waited for Steam's configured-app subscription/install state and a successful process-local Steamworks API initialization, not merely its process or global-user connection. Reissue the original `games_start` request unchanged after Steam settles, preserving launch-input values from the original call rather than reconstructing them from diagnostics (GABS intentionally returns input names only).
 - If no bridge tools are listed, call `games_status` first, then `games_connect` if the game is running.
 - If GABP disconnected, call `games_status` to inspect the last disconnect note, then `games_connect` after the bridge is ready.
 - If a client rejected `tools/list`, check whether `stripOutputSchema` is enabled in GABS config.

@@ -946,7 +946,18 @@ contract, not a scratchpad.
       transition persistence crosses the old readiness lease. The successor
       fence remains authoritative, and the fresh Stage 3/4 budget begins inside
       the successful restamp transition. A deterministic expired-lease regression
-      plus a non-flaky full-budget test cover the rule.)
+      plus a non-flaky full-budget test cover the rule. Live cold-start tracing
+      then disproved the original global-user criterion: Steam exposed that
+      handle before loading app/library state, allowing the game to spawn too
+      early. The corrected proof is app-specific and additionally requires the
+      active user's read-only app-state interface to report the configured App ID
+      subscribed and installed. A second live cold-start trace showed even that
+      state can lead Steam's normal game API registration by a short interval;
+      the final proof therefore performs a balanced process-local Steamworks API
+      init/shutdown for the validated explicit ID. The helper receives that
+      declared ID explicitly while ambient App-ID variables remain scrubbed.
+      The parent accepts success only at the terminal app-state stage, so an
+      intermediate ready observation cannot reintroduce the early-spawn race.)
 
 ## Milestone 3 — CLI + docs + skill
 

@@ -93,8 +93,10 @@ Examples of `stopProcessName`:
 
 For Steam bridge games, prefer `SteamManaged`; it resolves the Steam app
 manifest to the installed executable and starts Steam if needed. On macOS it
-also waits until Steam's app-neutral IPC/global-user interface is usable before
-spawning the game. If `games_start` returns `store_client_not_ready`, no game
+also waits until Steam's IPC/global-user interface reports the configured app
+both subscribed and installed and a process-local Steamworks API initialization
+succeeds before spawning the game. If `games_start`
+returns `store_client_not_ready`, no game
 process was created: repeat the same call after Steam settles; only
 `readiness_timeout` is expected to benefit from a larger `timeout`. Still verify
 `games_status`: if it reports `process-bridge-environment-missing`, the final

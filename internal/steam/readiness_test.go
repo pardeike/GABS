@@ -15,12 +15,17 @@ func TestFunctionalReadinessColdClientOpensOnceAndEventuallySucceeds(t *testing.
 	probes := []probeObservation{
 		{State: probeStateUnavailable, Stage: ReadinessStageClientLibrary, Detail: "client library not present yet"},
 		{State: probeStateNotReady, Stage: ReadinessStageIPCPipe, Detail: "pipe unavailable"},
-		{State: probeStateReady, Stage: ReadinessStageGlobalUser},
+		{State: probeStateNotReady, Stage: ReadinessStageSteamAPI, Detail: "Steamworks API initialization failed"},
+		{State: probeStateNotReady, Stage: ReadinessStageAppState, Detail: "app state unavailable"},
+		{State: probeStateReady, Stage: ReadinessStageAppState},
 	}
 	probeCalls := 0
 	openCalls := 0
-	result := ensureFunctionalReadinessWithin(250*time.Millisecond, readinessDependencies{
-		probe: func(time.Duration) probeObservation {
+	result := ensureFunctionalReadinessWithin("123456", 250*time.Millisecond, readinessDependencies{
+		probe: func(appID string, _ time.Duration) probeObservation {
+			if appID != "123456" {
+				t.Fatalf("probe app ID = %q", appID)
+			}
 			idx := probeCalls
 			probeCalls++
 			if idx >= len(probes) {
@@ -38,18 +43,44 @@ func TestFunctionalReadinessColdClientOpensOnceAndEventuallySucceeds(t *testing.
 	if !result.Ready || result.Reason != "" {
 		t.Fatalf("readiness = %+v, want ready", result)
 	}
-	if probeCalls != 3 {
-		t.Fatalf("probe calls = %d, want 3 fresh probes", probeCalls)
+	if result.Stage != ReadinessStageAppState {
+		t.Fatalf("ready stage = %q, want %q", result.Stage, ReadinessStageAppState)
+	}
+	if probeCalls != 5 {
+		t.Fatalf("probe calls = %d, want 5 fresh probes", probeCalls)
 	}
 	if openCalls != 1 {
 		t.Fatalf("Steam open calls = %d, want exactly one", openCalls)
 	}
 }
 
+func TestFunctionalReadinessDoesNotAcceptIntermediateReadyStage(t *testing.T) {
+	probes := []probeObservation{
+		{State: probeStateReady, Stage: ReadinessStageGlobalUser},
+		{State: probeStateReady, Stage: ReadinessStageAppState},
+	}
+	probeCalls := 0
+	result := ensureFunctionalReadinessWithin("123456", 100*time.Millisecond, readinessDependencies{
+		probe: func(string, time.Duration) probeObservation {
+			observation := probes[probeCalls]
+			probeCalls++
+			return observation
+		},
+		openClient:   func() error { return nil },
+		pollInterval: time.Millisecond,
+	})
+	if !result.Ready || result.Stage != ReadinessStageAppState {
+		t.Fatalf("readiness = %+v, want terminal app-state proof", result)
+	}
+	if probeCalls != 2 {
+		t.Fatalf("probe calls = %d, want intermediate ready stage rejected", probeCalls)
+	}
+}
+
 func TestFunctionalReadinessTimeoutPrefersValidNotReadyEvidence(t *testing.T) {
-	result := ensureFunctionalReadinessWithin(20*time.Millisecond, readinessDependencies{
-		probe: func(time.Duration) probeObservation {
-			return probeObservation{State: probeStateNotReady, Stage: ReadinessStageGlobalUser, Detail: "global user unavailable"}
+	result := ensureFunctionalReadinessWithin("123456", 20*time.Millisecond, readinessDependencies{
+		probe: func(string, time.Duration) probeObservation {
+			return probeObservation{State: probeStateNotReady, Stage: ReadinessStageSteamAPI, Detail: "Steamworks API initialization failed"}
 		},
 		openClient:   func() error { return nil },
 		pollInterval: time.Millisecond,
@@ -58,8 +89,8 @@ func TestFunctionalReadinessTimeoutPrefersValidNotReadyEvidence(t *testing.T) {
 	if result.Ready || result.Reason != ReadinessReasonTimeout || !result.Retryable {
 		t.Fatalf("readiness = %+v, want retryable timeout", result)
 	}
-	if result.Stage != ReadinessStageGlobalUser {
-		t.Fatalf("stage = %q, want %q", result.Stage, ReadinessStageGlobalUser)
+	if result.Stage != ReadinessStageSteamAPI {
+		t.Fatalf("stage = %q, want %q", result.Stage, ReadinessStageSteamAPI)
 	}
 	if result.Waited <= 0 || result.Timeout != 20*time.Millisecond {
 		t.Fatalf("timing evidence missing: %+v", result)
@@ -67,8 +98,8 @@ func TestFunctionalReadinessTimeoutPrefersValidNotReadyEvidence(t *testing.T) {
 }
 
 func TestFunctionalReadinessUnavailableWhenNoValidProbeRan(t *testing.T) {
-	result := ensureFunctionalReadinessWithin(15*time.Millisecond, readinessDependencies{
-		probe: func(time.Duration) probeObservation {
+	result := ensureFunctionalReadinessWithin("123456", 15*time.Millisecond, readinessDependencies{
+		probe: func(string, time.Duration) probeObservation {
 			return probeObservation{State: probeStateUnavailable, Stage: ReadinessStageClientLibrary, Detail: "helper crashed"}
 		},
 		openClient:   func() error { return nil },
@@ -84,10 +115,10 @@ func TestFunctionalReadinessUnavailableWhenNoValidProbeRan(t *testing.T) {
 }
 
 func TestFunctionalReadinessNeverAcceptsProofAfterDeadline(t *testing.T) {
-	result := ensureFunctionalReadinessWithin(10*time.Millisecond, readinessDependencies{
-		probe: func(budget time.Duration) probeObservation {
+	result := ensureFunctionalReadinessWithin("123456", 10*time.Millisecond, readinessDependencies{
+		probe: func(_ string, budget time.Duration) probeObservation {
 			time.Sleep(budget + 5*time.Millisecond)
-			return probeObservation{State: probeStateReady, Stage: ReadinessStageGlobalUser}
+			return probeObservation{State: probeStateReady, Stage: ReadinessStageAppState}
 		},
 		openClient:   func() error { return nil },
 		pollInterval: time.Millisecond,
@@ -99,13 +130,15 @@ func TestFunctionalReadinessNeverAcceptsProofAfterDeadline(t *testing.T) {
 
 func TestReadinessProbeChildEmitsBoundedJSONAndNoOtherCLIOutput(t *testing.T) {
 	previous := nativeReadinessProbe
-	nativeReadinessProbe = func() probeObservation {
+	var receivedAppID uint32
+	nativeReadinessProbe = func(appID uint32) probeObservation {
+		receivedAppID = appID
 		return probeObservation{State: probeStateNotReady, Stage: ReadinessStageIPCPipe, Detail: "not yet"}
 	}
 	t.Cleanup(func() { nativeReadinessProbe = previous })
 
 	var out bytes.Buffer
-	handled, exitCode := RunReadinessProbeChild([]string{readinessProbeArgument}, &out)
+	handled, exitCode := RunReadinessProbeChild([]string{readinessProbeArgument, "123456"}, &out)
 	if !handled || exitCode != 0 {
 		t.Fatalf("handled=%v exit=%d", handled, exitCode)
 	}
@@ -118,6 +151,22 @@ func TestReadinessProbeChildEmitsBoundedJSONAndNoOtherCLIOutput(t *testing.T) {
 	}
 	if got.State != probeStateNotReady || got.Stage != ReadinessStageIPCPipe {
 		t.Fatalf("decoded observation = %+v", got)
+	}
+	if receivedAppID != 123456 {
+		t.Fatalf("native probe app ID = %d, want 123456", receivedAppID)
+	}
+
+	for _, invalid := range [][]string{
+		{readinessProbeArgument},
+		{readinessProbeArgument, "not-an-id"},
+		{readinessProbeArgument, "0"},
+		{readinessProbeArgument, "123456", "extra"},
+	} {
+		var invalidOut bytes.Buffer
+		handled, exitCode = RunReadinessProbeChild(invalid, &invalidOut)
+		if !handled || exitCode == 0 || invalidOut.Len() != 0 {
+			t.Fatalf("invalid child args %q: handled=%v exit=%d output=%q", invalid, handled, exitCode, invalidOut.String())
+		}
 	}
 
 	var ignored bytes.Buffer
@@ -143,6 +192,31 @@ func TestReadinessProbeEnvironmentScrubsSteamAppIdentity(t *testing.T) {
 	}
 	if !strings.Contains(joined, "PATH=/bin") || !strings.Contains(joined, "OTHER=value") {
 		t.Fatalf("unrelated environment was not preserved: %q", joined)
+	}
+}
+
+func TestReadinessAppIDMustBeNonZeroDecimalUint32(t *testing.T) {
+	for _, valid := range []string{"1", "123456", "4294967295"} {
+		if _, err := parseReadinessAppID(valid); err != nil {
+			t.Fatalf("valid app ID %q: %v", valid, err)
+		}
+	}
+	for _, invalid := range []string{"", "0", "-1", " 123456", "123456 ", "not-an-id", "4294967296"} {
+		if _, err := parseReadinessAppID(invalid); err == nil {
+			t.Fatalf("invalid app ID %q was accepted", invalid)
+		}
+	}
+}
+
+func TestDefaultReadinessProbeCommandCarriesExplicitAppID(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd, err := defaultReadinessProbeCommand(ctx, "123456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cmd.Args) != 3 || cmd.Args[1] != readinessProbeArgument || cmd.Args[2] != "123456" {
+		t.Fatalf("helper argv = %q", cmd.Args)
 	}
 }
 
@@ -172,10 +246,13 @@ func TestReadinessProbeProcessContainsHelperFailuresAndOutput(t *testing.T) {
 		{name: "oversized", scenario: "oversized", detail: "invalid readiness probe output", timeout: 3 * time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			newReadinessProbeCommand = func(ctx context.Context) (*exec.Cmd, error) {
+			newReadinessProbeCommand = func(ctx context.Context, appID string) (*exec.Cmd, error) {
+				if appID != "123456" {
+					t.Fatalf("helper app ID = %q", appID)
+				}
 				return exec.CommandContext(ctx, os.Args[0], "-test.run=TestReadinessProbeProcessHelper", "--", tc.scenario), nil
 			}
-			observation := runReadinessProbeProcess(tc.timeout)
+			observation := runReadinessProbeProcess("123456", tc.timeout)
 			if observation.State != probeStateUnavailable || observation.Stage != ReadinessStageClientLibrary {
 				t.Fatalf("observation = %+v", observation)
 			}

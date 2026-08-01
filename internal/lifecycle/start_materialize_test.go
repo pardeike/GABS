@@ -113,9 +113,11 @@ func TestMacSteamManagedReadinessFailureReleasesClaimWithoutSpawnOrHistory(t *te
 	}, 0,
 		process.NewSerializedStarterForTesting(), func() process.ControllerInterface { return spy })
 
+	var receivedAppID string
 	var receivedTimeout time.Duration
 	var readinessObservedAt, deadlineDuringReadiness, processDeadlineDuringReadiness time.Time
-	restore := steam.SetFunctionalReadinessForTesting(true, func(timeout time.Duration) steam.ReadinessResult {
+	restore := steam.SetFunctionalReadinessForTesting(true, func(appID string, timeout time.Duration) steam.ReadinessResult {
+		receivedAppID = appID
 		receivedTimeout = timeout
 		readinessObservedAt = time.Now()
 		if claim, _ := process.LoadRuntimeState("factory", dir); claim != nil && claim.Operation != nil {
@@ -123,8 +125,8 @@ func TestMacSteamManagedReadinessFailureReleasesClaimWithoutSpawnOrHistory(t *te
 			processDeadlineDuringReadiness = claim.ProcessStartDeadline
 		}
 		return steam.ReadinessResult{
-			Reason: steam.ReadinessReasonTimeout, Stage: steam.ReadinessStageGlobalUser,
-			Detail: "global user unavailable", Retryable: true,
+			Reason: steam.ReadinessReasonTimeout, Stage: steam.ReadinessStageSteamAPI,
+			Detail: "Steamworks API initialization failed", Retryable: true,
 			Waited: 25 * time.Millisecond, Timeout: timeout,
 		}
 	})
@@ -143,6 +145,9 @@ func TestMacSteamManagedReadinessFailureReleasesClaimWithoutSpawnOrHistory(t *te
 	}
 	if receivedTimeout != 7*time.Second {
 		t.Fatalf("omitted readiness timeout = %v, want configured GABP timeout 7s", receivedTimeout)
+	}
+	if receivedAppID != "123456" {
+		t.Fatalf("readiness app ID = %q, want configured target", receivedAppID)
 	}
 	if deadlineDuringReadiness.Sub(readinessObservedAt) < 6*time.Second || !deadlineDuringReadiness.Equal(processDeadlineDuringReadiness) {
 		t.Fatalf("claim was not fenced to the readiness deadline: operation=%v process=%v", deadlineDuringReadiness, processDeadlineDuringReadiness)
@@ -172,10 +177,13 @@ func TestMacSteamManagedReadinessSuccessRestampsFullProcessBudget(t *testing.T) 
 	m := NewManager(util.NewLogger("error"), dir, "inst-ready-success", &config.GamesConfig{Version: "1.0"}, 0,
 		process.NewSerializedStarterForTesting(), func() process.ControllerInterface { return spy })
 	var probeFinishedAt time.Time
-	restore := steam.SetFunctionalReadinessForTesting(true, func(timeout time.Duration) steam.ReadinessResult {
+	restore := steam.SetFunctionalReadinessForTesting(true, func(appID string, timeout time.Duration) steam.ReadinessResult {
+		if appID != "123456" {
+			t.Fatalf("readiness app ID = %q", appID)
+		}
 		time.Sleep(25 * time.Millisecond)
 		probeFinishedAt = time.Now()
-		return steam.ReadinessResult{Ready: true, Stage: steam.ReadinessStageGlobalUser, Waited: 25 * time.Millisecond, Timeout: timeout}
+		return steam.ReadinessResult{Ready: true, Stage: steam.ReadinessStageAppState, Waited: 25 * time.Millisecond, Timeout: timeout}
 	})
 	t.Cleanup(restore)
 
@@ -206,15 +214,18 @@ func TestMacSteamManagedReadinessSuccessRestampsExpiredLeaseByFencingIdentity(t 
 		process.NewSerializedStarterForTesting(), func() process.ControllerInterface { return spy })
 
 	var expireErr error
-	restore := steam.SetFunctionalReadinessForTesting(true, func(timeout time.Duration) steam.ReadinessResult {
+	restore := steam.SetFunctionalReadinessForTesting(true, func(appID string, timeout time.Duration) steam.ReadinessResult {
+		if appID != "123456" {
+			t.Fatalf("readiness app ID = %q", appID)
+		}
 		claim, err := process.LoadRuntimeState("factory", dir)
 		if err != nil {
 			expireErr = err
-			return steam.ReadinessResult{Ready: true, Stage: steam.ReadinessStageGlobalUser, Timeout: timeout}
+			return steam.ReadinessResult{Ready: true, Stage: steam.ReadinessStageAppState, Timeout: timeout}
 		}
 		if claim == nil || claim.Operation == nil {
 			expireErr = errors.New("readiness claim or operation is missing")
-			return steam.ReadinessResult{Ready: true, Stage: steam.ReadinessStageGlobalUser, Timeout: timeout}
+			return steam.ReadinessResult{Ready: true, Stage: steam.ReadinessStageAppState, Timeout: timeout}
 		}
 		_, expireErr = process.FencedTransition("factory", dir, claim.LaunchID, claim.Operation.OperationID, func(st *process.RuntimeState) error {
 			expired := time.Now().UTC().Add(-time.Second)
@@ -222,7 +233,7 @@ func TestMacSteamManagedReadinessSuccessRestampsExpiredLeaseByFencingIdentity(t 
 			st.ProcessStartDeadline = expired
 			return nil
 		})
-		return steam.ReadinessResult{Ready: true, Stage: steam.ReadinessStageGlobalUser, Timeout: timeout}
+		return steam.ReadinessResult{Ready: true, Stage: steam.ReadinessStageAppState, Timeout: timeout}
 	})
 	t.Cleanup(restore)
 

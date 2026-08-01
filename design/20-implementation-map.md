@@ -43,8 +43,9 @@ Where the two disagree, the spec wins.
   - `Controller.Start` performs no Steam assistance. Stage 2 owns the macOS
     SteamManaged functional-readiness gate immediately before spawning. Its
     native `steamclient.dylib` calls execute only in a hidden child invocation
-    of the current GABS binary; the parent bounds child runtime/output, opens
-    Steam once, polls with fresh children, and maps typed readiness evidence.
+    of the current GABS binary; the parent passes the configured App ID, bounds
+    child runtime/output, opens Steam once, polls with fresh children, and maps
+    typed pipe/global-user/app-state/Steamworks-init readiness evidence.
     The gate restamps the fenced operation/process-start deadline on success so
     readiness time cannot consume the normal spawn/verification budget.
   - URL modes (`SteamAppId`/`EpicAppId`): the tracked child is the
@@ -347,7 +348,7 @@ Where the two disagree, the spec wins.
   (definitively stopped). No poller goroutine.
 - Steam-client handling: URL modes and non-macOS behavior retain the
   best-effort process-name advisory. On macOS SteamManaged, prove an
-  app-neutral client-library pipe/global-user connection before spawn; failure
+  app-specific client-library pipe/global-user/app-state/API-init proof before spawn; failure
   is typed `store_client_not_ready`, releases the claim, and starts nothing.
 - Stop sequence: TryLock → read snapshot → persist phase=stopping (+
   deadline) → resolve action (profile hook → game hook → built-in) → run

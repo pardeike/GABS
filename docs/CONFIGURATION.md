@@ -191,8 +191,12 @@ passed to the game in this mode.
 
 On macOS, GABS does not infer readiness from the Steam process alone. Before a
 `SteamManaged` spawn it loads Steam's installed client library in an isolated
-helper process and proves that an app-neutral IPC pipe and global user can be
-created. The helper does not initialize a game API, set an App ID, or require
+helper process and proves that an IPC pipe and global user can be created. It
+then initializes a process-local Steamworks API for the configured App ID,
+verifies through that API that the active user reports the app both subscribed
+and installed, and shuts the API down before exiting. The helper receives the
+declared ID explicitly and derives no
+identity from ambient App-ID variables; it launches no game and does not require
 online mode. If the proof cannot complete, `games_start` returns
 `store_client_not_ready` with `processStarted: false`; the fresh runtime claim
 is released and the game is not launched. Repeat the same request after Steam

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -22,14 +23,17 @@ const (
 	ReadinessReasonProbeUnavailable ReadinessReason = "probe_unavailable"
 )
 
-// ReadinessStage identifies the furthest app-neutral Steam client interface
-// stage observed by the probe.
+// ReadinessStage identifies the furthest Steam client interface stage observed
+// by the app-specific probe.
 type ReadinessStage string
 
 const (
 	ReadinessStageClientLibrary ReadinessStage = "client_library"
 	ReadinessStageIPCPipe       ReadinessStage = "ipc_pipe"
 	ReadinessStageGlobalUser    ReadinessStage = "global_user"
+	ReadinessStageSteamAPI      ReadinessStage = "steam_api"
+	ReadinessStageAppInterface  ReadinessStage = "app_interface"
+	ReadinessStageAppState      ReadinessStage = "app_state"
 )
 
 // ReadinessResult is the complete parent-side readiness verdict. Durations are
@@ -80,16 +84,18 @@ var (
 func FunctionalReadinessSupported() bool { return functionalReadinessSupported() }
 
 // EnsureFunctionalReadinessWithin proves the installed Steam client's
-// app-neutral IPC/global-user interface within timeout. On production macOS
-// each probe is a hidden child invocation of the current GABS executable.
-func EnsureFunctionalReadinessWithin(timeout time.Duration) ReadinessResult {
-	return functionalReadinessProbe(timeout)
+// IPC/global-user interface, the configured app's subscription/install state,
+// and a balanced process-local Steamworks API initialization within timeout.
+// On production macOS each probe is a hidden child invocation of the current
+// GABS executable.
+func EnsureFunctionalReadinessWithin(appID string, timeout time.Duration) ReadinessResult {
+	return functionalReadinessProbe(appID, timeout)
 }
 
 // SetFunctionalReadinessForTesting overrides the platform gate and readiness
 // implementation. Tests using this process-global seam must not run in
 // parallel, matching the older Steam client-control seam in steam.go.
-func SetFunctionalReadinessForTesting(supported bool, probe func(time.Duration) ReadinessResult) func() {
+func SetFunctionalReadinessForTesting(supported bool, probe func(string, time.Duration) ReadinessResult) func() {
 	previousSupported := functionalReadinessSupported
 	previousProbe := functionalReadinessProbe
 	functionalReadinessSupported = func() bool { return supported }
@@ -103,13 +109,21 @@ func SetFunctionalReadinessForTesting(supported bool, probe func(time.Duration) 
 }
 
 // RunReadinessProbeChild handles the private child invocation before ordinary
-// CLI parsing. The child emits exactly one small JSON object and exits; it does
-// not initialize any game API or derive an app identity.
+// CLI parsing. The child emits exactly one small JSON object and exits; it uses
+// only the explicit configured App ID and balances its process-local Steamworks
+// API initialization with shutdown before returning.
 func RunReadinessProbeChild(args []string, out io.Writer) (handled bool, exitCode int) {
-	if len(args) != 1 || args[0] != readinessProbeArgument {
+	if len(args) == 0 || args[0] != readinessProbeArgument {
 		return false, 0
 	}
-	observation := nativeReadinessProbe()
+	if len(args) != 2 {
+		return true, 2
+	}
+	appID, err := parseReadinessAppID(args[1])
+	if err != nil {
+		return true, 2
+	}
+	observation := nativeReadinessProbe(appID)
 	observation.Detail = truncateProbeDetail(observation.Detail)
 	data, err := json.Marshal(observation)
 	if err != nil {
@@ -126,25 +140,29 @@ func RunReadinessProbeChild(args []string, out io.Writer) (handled bool, exitCod
 }
 
 type readinessDependencies struct {
-	probe        func(time.Duration) probeObservation
+	probe        func(string, time.Duration) probeObservation
 	openClient   func() error
 	pollInterval time.Duration
 }
 
-func defaultEnsureFunctionalReadinessWithin(timeout time.Duration) ReadinessResult {
-	return ensureFunctionalReadinessWithin(timeout, readinessDependencies{
+func defaultEnsureFunctionalReadinessWithin(appID string, timeout time.Duration) ReadinessResult {
+	return ensureFunctionalReadinessWithin(appID, timeout, readinessDependencies{
 		probe:        runReadinessProbeProcess,
 		openClient:   openSteamClient,
 		pollInterval: readinessPollInterval,
 	})
 }
 
-func ensureFunctionalReadinessWithin(timeout time.Duration, deps readinessDependencies) ReadinessResult {
+func ensureFunctionalReadinessWithin(appID string, timeout time.Duration, deps readinessDependencies) ReadinessResult {
 	startedAt := time.Now()
 	result := ReadinessResult{
 		Reason:  ReadinessReasonProbeUnavailable,
 		Stage:   ReadinessStageClientLibrary,
 		Timeout: timeout,
+	}
+	if _, err := parseReadinessAppID(appID); err != nil {
+		result.Detail = err.Error()
+		return result
 	}
 	if timeout <= 0 || deps.probe == nil {
 		result.Detail = "no time budget or probe implementation is available"
@@ -166,7 +184,7 @@ func ensureFunctionalReadinessWithin(timeout time.Duration, deps readinessDepend
 		if remaining < probeBudget {
 			probeBudget = remaining
 		}
-		observation := deps.probe(probeBudget)
+		observation := deps.probe(appID, probeBudget)
 		probeFinishedBeforeDeadline := time.Now().Before(deadline)
 		if stageRank(observation.Stage) >= stageRank(result.Stage) {
 			result.Stage = observation.Stage
@@ -176,11 +194,14 @@ func ensureFunctionalReadinessWithin(timeout time.Duration, deps readinessDepend
 		}
 		switch observation.State {
 		case probeStateReady:
-			if probeFinishedBeforeDeadline {
+			// Only the terminal app-specific stage is sufficient. A lower-level
+			// interface may report ready while Steam is still loading app state.
+			if observation.Stage == ReadinessStageAppState && probeFinishedBeforeDeadline {
 				result.Ready = true
 				result.Reason = ""
+				result.Detail = ""
 				result.Retryable = false
-				result.Stage = ReadinessStageGlobalUser
+				result.Stage = ReadinessStageAppState
 				result.Waited = time.Since(startedAt)
 				return result
 			}
@@ -224,6 +245,12 @@ func ensureFunctionalReadinessWithin(timeout time.Duration, deps readinessDepend
 
 func stageRank(stage ReadinessStage) int {
 	switch stage {
+	case ReadinessStageAppState:
+		return 6
+	case ReadinessStageAppInterface:
+		return 5
+	case ReadinessStageSteamAPI:
+		return 4
 	case ReadinessStageGlobalUser:
 		return 3
 	case ReadinessStageIPCPipe:
@@ -246,13 +273,13 @@ func openSteamClient() error {
 	return nil
 }
 
-func runReadinessProbeProcess(timeout time.Duration) probeObservation {
+func runReadinessProbeProcess(appID string, timeout time.Duration) probeObservation {
 	if timeout <= 0 {
 		return probeObservation{State: probeStateUnavailable, Stage: ReadinessStageClientLibrary, Detail: "probe deadline elapsed"}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd, err := newReadinessProbeCommand(ctx)
+	cmd, err := newReadinessProbeCommand(ctx, appID)
 	if err != nil {
 		return probeObservation{State: probeStateUnavailable, Stage: ReadinessStageClientLibrary, Detail: truncateProbeDetail(err.Error())}
 	}
@@ -279,12 +306,23 @@ func runReadinessProbeProcess(timeout time.Duration) probeObservation {
 	return observation
 }
 
-func defaultReadinessProbeCommand(ctx context.Context) (*exec.Cmd, error) {
+func defaultReadinessProbeCommand(ctx context.Context, appID string) (*exec.Cmd, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("cannot locate GABS executable: %w", err)
 	}
-	return exec.CommandContext(ctx, executable, readinessProbeArgument), nil
+	return exec.CommandContext(ctx, executable, readinessProbeArgument, appID), nil
+}
+
+func parseReadinessAppID(raw string) (uint32, error) {
+	if raw == "" || strings.TrimSpace(raw) != raw {
+		return 0, fmt.Errorf("configured Steam app ID is not a non-zero decimal uint32")
+	}
+	value, err := strconv.ParseUint(raw, 10, 32)
+	if err != nil || value == 0 {
+		return 0, fmt.Errorf("configured Steam app ID is not a non-zero decimal uint32")
+	}
+	return uint32(value), nil
 }
 
 func decodeProbeObservation(data []byte) (probeObservation, error) {

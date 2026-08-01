@@ -299,9 +299,9 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 	}
 
 	// macOS SteamManaged must not create the game process until Steam's
-	// app-neutral client interface is functionally ready. Extend the accepted
-	// operation under its original fencing identity for this independent wait;
-	// on success, restamp a fresh full process-start budget before Stage 3.
+	// configured app's Steam client state is functionally ready. Extend the
+	// accepted operation under its original fencing identity for this independent
+	// wait; on success, restamp a fresh full process-start budget before Stage 3.
 	if strictSteamReadiness {
 		readinessTimeout := req.StoreReadinessTimeout
 		if readinessTimeout <= 0 && m.gamesConfig != nil {
@@ -333,7 +333,7 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 			runtimeState = *extended
 		}
 
-		readiness := steam.EnsureFunctionalReadinessWithin(readinessTimeout)
+		readiness := steam.EnsureFunctionalReadinessWithin(game.Target, readinessTimeout)
 		if !readiness.Ready {
 			return nil, failWithWarnings(&StoreClientNotReadyError{
 				Store: "steam", Reason: string(readiness.Reason), Stage: string(readiness.Stage),

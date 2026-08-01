@@ -71,13 +71,18 @@ structured Stage 2 error naming the part, not E2BIG/spawn failure).
   started_bridge_pending, background attach continues, later
   games_connect succeeds against a late-starting fake bridge.
 - Steam readiness: macOS SteamManaged does not spawn until a fresh hidden-child
-  probe proves both client-library pipe and global-user stages; cold-client
-  flow opens Steam once and eventually succeeds; permanently not-ready flow
+  probe proves client-library pipe and global user, then a Steamworks API init,
+  subscribed+installed app state for the configured App ID through that API,
+  and a balanced shutdown in the helper; a connected global user with API init
+  or app state still unavailable must not pass; cold-client flow opens Steam once and
+  eventually succeeds; permanently not-ready flow
   waits to the caller deadline then returns retryable
   `store_client_not_ready` with `processStarted=false`; absent/unloadable probe
   returns the same stable code with non-retryable `probe_unavailable`; helper
-  crash/hang/malformed/oversized output is contained; App-ID environment is
-  scrubbed from the helper; failure releases the fresh claim and does not
+  crash/hang/malformed/oversized output is contained; the explicit App ID is
+  validated while ambient App-ID environment is scrubbed before the helper sets
+  its own process-local identity from that value;
+  failure releases the fresh claim and does not
   mutate history. Success restamps the fenced deadline and preserves the full
   Stage 4/GABP budget; post-proof transition overhead crossing the old
   readiness deadline still restamps the unchanged fencing identity, while a

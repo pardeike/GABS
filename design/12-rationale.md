@@ -146,8 +146,10 @@ concurrent profiles ✗ (separate IDs; reserved extension).
   evidence and next actions; the operator (or agent) decides whether to make
   another game-start attempt. The macOS SteamManaged pre-spawn readiness gate
   is not a workload retry: one accepted start operation may open Steam once and
-  poll its app-neutral client-library interface until the caller's bounded
-  readiness deadline. It never creates a game process before the proof.
+  poll its low-level client, prove a process-local Steamworks API init for the
+  declared App ID, query read-only app state, and shut the API down, until the
+  caller's bounded readiness deadline. It never creates a workload
+  process before the app-specific proof.
 - **Required `defaultProfile`** eliminates the `profile_required` error
   path; the "explicit profile always" mode was considered again and
   rejected — callers wanting that discipline pass a profile explicitly.

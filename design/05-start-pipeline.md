@@ -103,18 +103,26 @@ OS process creation — never for resolvability.
 - Store-client readiness is launch-mode and platform specific. URL modes keep
   the process-presence advisory because `steam://` starts the client itself.
   SteamManaged on macOS is stricter: before the direct executable spawn, GABS
-  must prove that the installed Steam client library can create an IPC pipe and
-  connect a global user. A running `steam_osx` process alone is not proof — the
-  client can exist before the Steamworks interface is usable, which makes a
-  direct game process start without Steam identity and breaks integrations that
-  depend on Steam. GABS probes immediately, asks macOS to open Steam once when
-  needed, then retries fresh probes until the independent caller readiness
-  deadline. Each native probe runs in a short-lived hidden GABS child so a
-  client-library hang, assertion, or crash cannot take down the lifecycle
-  owner. It uses Steam's installed `steamclient.dylib`, calls only the
-  app-neutral pipe/global-user primitives, releases both handles, and never
-  initializes a game API, sets an app ID, or requires online/logged-on state.
-  The game is not spawned until this proof succeeds.
+  must prove that the installed Steam client library can create an IPC pipe,
+  connect a global user, complete a process-local Steamworks API initialization
+  for the explicit App ID, and through that initialized API observe the
+  configured app as both subscribed and installed. A running
+  `steam_osx` process or connected global user alone is not proof — both can
+  exist before Steam has loaded the user's app/library state, which makes a
+  direct game process start without usable Steam identity and breaks
+  integrations that depend on Steam. GABS probes immediately, asks macOS to
+  open Steam once when needed, then retries fresh probes until the independent
+  caller readiness deadline. Each native probe runs in a short-lived hidden
+  GABS child so a client-library hang, assertion, or crash cannot take down the
+  lifecycle owner. It uses Steam's installed `steamclient.dylib`, passes the
+  declared `SteamManaged` target to the helper as explicit non-secret probe
+  data, sets the helper's process-local App-ID variables from that validated
+  value before loading Steam libraries, calls the low-level client interface,
+  and performs `SteamAPI_InitFlat`, read-only app-state queries, then
+  `SteamAPI_Shutdown` using Steam's bundled API library. It
+  never derives identity from ambient App-ID variables, launches the workload,
+  or requires online/logged-on state. The game is not spawned until this
+  app-specific initialization proof succeeds.
 
   A readiness timeout returns `store_client_not_ready` with
   `reason: readiness_timeout`, the furthest readiness stage, elapsed/deadline
@@ -249,7 +257,7 @@ Existing `timeout`/`resetEndpoint` semantics preserved. Outcomes:
 | Executable broken (arch, deps, Gatekeeper) | spawn error | `spawn_failed` + OS error | environment | fix binary/permissions |
 | Crash / bad save / add-on failure | early exit | `exited_during_start` + exit code + output tail | game | read output; fix game state |
 | Anti-cheat kills modified process | early exit or no bridge | `exited_during_start` / `started_bridge_pending` | game | hint lists anti-cheat as cause |
-| Steam not functionally ready (macOS SteamManaged) | installed client-library pipe/global-user probe | `store_client_not_ready`, no process spawned | environment | retry the same start (optionally with a longer timeout); investigate Steam only if the non-timeout failure persists |
+| Steam not functionally ready (macOS SteamManaged) | installed client-library pipe/global-user/app-state/API-init probe | `store_client_not_ready`, no process spawned | environment | retry the same start (optionally with a longer timeout); investigate Steam only if the non-timeout failure persists |
 | Steam re-exec drops context | adoption, delivery not verified | `adopted` warning, `started_bridge_pending` | environment | `steam_appid.txt`, Steam launch options, or wrapper |
 | Steam/Epic updating or dialog (URL modes) | nothing observable | `unobserved`, claim kept `starting` | environment | check desktop; re-check status |
 | Wrong app ID / not installed | nothing observable | `unobserved` | config; environment when proven | verify target in store |

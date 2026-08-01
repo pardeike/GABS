@@ -2,7 +2,7 @@
 
 package steam
 
-func defaultNativeReadinessProbe() probeObservation {
+func defaultNativeReadinessProbe(uint32) probeObservation {
 	return probeObservation{
 		State:  probeStateUnavailable,
 		Stage:  ReadinessStageClientLibrary,

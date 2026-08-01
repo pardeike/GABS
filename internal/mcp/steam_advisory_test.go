@@ -126,11 +126,14 @@ func TestMacSteamManagedReadinessFailureIsStructuredAndDoesNotSpawn(t *testing.T
 	}
 
 	var receivedTimeout time.Duration
-	t.Cleanup(steam.SetFunctionalReadinessForTesting(true, func(timeout time.Duration) steam.ReadinessResult {
+	t.Cleanup(steam.SetFunctionalReadinessForTesting(true, func(appID string, timeout time.Duration) steam.ReadinessResult {
+		if appID != "123456" {
+			t.Fatalf("readiness app ID = %q", appID)
+		}
 		receivedTimeout = timeout
 		return steam.ReadinessResult{
-			Reason: steam.ReadinessReasonTimeout, Stage: steam.ReadinessStageGlobalUser,
-			Detail: "global user unavailable", Retryable: true,
+			Reason: steam.ReadinessReasonTimeout, Stage: steam.ReadinessStageSteamAPI,
+			Detail: "Steamworks API initialization failed", Retryable: true,
 			Waited: 1500 * time.Millisecond, Timeout: timeout,
 		}
 	}))
@@ -162,7 +165,7 @@ func TestMacSteamManagedReadinessFailureIsStructuredAndDoesNotSpawn(t *testing.T
 		t.Fatalf("readiness failure must be an MCP error result: %s", raw)
 	}
 	for key, want := range map[string]interface{}{
-		"store": "steam", "reason": "readiness_timeout", "readinessStage": "global_user",
+		"store": "steam", "reason": "readiness_timeout", "readinessStage": "steam_api",
 		"retryable": true, "processStarted": false,
 	} {
 		if structured[key] != want {
