@@ -293,10 +293,9 @@ func conflationWarning(hook *launch.ResolvedHook) string {
 	return ""
 }
 
-// doctorPermissions warns on broadly readable config/runtime files (design/07;
-// the per-launch token must not be world/group readable). Unix only: Windows
-// has no POSIX mode bits — the token is protected by NTFS ACLs on the private
-// ~/.gabs directory.
+// doctorPermissions warns on broadly readable config/runtime files (design/07)
+// and names the data each file actually owns. Unix only: Windows has no POSIX
+// mode bits; ACLs on the private GABS directory govern access there.
 func doctorPermissions(d *doctorReport, configDir, gameID string) {
 	if runtime.GOOS == "windows" {
 		return
@@ -305,24 +304,44 @@ func doctorPermissions(d *doctorReport, configDir, gameID string) {
 	if err != nil {
 		return
 	}
-	warnLoose := func(path, what string) {
+	warnLoose := func(path string) {
 		fi, statErr := os.Stat(path)
 		if statErr != nil {
 			return
 		}
 		if fi.Mode().Perm()&0o077 != 0 {
-			d.warn("%s is broadly readable (%v): %s — it may carry the per-launch bridge token; tighten to 0600", what, fi.Mode().Perm(), path)
+			what, contents := doctorLooseFileDescription(filepath.Base(path))
+			d.warn("%s is broadly readable (%v): %s — %s; tighten to 0600", what, fi.Mode().Perm(), path, contents)
 		}
 	}
-	warnLoose(cp.GetMainConfigPath(), "config file")
+	warnLoose(cp.GetMainConfigPath())
 	gameDir := cp.GetGameDir(gameID)
 	if entries, derr := os.ReadDir(gameDir); derr == nil {
 		for _, e := range entries {
 			if e.IsDir() {
 				continue
 			}
-			warnLoose(filepath.Join(gameDir, e.Name()), "runtime file")
+			warnLoose(filepath.Join(gameDir, e.Name()))
 		}
+	}
+}
+
+func doctorLooseFileDescription(name string) (what, contents string) {
+	switch name {
+	case "config.json":
+		return "config file", "it may contain the HTTP API key and configured environment values"
+	case "runtime.json":
+		return "runtime state file", "it may contain the per-launch bridge token and endpoint state"
+	case "bridge.json":
+		return "endpoint state file", "it may contain the per-launch bridge token and endpoint state"
+	case "launch.log":
+		return "launch log", "it may contain game or game-side bridge output"
+	case "history.json":
+		return "history file", "it may contain launch targets, arguments, working directories, and diagnostic history"
+	case "transition.lock", "bridge.lock":
+		return "coordination lock", "it contains GABS coordination metadata; keep the runtime directory private as a unit"
+	default:
+		return "runtime file", "it may contain GABS runtime or diagnostic metadata"
 	}
 }
 

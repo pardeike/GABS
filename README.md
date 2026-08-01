@@ -60,7 +60,7 @@ In the GABP layer, your game-side bridge is the server and GABS is the client.
 ### 1. Download and verify the binary
 
 Download the latest release bundle for your system from
-[GitHub Releases](releases/latest).
+[GitHub Releases](https://github.com/pardeike/GABS/releases/latest).
 
 Available archives are named like:
 - **Windows x64**: `gabs-<version>-windows-amd64.zip`
@@ -261,6 +261,7 @@ normalization. For the full MCP surface, see the
 ## Documentation
 
 - **[AI Client Setup Guide](docs/AI_CLIENT_SETUP.md)** - Install a release bundle and connect Claude Desktop, Codex CLI, or generic MCP clients
+- **[v1.1.0 Release Notes](docs/releases/v1.1.0.md)** - Upgrade order, compatibility changes, and profile-migration guidance
 - **[Configuration Guide](docs/CONFIGURATION.md)** - Config schema, profiles, launch inputs, lifecycle hooks, and tool normalization
 - **[AI Integration Guide](docs/INTEGRATION.md)** - Connect GABS to different AI tools and deployment scenarios
 - **[GABP Bridge Development Guide](docs/GABP_BRIDGE_DEVELOPMENT.md)** - Add GABP support to your game integrations
@@ -305,7 +306,7 @@ go build -ldflags "-X github.com/pardeike/gabs/internal/version.Version=vX.Y.Z" 
 
 ## Contributing & Support
 
-- **Issues & Ideas**: [GitHub Issues](issues)
+- **Issues & Ideas**: [GitHub Issues](https://github.com/pardeike/GABS/issues)
 - **GABP Protocol**: [GABP Repository](https://github.com/pardeike/GABP)
 - **Example Configuration**: See `example-config.json` for sample configurations
 

@@ -38,7 +38,9 @@ func TestWorkloadStartCreditIdempotentByLaunchID(t *testing.T) {
 func TestActionFailureRecordsInputNames(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now().UTC()
-	ApplyActionFailureLocked("g", dir, "", "sha256:ctx", "unobserved", CauseConfig, []string{"scenario"}, now)
+	if err := ApplyActionFailureLocked("g", dir, "", "sha256:ctx", "unobserved", CauseConfig, []string{"scenario"}, now); err != nil {
+		t.Fatal(err)
+	}
 	h, _ := LoadHistory("g", dir)
 	e := h.Profiles[""]
 	if e == nil || e.LastFailure == nil {

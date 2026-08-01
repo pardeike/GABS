@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"testing"
 
 	"github.com/pardeike/gabs/internal/config"
@@ -17,6 +18,7 @@ import (
 // F3), whether or not the test calls Shutdown itself.
 func NewServerForTesting(tb testing.TB, log util.Logger) *Server {
 	tb.Helper()
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	s := &Server{
 		log:             log,
 		tools:           make(map[string]*ToolHandler),
@@ -34,6 +36,8 @@ func NewServerForTesting(tb testing.TB, log util.Logger) *Server {
 		instanceID:      newServerInstanceID(),
 		ownerLease:      (&config.GamesConfig{}).GetSessionOwnerLease(),
 		shutdownCh:      make(chan struct{}),
+		shutdownCtx:     shutdownCtx,
+		shutdownCancel:  shutdownCancel,
 		newController:   func() process.ControllerInterface { return process.NewController() },
 	}
 	tb.Cleanup(s.Shutdown)

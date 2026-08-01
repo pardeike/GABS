@@ -1210,6 +1210,46 @@ contract, not a scratchpad.
       config + row failures). Every fix has a regression verified to FAIL against
       the pre-fix code. Re-gate: build, vet, race (config/process/gabp/lifecycle/
       cmd), genericity, mcp oracle byte-identical; tri-OS PR CI re-run green.)
+- [x] M3.7 (added) Review round 7 release-readiness corrections — spec: README
+      compatibility promises, 11, 20, 30, 31; tests: T-VAL, T-START, T-CLI,
+      T-GATE
+      (Seven supplied findings are in scope. Regression-first fixes: AddGame
+      now applies runtime-safe canonical IDs plus the same portable case-fold
+      collision rule as loading, without mutating on rejection; production
+      server orchestration calls Shutdown on transport return and cancellation,
+      waits for HTTP graceful shutdown, and does not hang on a blocked stdio
+      read; both native macOS Steam dylib scans continue after incompatible
+      candidates while preserving the first definitive observation; reviewed
+      v1.1.0 compatibility notes are user-facing and wired as the generated
+      release-note preamble; README release/issues routes are absolute;
+      CONFIGURATION commands match the parser; doctor permission warnings name
+      each file's actual sensitive or coordination contents. Focused tests were
+      observed failing before implementation and now pass. Complete local gate:
+      go vet, every functional package, full `go test -race ./... -count=1`,
+      make build, no-CGO builds for all five release OS/architecture targets,
+      workflow-YAML parse, release-doc contract, genericity scan, and diff
+      hygiene are green.)
+- [x] M3.8 (added) Review round 8 shutdown, exec-limit, fencing, and lifecycle
+      deadline corrections — spec: README compatibility promises, 06, 08, 20,
+      30; tests: T-VAL, T-RES, T-START, T-GATE, T-FENCE
+      (Nine supplied findings are in scope. Regression-first fixes: the
+      server-owned cancellation context now stops and joins a pending GABP
+      retry, and a handshake racing shutdown cannot publish a surviving
+      client; Unix pre-spawn sizing follows Darwin `kern.argmax` or Linux's
+      live stack/page limits and includes each kernel's pointer/fixed overhead;
+      runtime-directory collision keys normalize every Unicode path component
+      before case folding; failed stop/kill and unobserved-start history writes
+      return storage failures and remain inside the launch/operation fence
+      before runtime completion; built-in process scans, per-PID signals, and
+      verification scans are context-bound to the persisted operation deadline;
+      the configuration guide and v1.1.0 notes now document load-time game-ID
+      rejection and the actual pinned-PID-first built-in stop order. Focused
+      regressions were observed failing before implementation and pass after it.
+      Complete local gate: `go test ./... -count=1`, full
+      `go test -race ./... -count=1`, go vet, make build, no-CGO builds for all
+      five release OS/architecture targets, workflow-YAML parse,
+      release-documentation contract, genericity scan, and diff hygiene are
+      green.)
 
 ## Deviations
 

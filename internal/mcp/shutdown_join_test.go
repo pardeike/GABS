@@ -5,7 +5,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/pardeike/gabs/internal/config"
 	"github.com/pardeike/gabs/internal/util"
 )
 
@@ -108,5 +110,46 @@ func TestShutdownJoinsConcurrentAttachment(t *testing.T) {
 
 		s.Shutdown()
 		wg.Wait()
+	}
+}
+
+// A games_start that returned started_bridge_pending can carry a long GABP
+// retry budget. Shutdown owns that detached retry: it must cancel it before
+// joining, and a client inserted just before shutdown must not reconnect after
+// Close and survive the join.
+func TestShutdownCancelsPendingStartupGABPConnection(t *testing.T) {
+	s := NewServerForTesting(t, util.NewLogger("error"))
+	game := config.GameConfig{ID: "adventure", Name: "Adventure"}
+	controller := &fakeController{running: true, mode: "DirectPath"}
+	s.continueStartupGABPConnection(game, controller, bridgeEndpoint{
+		Port: unusedLocalPort(t), Token: "pending-shutdown-token",
+	}, 10*time.Millisecond, 20*time.Millisecond, 2*time.Second)
+
+	// Wait until the connector has published its not-yet-connected client;
+	// this is the precise state that Close alone cannot cancel.
+	deadline := time.Now().Add(time.Second)
+	for {
+		s.mu.RLock()
+		pending := s.gabpClients[game.ID] != nil
+		s.mu.RUnlock()
+		if pending {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("pending connector did not begin")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	started := time.Now()
+	s.Shutdown()
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("Shutdown waited for the pending GABP timeout instead of cancelling it: %v", elapsed)
+	}
+	s.mu.RLock()
+	client := s.gabpClients[game.ID]
+	s.mu.RUnlock()
+	if client != nil {
+		t.Fatal("a pending GABP client survived or was republished after Shutdown")
 	}
 }

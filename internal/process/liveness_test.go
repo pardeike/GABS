@@ -1,6 +1,7 @@
 package process
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -15,7 +16,10 @@ import (
 func swapLivenessProbes(t *testing.T, hook func(*launch.ResolvedHook, string, string) (string, HookResult),
 	startTime func(int) (int64, error), byName func(string) ([]int, error)) {
 	t.Helper()
-	prevHook, prevStart, prevName := runStatusHookFunc, processStartTimeFunc, findProcessesByNameFunc
+	prevHook, prevStart := runStatusHookFunc, processStartTimeFunc
+	findProcessesByNameMu.Lock()
+	prevName := findProcessesByNameFunc
+	findProcessesByNameMu.Unlock()
 	if hook != nil {
 		runStatusHookFunc = hook
 	}
@@ -23,10 +27,20 @@ func swapLivenessProbes(t *testing.T, hook func(*launch.ResolvedHook, string, st
 		processStartTimeFunc = startTime
 	}
 	if byName != nil {
-		findProcessesByNameFunc = byName
+		findProcessesByNameMu.Lock()
+		findProcessesByNameFunc = func(ctx context.Context, name string) ([]int, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return byName(name)
+		}
+		findProcessesByNameMu.Unlock()
 	}
 	t.Cleanup(func() {
-		runStatusHookFunc, processStartTimeFunc, findProcessesByNameFunc = prevHook, prevStart, prevName
+		runStatusHookFunc, processStartTimeFunc = prevHook, prevStart
+		findProcessesByNameMu.Lock()
+		findProcessesByNameFunc = prevName
+		findProcessesByNameMu.Unlock()
 	})
 }
 

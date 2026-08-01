@@ -312,8 +312,15 @@ Where the two disagree, the spec wins.
      platform hard limit (32 KiB env block on Windows, OS argv limits) is
      a structured pre-spawn **error** at Stage 2 naming the oversized
      part — never allowed through to an opaque CreateProcess/E2BIG
-     failure. An optional conservative warning threshold below the hard
-     limit may additionally warn.
+     failure. Unix accounting follows the running kernel, not a shared
+     heuristic: Darwin uses `kern.argmax` and charges strings, argv/envp
+     pointer entries, both NULL terminators, and alignment; Linux derives
+     the combined ceiling from the current `RLIMIT_STACK`, applies the
+     32-page per-string limit using the current page size, and charges
+     pointer entries plus the kernel's executable-path copy. If an exact
+     hard limit is unavailable, do not invent a smaller rejecting limit.
+     An optional conservative warning threshold below the hard limit may
+     additionally warn, but it can never become a pre-spawn refusal.
 
 ## Behavior details worth pinning
 

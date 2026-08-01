@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"errors"
 	"os"
 	"runtime"
 	"strings"
@@ -190,6 +191,30 @@ func TestUnobservedRecordsNeverProvenAsConfigFailure(t *testing.T) {
 	}
 	if e.LastFailure.Class != process.CauseConfig {
 		t.Fatalf("a never-proven unobserved is recorded as config: %+v", e.LastFailure)
+	}
+}
+
+func TestUnobservedHistoryWriteFailureDoesNotCommitCompletion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a unix sleep binary as the launcher stand-in")
+	}
+	s := steamishUnobservedServer(t)
+	restore := process.SetSaveHistoryFailHookForTesting(func() error { return errors.New("history disk full") })
+	t.Cleanup(restore)
+
+	raw, structured := callTool(t, s, "games.start", map[string]interface{}{"gameId": "steamish", "timeout": 1})
+	if structured["code"] == "unobserved" {
+		t.Fatalf("unobserved must not commit after its failure-history write was lost: %s", raw)
+	}
+	if !strings.Contains(raw, "history disk full") {
+		t.Fatalf("the history failure must reach the caller: %s", raw)
+	}
+	claim, err := process.LoadRuntimeState("steamish", s.configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim == nil || claim.Phase != process.PhaseStarting || claim.Operation == nil {
+		t.Fatalf("the unobserved transition must remain fenced and retryable: %+v", claim)
 	}
 }
 

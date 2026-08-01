@@ -90,6 +90,72 @@ func TestDoctorBroadlyReadableWarning(t *testing.T) {
 	}
 }
 
+func TestDoctorBroadlyReadableWarningsDescribeEachFileAccurately(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits are meaningless on Windows (NTFS ACLs govern)")
+	}
+	dir := t.TempDir()
+	writeCLIConfig(t, dir, `{"version":"1.0","apiKey":"configured-secret","games":{"g":{"id":"g","name":"G","launchMode":"DirectPath","target":"/bin/true","env":{"PRIVATE_SETTING":"value"}}}}`)
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.Chmod(configPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gameDir := filepath.Join(dir, "g")
+	if err := os.MkdirAll(gameDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"runtime.json", "bridge.json", "launch.log", "history.json", "transition.lock", "bridge.lock"} {
+		path := filepath.Join(gameDir, name)
+		if err := os.WriteFile(path, []byte("test"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	out := captureStdout(t, func() {
+		doctorPermissions(&doctorReport{healthy: true}, dir, "g")
+	})
+	lineFor := func(name string) string {
+		t.Helper()
+		for _, line := range strings.Split(out, "\n") {
+			if strings.Contains(line, name) {
+				return line
+			}
+		}
+		t.Fatalf("permission output has no warning for %s:\n%s", name, out)
+		return ""
+	}
+
+	configLine := lineFor("config.json")
+	if !strings.Contains(configLine, "HTTP API key") || !strings.Contains(configLine, "configured environment values") {
+		t.Fatalf("config warning describes the wrong contents: %s", configLine)
+	}
+	if strings.Contains(configLine, "per-launch bridge token") {
+		t.Fatalf("config warning falsely attributes the runtime bridge token: %s", configLine)
+	}
+	for _, name := range []string{"runtime.json", "bridge.json"} {
+		if line := lineFor(name); !strings.Contains(line, "per-launch bridge token") || !strings.Contains(line, "endpoint state") {
+			t.Fatalf("%s warning does not describe its credential state: %s", name, line)
+		}
+	}
+	for name, want := range map[string]string{
+		"launch.log":      "game or game-side bridge output",
+		"history.json":    "launch targets, arguments, working directories, and diagnostic history",
+		"transition.lock": "GABS coordination metadata",
+		"bridge.lock":     "GABS coordination metadata",
+	} {
+		line := lineFor(name)
+		if !strings.Contains(line, want) {
+			t.Fatalf("%s warning missing %q: %s", name, want, line)
+		}
+		if strings.Contains(line, "per-launch bridge token") {
+			t.Fatalf("%s warning falsely attributes the runtime bridge token: %s", name, line)
+		}
+	}
+}
+
 // doctor prints the full track record and --show-last-good prints the proven
 // context after a verified start (design/08, design/11).
 func TestDoctorTrackRecordAndLastGood(t *testing.T) {

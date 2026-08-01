@@ -1,6 +1,7 @@
 package process
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -28,10 +29,20 @@ func swapStopActionFuncs(t *testing.T,
 		runStatusProbeFunc = probe
 	}
 	if term != nil {
-		builtinTerminateFunc = term
+		builtinTerminateFunc = func(ctx context.Context, strategy string, pid int) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return term(strategy, pid)
+		}
 	}
 	if kill != nil {
-		builtinKillFunc = kill
+		builtinKillFunc = func(ctx context.Context, strategy string, pid int) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return kill(strategy, pid)
+		}
 	}
 	stopVerifyPollInterval = 20 * time.Millisecond
 	t.Cleanup(func() {
@@ -265,6 +276,81 @@ func TestStopHookFailurePersistsLastActionResult(t *testing.T) {
 	}
 	if lar.Timestamp.IsZero() {
 		t.Fatalf("lastActionResult must be timestamped: %+v", lar)
+	}
+}
+
+func TestFailedStopHistoryIsWrittenInsideCompletionFence(t *testing.T) {
+	dir := t.TempDir()
+	swapStopActionFuncs(t, actionHookReturning(false, HookResult{ExitCode: 3}, nil), nil, nil, nil)
+
+	st := activeStopClaim(t, "g1", dir, &launch.ResolvedLifecycle{Stop: stopHook()})
+	st.AppliedInputNames = []string{"scenario"}
+	publishClaim(t, dir, st)
+
+	// saveHistory runs from the completion's history credit. The runtime file
+	// must still contain this exact operation at that point: clearing it first
+	// opens a retry/kill race in which the failure can be lost.
+	sawLiveOperation := false
+	restore := SetSaveHistoryFailHookForTesting(func() error {
+		cur, err := LoadRuntimeState("g1", dir)
+		if err != nil {
+			return err
+		}
+		sawLiveOperation = cur != nil && cur.LaunchID == st.LaunchID && cur.Operation != nil
+		return nil
+	})
+	t.Cleanup(restore)
+
+	req := stopReq("g1", dir)
+	req.HistoryContextHash = "sha256:stop-context"
+	outcome, refusal, err := ExecuteStopAction(req)
+	if err != nil || refusal != nil || outcome == nil || outcome.Code != OutcomeActionFailed {
+		t.Fatalf("expected persisted action failure, got outcome=%+v refusal=%+v err=%v", outcome, refusal, err)
+	}
+	if !sawLiveOperation {
+		t.Fatal("history was written only after the failed stop's operation fence had been cleared")
+	}
+	h, err := LoadHistory("g1", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := h.Profiles[""]
+	if e == nil || e.ConsecutiveFailures != 1 || e.LastFailure == nil || e.LastFailure.Outcome != OutcomeActionFailed {
+		t.Fatalf("failed stop history was not recorded: %+v", e)
+	}
+	if len(e.LastFailure.InputNames) != 1 || e.LastFailure.InputNames[0] != "scenario" {
+		t.Fatalf("failed stop history lost its pinned input names: %+v", e.LastFailure)
+	}
+}
+
+func TestFailedStopHistoryWriteFailureLeavesCompletionRetryable(t *testing.T) {
+	dir := t.TempDir()
+	swapStopActionFuncs(t, actionHookReturning(false, HookResult{ExitCode: 3}, nil), nil, nil, nil)
+
+	st := activeStopClaim(t, "g1", dir, &launch.ResolvedLifecycle{Stop: stopHook()})
+	publishClaim(t, dir, st)
+	restore := SetSaveHistoryFailHookForTesting(func() error { return errors.New("history disk full") })
+	t.Cleanup(restore)
+
+	req := stopReq("g1", dir)
+	req.HistoryContextHash = "sha256:stop-context"
+	outcome, refusal, err := ExecuteStopAction(req)
+	if err != nil || refusal != nil || outcome == nil || outcome.Code != OutcomeActionFailed {
+		t.Fatalf("the hook failure must still be reported: outcome=%+v refusal=%+v err=%v", outcome, refusal, err)
+	}
+	if !strings.Contains(strings.Join(outcome.Warnings, "\n"), "history disk full") {
+		t.Fatalf("the history write failure must be surfaced, warnings=%v", outcome.Warnings)
+	}
+	cur, err := LoadRuntimeState("g1", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur == nil || cur.LaunchID != st.LaunchID || cur.Phase != PhaseStopping || cur.Operation == nil {
+		t.Fatalf("a failed history write must leave the fenced completion retryable: %+v", cur)
+	}
+	h, _ := LoadHistory("g1", dir)
+	if e := h.Profiles[""]; e != nil && e.ConsecutiveFailures != 0 {
+		t.Fatalf("a failed history write must not claim a durable credit: %+v", e)
 	}
 }
 
@@ -794,6 +880,85 @@ func TestBuiltinStopSignalsPinnedWorkloadPID(t *testing.T) {
 	}
 	if outcome.Code != OutcomeTerminated || !outcome.ClaimRemoved {
 		t.Fatalf("workload proven gone must terminate: %+v", outcome)
+	}
+}
+
+func TestBuiltinActionDeadlineCancelsProcessScan(t *testing.T) {
+	restore := SetFindProcessesByNameContextForTesting(func(ctx context.Context, name string) ([]int, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	t.Cleanup(restore)
+
+	claim := &RuntimeState{StopProcessName: "game-workload"}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := runBuiltinAction(ctx, claim, OperationActionStop)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("deadline-cancelled process scan must surface its cause, got %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("built-in process scan escaped its action deadline: %v", elapsed)
+	}
+}
+
+func TestBuiltinActionDeadlineCancelsSignal(t *testing.T) {
+	restoreFinder := SetFindProcessesByNameContextForTesting(func(ctx context.Context, name string) ([]int, error) {
+		return []int{11111, 22222}, nil
+	})
+	t.Cleanup(restoreFinder)
+
+	previous := builtinTerminateFunc
+	var calls int
+	builtinTerminateFunc = func(ctx context.Context, strategy string, pid int) error {
+		calls++
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	t.Cleanup(func() { builtinTerminateFunc = previous })
+
+	claim := &RuntimeState{StopProcessName: "game-workload"}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := runBuiltinAction(ctx, claim, OperationActionStop)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("deadline-cancelled signal must surface its cause, got %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("no later PID may be signaled after the deadline, calls=%d", calls)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("built-in signal escaped its action deadline: %v", elapsed)
+	}
+}
+
+func TestVerificationProcessScanHonorsOperationDeadline(t *testing.T) {
+	dir := t.TempDir()
+	restore := SetFindProcessesByNameContextForTesting(func(ctx context.Context, name string) ([]int, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	t.Cleanup(restore)
+
+	claim := activeStopClaim(t, "g1", dir, nil)
+	claim.StopProcessName = "game-workload"
+	op := RuntimeOperation{
+		OperationID: NewFencingID(), Action: OperationActionStop,
+		AttemptStartedAt: time.Now().UTC(), Deadline: time.Now().UTC().Add(75 * time.Millisecond),
+	}
+	claim.Operation = &op
+	publishClaim(t, dir, claim)
+
+	started := time.Now()
+	outcome := &StopOutcome{Action: OperationActionStop}
+	code, _ := verifyTermination(stopReq("g1", dir), &claim, op, nil, "", outcome)
+	if code != OutcomeTerminationUnverified {
+		t.Fatalf("a deadline-cancelled verification scan is unknown, got %s", code)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("verification scan escaped the persisted operation deadline: %v", elapsed)
 	}
 }
 

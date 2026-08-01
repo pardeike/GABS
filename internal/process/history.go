@@ -670,8 +670,8 @@ func ApplyPinnedWorkloadStartLocked(gameID, configDir string, st *RuntimeState, 
 // a stale completion can never bump a successor's history. The
 // supplied input names are recorded so an input-bearing attempt does not
 // serialize as if no inputs were supplied (design/08:20).
-func ApplyActionFailureLocked(gameID, configDir, profile, contextHash, outcome, class string, inputNames []string, at time.Time) {
-	_ = applyHistoryLocked(gameID, configDir, func(h *GameHistory) {
+func ApplyActionFailureLocked(gameID, configDir, profile, contextHash, outcome, class string, inputNames []string, at time.Time) error {
+	return applyHistoryLocked(gameID, configDir, func(h *GameHistory) {
 		e := h.entryForContext(profile, contextHash)
 		e.ConsecutiveFailures++
 		e.LastFailure = &HistoryFailure{Outcome: outcome, Class: class, InputNames: append([]string(nil), inputNames...), At: at}

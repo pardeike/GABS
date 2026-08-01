@@ -28,6 +28,11 @@ Runtime state carries a persisted `phase`: `starting`, `active`,
   exit code, stderr tail, timestamp, tree-kill warning if any — is
   persisted as `lastActionResult` in runtime state and shown by status.
   This replaces an earlier draft's operation journal with one field.
+- Built-in actions obey the same persisted deadline as hooks. Every external
+  process-table utility and Windows signal utility, every per-PID signal loop,
+  and every verification name scan receives the remaining operation context;
+  once it expires, no stale scan may continue and no later match may be
+  signaled.
 
 ## Transition lock and domain-scoped fencing
 

@@ -461,7 +461,7 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 		if _, ferr := process.FencedTransition(game.ID, m.configDir, launchID, opID, func(st *process.RuntimeState) error {
 			st.Operation = nil // the attempt is over; the deadline governs reclaim
 			if st.HistoryContextHash != "" {
-				process.ApplyActionFailureLocked(game.ID, m.configDir, process.EffectiveClaimProfile(st), st.HistoryContextHash, "unobserved", unobservedClass, hc.InputNames, time.Now().UTC())
+				return process.ApplyActionFailureLocked(game.ID, m.configDir, process.EffectiveClaimProfile(st), st.HistoryContextHash, "unobserved", unobservedClass, hc.InputNames, time.Now().UTC())
 			}
 			return nil
 		}); ferr != nil {

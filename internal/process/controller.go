@@ -984,10 +984,26 @@ func getTerminationSignal() os.Signal {
 
 // killProcess forcefully terminates a process by PID
 func killProcess(pid int) error {
+	return killProcessContext(context.Background(), pid)
+}
+
+func killProcessContext(ctx context.Context, pid int) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	switch runtime.GOOS {
 	case "windows":
-		cmd := exec.Command("taskkill", "/F", "/PID", strconv.Itoa(pid))
-		return cmd.Run()
+		cmd := exec.CommandContext(ctx, "taskkill", "/F", "/PID", strconv.Itoa(pid))
+		if err := cmd.Run(); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return err
+		}
+		return nil
 	default:
 		// Unix-like systems
 		process, err := os.FindProcess(pid)
@@ -1000,23 +1016,45 @@ func killProcess(pid int) error {
 
 // terminateProcess gracefully terminates a process by PID with a timeout
 func terminateProcess(pid int, grace time.Duration) error {
+	return terminateProcessContext(context.Background(), pid, grace)
+}
+
+func terminateProcessContext(ctx context.Context, pid int, grace time.Duration) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	switch runtime.GOOS {
 	case "windows":
 		// On Windows, try gentle termination first, then force kill if timeout
-		cmd := exec.Command("taskkill", "/PID", strconv.Itoa(pid))
+		cmd := exec.CommandContext(ctx, "taskkill", "/PID", strconv.Itoa(pid))
 		if err := cmd.Run(); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return err
 		}
 
 		// Wait for process to exit gracefully
 		if grace > 0 {
-			time.Sleep(grace)
+			timer := time.NewTimer(grace)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			}
 			// Check if process still exists
-			checkCmd := exec.Command("tasklist", "/FI", "PID eq "+strconv.Itoa(pid), "/FO", "CSV")
+			checkCmd := exec.CommandContext(ctx, "tasklist", "/FI", "PID eq "+strconv.Itoa(pid), "/FO", "CSV")
 			output, err := checkCmd.Output()
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			if err == nil && strings.Contains(string(output), strconv.Itoa(pid)) {
 				// Process still exists, force kill it
-				return killProcess(pid)
+				return killProcessContext(ctx, pid)
 			}
 		}
 		return nil
@@ -1045,7 +1083,12 @@ func terminateProcess(pid int, grace time.Duration) error {
 				return nil
 			case <-time.After(grace):
 				// Grace period expired, force kill
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				return process.Kill()
+			case <-ctx.Done():
+				return ctx.Err()
 			}
 		}
 
@@ -1054,15 +1097,24 @@ func terminateProcess(pid int, grace time.Duration) error {
 }
 
 // findProcessesByName finds all processes with the given name
-func findProcessesByName(name string) ([]int, error) {
+func findProcessesByName(ctx context.Context, name string) ([]int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var pids []int
 
 	switch runtime.GOOS {
 	case "windows":
 		// Use tasklist command on Windows
-		cmd := exec.Command("tasklist", "/FI", "IMAGENAME eq "+name, "/FO", "CSV", "/NH")
+		cmd := exec.CommandContext(ctx, "tasklist", "/FI", "IMAGENAME eq "+name, "/FO", "CSV", "/NH")
 		output, err := cmd.Output()
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			return nil, err
 		}
 
@@ -1080,19 +1132,22 @@ func findProcessesByName(name string) ([]int, error) {
 			}
 		}
 	case "linux":
-		return findLinuxProcessesByName(name)
+		return findLinuxProcessesByName(ctx, name)
 	default:
-		return findProcessesByNameWithPgrep(name)
+		return findProcessesByNameWithPgrep(ctx, name)
 	}
 
 	return pids, nil
 }
 
-func findProcessesByNameWithPgrep(name string) ([]int, error) {
+func findProcessesByNameWithPgrep(ctx context.Context, name string) ([]int, error) {
 	var pids []int
-	cmd := exec.Command("pgrep", "-x", name)
+	cmd := exec.CommandContext(ctx, "pgrep", "-x", name)
 	output, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		// pgrep returns exit code 1 if no processes found, which is not an error for us
 		if exitError, ok := err.(*exec.ExitError); ok && exitError.ExitCode() == 1 {
 			return pids, nil
@@ -1120,8 +1175,11 @@ var linuxProcRoot = "/proc"
 // unknown, never a false stopped (design/04); only normal process-
 // disappearance races are ignored. Any positive match still wins — a found
 // process is running-evidence regardless of unreadable neighbors.
-func findLinuxProcessesByName(name string) ([]int, error) {
+func findLinuxProcessesByName(ctx context.Context, name string) ([]int, error) {
 	var pids []int
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	entries, err := os.ReadDir(linuxProcRoot)
 	if err != nil {
@@ -1130,6 +1188,9 @@ func findLinuxProcessesByName(name string) ([]int, error) {
 
 	var inspectErr error
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		pid, err := strconv.Atoi(entry.Name())
 		if err != nil {
 			continue

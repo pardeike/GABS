@@ -301,13 +301,14 @@ func TestSpecTooLargeRecordsViaDeferPathAndRenders(t *testing.T) {
 	dir := t.TempDir()
 	s := NewServerForTesting(t, util.NewLogger("error"))
 	s.SetConfigDir(dir)
-	// A resolvable target with a single argument past the per-string exec
-	// limit: the start is accepted, claims, then fails the pre-spawn size
-	// check — the terminal failure whose history write rides the DEFER path
-	// (pendingFailCode), not the inline exitedFailure recorder (round 10 P1-2).
+	// A resolvable target with arguments past every supported platform's real
+	// combined exec limit: the start is accepted, claims, then fails the
+	// pre-spawn size check — the terminal failure whose history write rides the
+	// DEFER path (pendingFailCode), not the inline exitedFailure recorder
+	// (round 10 P1-2).
 	game := config.GameConfig{
 		ID: "big", Name: "Big", LaunchMode: "DirectPath", Target: exe,
-		Args: []string{strings.Repeat("x", 200000)},
+		Args: definitelyOversizedExecArgs(),
 	}
 	s.RegisterGameManagementTools(&config.GamesConfig{
 		Version: "1.0", Games: map[string]config.GameConfig{game.ID: game},

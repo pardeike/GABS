@@ -248,6 +248,57 @@ Once the server is running, use MCP tools to manage games:
 
 // === Server Command ===
 
+// configuredMCPServer is the production lifecycle surface runServer owns. The
+// narrow interface keeps exit orchestration independently testable: main calls
+// os.Exit immediately after runServer, so cleanup must complete here rather
+// than relying on deferred work above main.
+type configuredMCPServer interface {
+	ServeStdio(context.Context) error
+	ServeHTTP(context.Context, string) error
+	Shutdown()
+}
+
+// serveConfiguredMCP runs the selected transport and closes the MCP/GABP
+// runtime on every exit path. HTTP observes ctx and performs its own graceful
+// net/http shutdown, so cancellation waits for that serving goroutine. Stdio's
+// reader can be blocked in an OS stdin read that context cancellation cannot
+// interrupt; after Server.Shutdown has joined all owned background work, the
+// process may return without waiting for that reader goroutine (main exits next).
+func serveConfiguredMCP(ctx context.Context, log util.Logger, opts options, server configuredMCPServer) int {
+	errCh := make(chan error, 1)
+	go func() {
+		if opts.transport == "stdio" || (opts.transport == "" && opts.httpAddr == "") {
+			log.Infow("starting MCP server", "transport", "stdio")
+			errCh <- server.ServeStdio(ctx)
+			return
+		}
+		log.Infow("starting MCP server", "transport", "http", "addr", opts.httpAddr)
+		errCh <- server.ServeHTTP(ctx, opts.httpAddr)
+	}()
+
+	select {
+	case <-ctx.Done():
+		log.Infow("shutdown signal received")
+		server.Shutdown()
+		if opts.transport == "http" {
+			// ServeHTTP owns the listener and request drain. Its context path is
+			// bounded by the transport's graceful-shutdown timeout.
+			if err := <-errCh; err != nil {
+				log.Errorw("server graceful shutdown failed", "error", err)
+				return 1
+			}
+		}
+		return 0
+	case err := <-errCh:
+		server.Shutdown()
+		if err != nil {
+			log.Errorw("server exited with error", "error", err)
+			return 1
+		}
+		return 0
+	}
+}
+
 func runServer(ctx context.Context, log util.Logger, opts options) int {
 	// One load: the seeded store's initial snapshot IS the validated
 	// startup configuration (design/09 — startup with an invalid config
@@ -289,29 +340,7 @@ func runServer(ctx context.Context, log util.Logger, opts options) int {
 	// store already holds the validated startup snapshot as last-known-good.
 	server.SetConfigStore(store)
 
-	// Start serving MCP according to transport
-	errCh := make(chan error, 1)
-	go func() {
-		if opts.transport == "stdio" || (opts.transport == "" && opts.httpAddr == "") {
-			log.Infow("starting MCP server", "transport", "stdio")
-			errCh <- server.ServeStdio(ctx)
-		} else {
-			log.Infow("starting MCP server", "transport", "http", "addr", opts.httpAddr)
-			errCh <- server.ServeHTTP(ctx, opts.httpAddr)
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		log.Infow("shutdown signal received")
-		return 0
-	case err := <-errCh:
-		if err != nil {
-			log.Errorw("server exited with error", "error", err)
-			return 1
-		}
-		return 0
-	}
+	return serveConfiguredMCP(ctx, log, opts, server)
 }
 
 // === Games Configuration Management ===

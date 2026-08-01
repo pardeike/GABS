@@ -94,8 +94,14 @@ func (e *supersededConnectionError) Error() string {
 // client whose credential stops matching before publication is closed —
 // it must never survive as GABP evidence or serve mirrored tools.
 func (c *ServerGABPConnector) AttemptConnection(ctx context.Context, gameID string, port int, token string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	c.log.Debugw("attempting GABP connection for game", "gameId", gameID, "addr", addr)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	// Pre-connect credential check: never even dial with a credential that
 	// contradicts the current claim's endpoint.
@@ -111,8 +117,17 @@ func (c *ServerGABPConnector) AttemptConnection(ctx context.Context, gameID stri
 		c.server.dispatchGABPDisconnect(gameID, client, err)
 	})
 
-	// Store client reference for cleanup
+	// Store the pending client atomically with the shutdown admission check.
+	// Close cannot cancel a dial retry before it owns a socket, so shutdown's
+	// server context is the cancellation mechanism; no client may be inserted
+	// after that context has been cancelled and the shutdown snapshot taken.
 	c.server.mu.Lock()
+	select {
+	case <-c.server.shutdownCh:
+		c.server.mu.Unlock()
+		return context.Canceled
+	default:
+	}
 	c.server.gabpClients[gameID] = client
 	delete(c.server.gabpDisconnects, gameID)
 	c.server.mu.Unlock()
@@ -128,6 +143,27 @@ func (c *ServerGABPConnector) AttemptConnection(ctx context.Context, gameID stri
 		}
 		c.server.mu.Unlock()
 		return err
+	}
+
+	// A dial/handshake can complete concurrently with cancellation. Refuse
+	// publication after shutdown even if Connect won that select race, and
+	// remove/close this exact client so it cannot survive the join.
+	c.server.mu.Lock()
+	shuttingDown := false
+	select {
+	case <-c.server.shutdownCh:
+		shuttingDown = true
+	default:
+	}
+	if shuttingDown {
+		if current := c.server.gabpClients[gameID]; current == client {
+			delete(c.server.gabpClients, gameID)
+		}
+	}
+	c.server.mu.Unlock()
+	if shuttingDown {
+		_ = client.Close()
+		return context.Canceled
 	}
 
 	c.log.Infow("GABP connection established", "gameId", gameID, "addr", addr)

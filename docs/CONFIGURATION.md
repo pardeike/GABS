@@ -804,7 +804,7 @@ though it launches the identical command. Adding a *new* profile (`arena`)
 never touches other profiles' proof; only the context you actually changed
 resets. Do the conversion deliberately, then re-establish proof with a couple
 of real starts. GABS never edits proof into existence and never restores it
-automatically (`gabs games doctor --show-last-good <id>` can print the last-
+automatically (`gabs games doctor <id> --show-last-good` can print the last-
 known-good entry for a human to compare).
 
 ## ID-Consolidation Checklist
@@ -845,7 +845,7 @@ Nothing warns you at the game level, because to an old binary these are just
 unrecognized keys.
 
 Before relying on a profiled config, confirm your GABS binary is current
-(`gabs --version`) on every machine that reads the config. A profile-enabled
+(`gabs version`) on every machine that reads the config. A profile-enabled
 config must not be used with a pre-profile binary. Some validation rules
 (duplicate-member rejection, unknown-key errors inside the new subtrees) also
 only exist in current binaries.
@@ -856,14 +856,16 @@ only exist in current binaries.
 
 Config validation reports exact JSON paths. The main rules:
 
-- **Game IDs** are freeform strings but must map to a unique runtime directory,
-  so each ID must be non-empty, contain no NUL byte or backslash, not be an
-  absolute path, and be in canonical slash form — no `.`, `..`, `//`, or
-  trailing `/` segments. Nested `/` (e.g. `factory/old`) and `~` are allowed.
-  Two IDs that differ only by case (e.g. `Adventure` vs `adventure`) are rejected
-  because they would share one directory on case-insensitive filesystems. The
-  case-collision rule is checked when the config is parsed; the per-ID rules are
-  enforced when a runtime path is computed (start/status/stop/connect).
+- **Game IDs** must map injectively to runtime directories. Each ID must be
+  non-empty, contain no NUL byte or backslash, not be an absolute path, and use
+  canonical slash form — no `.`, `..`, `//`, or trailing `/` segments. Nested
+  `/` (e.g. `factory/old`), Unicode, and `~` are allowed. Distinct IDs that
+  differ only by case (`Adventure` vs `adventure`) or canonical Unicode
+  composition (`café` vs `café`) are rejected because they can share one
+  directory on case- or normalization-insensitive filesystems. All per-ID,
+  map-key/declared-ID, and cross-ID collision rules run when the config is
+  loaded and when the CLI adds or updates a game; an accepted config therefore
+  cannot fail later merely because a runtime path is computed.
 - Profile and input names match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`
   (case-sensitive).
 - `defaultProfile` is required when `profiles` is non-empty and must name an
@@ -1039,13 +1041,18 @@ takes longer to start listening, override the startup waits in
 When no lifecycle hooks are configured, GABS falls back to built-in stopping.
 With `stopProcessName` set, GABS:
 
-1. Finds and stops processes with that name;
-2. Falls back to stopping the launched process if no match is found;
+1. Verifies the pinned workload PID and, when its start-time fingerprint still
+   matches, signals that exact process and returns without a name scan;
+2. Only when that PID is absent, stopped, or cannot be used safely, scans
+   `stopProcessName` and signals every match (with a warning for multiple
+   matches);
 3. Supports graceful termination (`games_stop`) and force killing
    (`games_kill`).
 
-Platform support: Windows uses `tasklist`/`taskkill`; macOS and Linux use
-`pgrep` with standard process signals.
+The action and its verification scans are bounded by the persisted operation
+deadline. Windows uses context-bound `tasklist`/`taskkill`; macOS uses
+context-bound `pgrep` plus standard process signals; Linux scans `/proc` and
+uses standard process signals.
 
 Common process names:
 

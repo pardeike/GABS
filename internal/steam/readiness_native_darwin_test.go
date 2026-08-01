@@ -5,6 +5,7 @@ package steam
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -48,6 +49,77 @@ func TestSteamAPILibraryCandidatesIncludePerUserBundle(t *testing.T) {
 		}
 	}
 	t.Fatalf("per-user Steam API library candidate %q is missing: %v", want, steamAPILibraryCandidates())
+}
+
+func TestProbeLibraryCandidatesContinuesPastUnavailableCandidate(t *testing.T) {
+	var visited []string
+	observation := probeLibraryCandidates(
+		[]string{"stale.dylib", "compatible.dylib", "unused.dylib"},
+		ReadinessStageClientLibrary,
+		"Steam client library",
+		func(path string) (probeObservation, error) {
+			visited = append(visited, path)
+			switch path {
+			case "stale.dylib":
+				return probeObservation{State: probeStateUnavailable, Stage: ReadinessStageClientLibrary, Detail: "missing required symbol"}, nil
+			case "compatible.dylib":
+				return probeObservation{State: probeStateReady, Stage: ReadinessStageGlobalUser}, nil
+			default:
+				t.Fatalf("scan continued after a definitive observation to %q", path)
+				return probeObservation{}, nil
+			}
+		},
+	)
+	if observation.State != probeStateReady || observation.Stage != ReadinessStageGlobalUser {
+		t.Fatalf("observation = %+v, want compatible later candidate", observation)
+	}
+	if strings.Join(visited, ",") != "stale.dylib,compatible.dylib" {
+		t.Fatalf("visited candidates = %v", visited)
+	}
+}
+
+func TestProbeLibraryCandidatesRetainsFirstDefinitiveNotReady(t *testing.T) {
+	var visited []string
+	observation := probeLibraryCandidates(
+		[]string{"unavailable.dylib", "not-ready.dylib", "would-be-ready.dylib"},
+		ReadinessStageSteamAPI,
+		"Steam API library",
+		func(path string) (probeObservation, error) {
+			visited = append(visited, path)
+			switch path {
+			case "unavailable.dylib":
+				return probeObservation{State: probeStateUnavailable, Stage: ReadinessStageSteamAPI, Detail: "incompatible ABI"}, nil
+			case "not-ready.dylib":
+				return probeObservation{State: probeStateNotReady, Stage: ReadinessStageAppInterface, Detail: "interface is still loading"}, nil
+			default:
+				t.Fatalf("scan continued after not-ready evidence to %q", path)
+				return probeObservation{}, nil
+			}
+		},
+	)
+	if observation.State != probeStateNotReady || observation.Stage != ReadinessStageAppInterface || observation.Detail != "interface is still loading" {
+		t.Fatalf("observation = %+v, want the first definitive not-ready result", observation)
+	}
+	if strings.Join(visited, ",") != "unavailable.dylib,not-ready.dylib" {
+		t.Fatalf("visited candidates = %v", visited)
+	}
+}
+
+func TestProbeLibraryCandidatesKeepsFurthestUnavailableEvidence(t *testing.T) {
+	observation := probeLibraryCandidates(
+		[]string{"older.dylib", "newer.dylib"},
+		ReadinessStageSteamAPI,
+		"Steam API library",
+		func(path string) (probeObservation, error) {
+			if path == "older.dylib" {
+				return probeObservation{State: probeStateUnavailable, Stage: ReadinessStageSteamAPI, Detail: "missing init"}, nil
+			}
+			return probeObservation{State: probeStateUnavailable, Stage: ReadinessStageAppInterface, Detail: "missing app accessor"}, nil
+		},
+	)
+	if observation.State != probeStateUnavailable || observation.Stage != ReadinessStageAppInterface || observation.Detail != "missing app accessor" {
+		t.Fatalf("observation = %+v, want furthest unavailable evidence", observation)
+	}
 }
 
 func TestAppStateRequiresSubscriptionAndInstallation(t *testing.T) {

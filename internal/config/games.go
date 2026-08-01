@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // GameConfig represents a single game configuration
@@ -164,8 +166,9 @@ func parseGamesConfig(data []byte) (*GamesConfig, error) {
 	}
 
 	// Extension validation (profiles, launch inputs, lifecycle gate).
-	// Deliberately NOT the legacy per-game Validate(): loading never ran it,
-	// and existing configs must keep loading exactly as before.
+	// Deliberately do not call the broad legacy per-game Validate(): loading
+	// never applied its unrelated required-field rules. Runtime-safe identity
+	// validation below is the narrow, release-noted compatibility change.
 	extErrs := ukErrs
 	opts := DefaultValidationOptions()
 	gameIDs := make([]string, 0, len(config.Games))
@@ -176,11 +179,10 @@ func parseGamesConfig(data []byte) (*GamesConfig, error) {
 	// Injective storage mapping: distinct game IDs must not map to the
 	// same runtime directory. The per-ID canonical-form rule (ValidateGameID)
 	// handles path-normalizing spellings, but two DISTINCT canonical IDs can still
-	// collide by CASE on a case-insensitive filesystem (macOS/Windows) — e.g.
-	// "Adventure" vs "adventure". Reject such a config UNIFORMLY (so a config is
-	// portable — valid or invalid the same way on every filesystem) rather than
-	// letting status/history/stop for one ID silently reach another's claim. The
-	// fold key is the cleaned, lower-cased directory-relative path.
+	// collide by case or Unicode normalization on common filesystems — e.g.
+	// "Adventure" vs "adventure", or composed vs decomposed accents. Reject such
+	// a config UNIFORMLY (so it is valid or invalid the same way on every host)
+	// rather than letting status/history/stop for one ID reach another's claim.
 	dirOwner := make(map[string]string, len(gameIDs))
 	for _, id := range gameIDs {
 		// Every entry must be addressable at runtime: an ID that
@@ -204,11 +206,11 @@ func parseGamesConfig(data []byte) (*GamesConfig, error) {
 				Message: fmt.Sprintf("entry is keyed %q but declares id %q; they must match", id, g.ID),
 			})
 		}
-		key := strings.ToLower(path.Clean("/" + id))
+		key := gameRuntimeDirectoryKey(id)
 		if other, ok := dirOwner[key]; ok {
 			extErrs = append(extErrs, ConfigIssue{
 				Path:    "games." + id,
-				Message: fmt.Sprintf("game ID %q maps to the same runtime directory as %q on a case-insensitive filesystem; use distinct IDs", id, other),
+				Message: fmt.Sprintf("game ID %q maps to the same runtime directory as %q on a case- or normalization-insensitive filesystem; use distinct IDs", id, other),
 			})
 		} else {
 			dirOwner[key] = id
@@ -341,16 +343,54 @@ func (c *GamesConfig) AddGame(game GameConfig) error {
 	if err := game.Validate(); err != nil {
 		return err
 	}
+	// Keep the mutation boundary at least as strict as the load boundary. A
+	// successful CLI add must never persist an ID that runtime-state paths (and
+	// therefore the next config load) reject.
+	if err := ValidateGameID(game.ID); err != nil {
+		return &ValidationError{Issues: []ConfigIssue{{
+			Path:    "/games/" + escapePointerToken(game.ID),
+			Message: fmt.Sprintf("game ID is not addressable at runtime: %v", err),
+		}}}
+	}
 	// Extension fields must never be constructable in an invalid state that
 	// would only fail on the next load.
 	if errs, _ := ValidateGameExtensions(game.ID, &game, DefaultValidationOptions()); len(errs) > 0 {
 		return &ValidationError{Issues: errs}
+	}
+	// The exact-ID case is an update and is safe. Any distinct ID with the same
+	// portable normalized/case-folded directory key can alias it on a common
+	// filesystem, so reject before mutating just as parseGamesConfig does.
+	candidateKey := gameRuntimeDirectoryKey(game.ID)
+	for existingID := range c.Games {
+		if existingID != game.ID && gameRuntimeDirectoryKey(existingID) == candidateKey {
+			return &ValidationError{Issues: []ConfigIssue{{
+				Path:    "/games/" + escapePointerToken(game.ID),
+				Message: fmt.Sprintf("game ID %q maps to the same runtime directory as %q on a case- or normalization-insensitive filesystem; use distinct IDs", game.ID, existingID),
+			}}}
+		}
 	}
 	if c.Games == nil {
 		c.Games = make(map[string]GameConfig)
 	}
 	c.Games[game.ID] = game
 	return nil
+}
+
+// gameRuntimeDirectoryKey is the one portable collision key used by both
+// config loading and in-memory mutation. ValidateGameID establishes canonical
+// slash form. Each component is canonically normalized before lower-casing,
+// closing both case and composed/decomposed aliases on normalization- and
+// case-insensitive filesystems (notably default macOS volumes).
+func gameRuntimeDirectoryKey(id string) string {
+	clean := strings.TrimPrefix(path.Clean("/"+id), "/")
+	components := strings.Split(clean, "/")
+	for i, component := range components {
+		// Normalize on both sides of the fold: canonicalize the user's
+		// spelling before case mapping, then canonicalize any combining form
+		// produced by that mapping.
+		components[i] = norm.NFC.String(strings.ToLower(norm.NFC.String(component)))
+	}
+	return strings.Join(components, "/")
 }
 
 // Validate checks if the game configuration is valid

@@ -1,6 +1,7 @@
 package process
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -64,7 +65,7 @@ func TestGateStartErrorCarriesEarnedWarnings(t *testing.T) {
 
 	findProcessesByNameMu.Lock()
 	prevFind := findProcessesByNameFunc
-	findProcessesByNameFunc = func(string) ([]int, error) { return []int{4242}, nil }
+	findProcessesByNameFunc = func(context.Context, string) ([]int, error) { return []int{4242}, nil }
 	findProcessesByNameMu.Unlock()
 	t.Cleanup(func() {
 		findProcessesByNameMu.Lock()

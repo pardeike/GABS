@@ -79,24 +79,17 @@ func steamAPILibraryCandidates() []string {
 }
 
 func probeSteamClientLibraries(candidates []string) probeObservation {
-	var failures []string
-	for _, path := range candidates {
+	return probeLibraryCandidates(candidates, ReadinessStageClientLibrary, "Steam client library", func(path string) (probeObservation, error) {
 		handle, err := purego.Dlopen(path, purego.RTLD_NOW|purego.RTLD_LOCAL)
 		if err != nil {
-			failures = append(failures, fmt.Sprintf("%s: %v", path, err))
-			continue
+			return probeObservation{}, err
 		}
 		observation := probeLoadedSteamClient(handle, path)
 		if err := purego.Dlclose(handle); err != nil && observation.Detail == "" {
 			observation.Detail = fmt.Sprintf("client library cleanup: %v", err)
 		}
-		return observation
-	}
-	detail := "Steam client library was not loadable"
-	if len(failures) > 0 {
-		detail += ": " + strings.Join(failures, "; ")
-	}
-	return probeObservation{State: probeStateUnavailable, Stage: ReadinessStageClientLibrary, Detail: truncateProbeDetail(detail)}
+		return observation, nil
+	})
 }
 
 func probeLoadedSteamClient(handle uintptr, path string) probeObservation {
@@ -154,24 +147,57 @@ func appStateObservation(subscribed, installed bool) probeObservation {
 }
 
 func probeSteamAPILibraries(candidates []string, appID uint32) probeObservation {
-	var failures []string
-	for _, path := range candidates {
+	return probeLibraryCandidates(candidates, ReadinessStageSteamAPI, "Steam API library", func(path string) (probeObservation, error) {
 		handle, err := purego.Dlopen(path, purego.RTLD_NOW|purego.RTLD_LOCAL)
 		if err != nil {
-			failures = append(failures, fmt.Sprintf("%s: %v", path, err))
-			continue
+			return probeObservation{}, err
 		}
 		observation := probeLoadedSteamAPI(handle, path, appID)
 		if err := purego.Dlclose(handle); err != nil && observation.Detail == "" {
 			observation.Detail = fmt.Sprintf("Steam API library cleanup: %v", err)
 		}
-		return observation
+		return observation, nil
+	})
+}
+
+// probeLibraryCandidates keeps layout compatibility failures local to one
+// candidate. An installed Steam tree can contain stale copies in an older
+// bundle layout; a loadable dylib that lacks the required ABI is therefore not
+// proof that all later candidates are unusable. Ready and not-ready are actual
+// runtime observations and return immediately. If every candidate is
+// unavailable, retain the furthest interface evidence (and the first at an
+// equal stage) for the parent diagnostic.
+func probeLibraryCandidates(
+	candidates []string,
+	fallbackStage ReadinessStage,
+	libraryLabel string,
+	probe func(string) (probeObservation, error),
+) probeObservation {
+	var loadFailures []string
+	var bestUnavailable *probeObservation
+	for _, path := range candidates {
+		observation, err := probe(path)
+		if err != nil {
+			loadFailures = append(loadFailures, fmt.Sprintf("%s: %v", path, err))
+			continue
+		}
+		if observation.State != probeStateUnavailable {
+			return observation
+		}
+		if bestUnavailable == nil || stageRank(observation.Stage) > stageRank(bestUnavailable.Stage) {
+			candidate := observation
+			bestUnavailable = &candidate
+		}
 	}
-	detail := "Steam API library was not loadable"
-	if len(failures) > 0 {
-		detail += ": " + strings.Join(failures, "; ")
+	if bestUnavailable != nil {
+		bestUnavailable.Detail = truncateProbeDetail(bestUnavailable.Detail)
+		return *bestUnavailable
 	}
-	return probeObservation{State: probeStateUnavailable, Stage: ReadinessStageSteamAPI, Detail: truncateProbeDetail(detail)}
+	detail := libraryLabel + " was not loadable"
+	if len(loadFailures) > 0 {
+		detail += ": " + strings.Join(loadFailures, "; ")
+	}
+	return probeObservation{State: probeStateUnavailable, Stage: fallbackStage, Detail: truncateProbeDetail(detail)}
 }
 
 func probeLoadedSteamAPI(handle uintptr, path string, appID uint32) probeObservation {

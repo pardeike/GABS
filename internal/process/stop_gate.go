@@ -1,6 +1,7 @@
 package process
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -220,10 +221,19 @@ func ExecuteStopAction(req StopRequest) (*StopOutcome, *StopRefusal, error) {
 			}
 		}
 	} else {
-		warnings, err := runBuiltinAction(&claimSnap, req.Action)
+		actionDeadline := op.AttemptStartedAt.Add(actionBudget(nil))
+		if !op.Deadline.IsZero() && op.Deadline.Before(actionDeadline) {
+			actionDeadline = op.Deadline
+		}
+		actionCtx, cancelAction := context.WithDeadline(context.Background(), actionDeadline)
+		warnings, err := runBuiltinAction(actionCtx, &claimSnap, req.Action)
+		cancelAction()
 		outcome.Warnings = append(outcome.Warnings, warnings...)
 		if err != nil {
 			actionFailed = OutcomeActionFailed
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				actionFailed = OutcomeActionTimedOut
+			}
 			failDetail = err.Error()
 		}
 	}
@@ -401,7 +411,15 @@ func attachHookEvidence(result *RuntimeActionResult, hr *HookResult) {
 // fenced by launchID + operationID: a completion racing a kill that removed
 // the claim is discarded and can never resurrect state (design/06).
 func persistStopCompletion(req StopRequest, launchID, operationID, phase, status string, result *RuntimeActionResult, outcome *StopOutcome) {
-	final, err := FencedTransition(req.GameID, req.ConfigDir, launchID, operationID, func(s *RuntimeState) error {
+	var credit func(*RuntimeState) error
+	if req.HistoryContextHash != "" && (result.Outcome == OutcomeActionFailed || result.Outcome == OutcomeActionTimedOut) {
+		credit = func(cur *RuntimeState) error {
+			class := Classify(result.Outcome, ClassifyContext{}).Class
+			return ApplyActionFailureLocked(req.GameID, req.ConfigDir, req.HistoryProfile, req.HistoryContextHash,
+				result.Outcome, class, cur.AppliedInputNames, result.Timestamp)
+		}
+	}
+	final, err := FencedTransitionWithCredit(req.GameID, req.ConfigDir, launchID, operationID, func(s *RuntimeState) error {
 		if phase != "" {
 			s.Phase = phase
 		}
@@ -411,34 +429,18 @@ func persistStopCompletion(req StopRequest, launchID, operationID, phase, status
 		s.Operation = nil
 		s.LastActionResult = result
 		return nil
-	})
+	}, credit)
 	if err != nil {
 		if errors.Is(err, ErrFencingViolation) || errors.Is(err, ErrNoRuntimeClaim) {
 			outcome.Warnings = append(outcome.Warnings, fmt.Sprintf("the %s result was not persisted: the runtime claim was superseded while the action ran", req.Action))
 			return
 		}
-		outcome.Warnings = append(outcome.Warnings, fmt.Sprintf("the %s result could not be persisted: %v", req.Action, err))
+		outcome.Warnings = append(outcome.Warnings, fmt.Sprintf("the %s result and its history could not be persisted atomically; the operation remains fenced for recovery: %v", req.Action, err))
 		return
 	}
 	outcome.Result = result
 	outcome.FinalPhase = final.Phase
 
-	// A terminal action failure of an accepted attempt updates the active
-	// context's failure record (design/20) — under the same lock,
-	// so a superseded successor is never touched (the fenced transition
-	// above already proved this launch is still current).
-	if req.HistoryContextHash != "" && (result.Outcome == OutcomeActionFailed || result.Outcome == OutcomeActionTimedOut) {
-		lock, lerr := AcquireTransitionLock(req.GameID, req.ConfigDir, transitionLockGateTimeout)
-		if lerr == nil {
-			if cur, cerr := loadRuntimeStateLocked(req.GameID, req.ConfigDir); cerr == nil && cur != nil && cur.LaunchID == launchID {
-				class := Classify(result.Outcome, ClassifyContext{}).Class
-				// The pinned input-name set (names only, never values) so an
-				// input-bearing launch's failure records its inputs.
-				ApplyActionFailureLocked(req.GameID, req.ConfigDir, req.HistoryProfile, req.HistoryContextHash, result.Outcome, class, cur.AppliedInputNames, result.Timestamp)
-			}
-			lock.Release()
-		}
-	}
 }
 
 // errStopAttachmentLive refuses a terminated-removal because the current
@@ -595,18 +597,28 @@ func RemoveRuntimeStateIfCurrent(gameID, configDir, instanceID, launchID string,
 	return creditPendingThenRemoveLocked(gameID, configDir, cur)
 }
 
-// runBuiltinAction executes the pinned built-in fallback: the verified
-// workload PID first, then every stopProcessName match. Signaling nothing
-// (already gone) is not a failure — verification decides the outcome; only
-// an inability to act (scan error, all signals refused) fails the action.
-func runBuiltinAction(claim *RuntimeState, action string) ([]string, error) {
+// runBuiltinAction executes the pinned built-in fallback: signal a verified
+// workload PID and return; only when that PID is absent, stopped, or unsafe to
+// use does it scan and signal every stopProcessName match. Signaling nothing
+// (already gone) is not a failure — verification decides the outcome; only an
+// inability to act (scan error, all signals refused) fails the action.
+func runBuiltinAction(ctx context.Context, claim *RuntimeState, action string) ([]string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var warnings []string
 	graceful, force := pinnedBuiltinStrategies(claim)
 	signal := func(pid int) error {
-		if action == OperationActionKill {
-			return builtinKillFunc(force, pid)
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		return builtinTerminateFunc(graceful, pid)
+		if action == OperationActionKill {
+			return builtinKillFunc(ctx, force, pid)
+		}
+		return builtinTerminateFunc(ctx, graceful, pid)
 	}
 
 	if claim.PIDRole == PIDRoleWorkload && claim.GamePID > 0 {
@@ -627,7 +639,7 @@ func runBuiltinAction(claim *RuntimeState, action string) ([]string, error) {
 	if claim.StopProcessName == "" {
 		return warnings, nil // nothing left to act on; verification decides
 	}
-	pids, err := callFindProcessesByName(claim.StopProcessName)
+	pids, err := callFindProcessesByNameContext(ctx, claim.StopProcessName)
 	if err != nil {
 		return warnings, fmt.Errorf("process scan for %q failed: %w", claim.StopProcessName, err)
 	}
@@ -670,14 +682,14 @@ func builtinStrategiesForPlatform() (string, string) {
 // The strategy pin names the mechanism; on any one machine the platform
 // implementation is that mechanism (claims never move between OSes), so
 // the executors dispatch to the existing platform helpers.
-func builtinTerminate(strategy string, pid int) error {
+func builtinTerminate(ctx context.Context, strategy string, pid int) error {
 	_ = strategy
-	return terminateProcess(pid, 0)
+	return terminateProcessContext(ctx, pid, 0)
 }
 
-func builtinKill(strategy string, pid int) error {
+func builtinKill(ctx context.Context, strategy string, pid int) error {
 	_ = strategy
-	return killProcess(pid)
+	return killProcessContext(ctx, pid)
 }
 
 // stopEvidenceRound is one verification poll over the existing evidence
@@ -711,10 +723,12 @@ func verifyTermination(req StopRequest, claim *RuntimeState, op RuntimeOperation
 	if !op.Deadline.IsZero() && op.Deadline.Before(deadline) {
 		deadline = op.Deadline
 	}
-	// Always evaluate at least one round, even if the action consumed the
-	// whole budget — the outcome must rest on evidence, not elapsed time.
+	// Never invent time beyond the persisted operation deadline. If the action
+	// consumed the whole budget, termination is unverified; starting a fresh
+	// scan here would leave a stale invocation acting after another caller may
+	// legitimately recover or supersede the expired operation.
 	if !deadline.After(time.Now()) {
-		deadline = time.Now().Add(50 * time.Millisecond)
+		return OutcomeTerminationUnverified, "the operation deadline elapsed before termination could be verified"
 	}
 
 	var statusHook *launch.ResolvedHook
@@ -750,7 +764,9 @@ func verifyTermination(req StopRequest, claim *RuntimeState, op RuntimeOperation
 		if superseded {
 			break
 		}
-		last = evaluateStopEvidence(req, claim, statusHook, profile, remaining)
+		roundCtx, cancelRound := context.WithTimeout(context.Background(), remaining)
+		last = evaluateStopEvidence(roundCtx, req, claim, statusHook, profile, remaining)
+		cancelRound()
 		if last.allStopped() || last.noSources() {
 			break
 		}
@@ -798,7 +814,7 @@ func verifyTermination(req StopRequest, claim *RuntimeState, op RuntimeOperation
 	}
 }
 
-func evaluateStopEvidence(req StopRequest, claim *RuntimeState, statusHook *launch.ResolvedHook, profile string, remaining time.Duration) stopEvidenceRound {
+func evaluateStopEvidence(ctx context.Context, req StopRequest, claim *RuntimeState, statusHook *launch.ResolvedHook, profile string, remaining time.Duration) stopEvidenceRound {
 	var r stopEvidenceRound
 
 	if claim.PIDRole == PIDRoleWorkload && claim.GamePID > 0 {
@@ -817,7 +833,7 @@ func evaluateStopEvidence(req StopRequest, claim *RuntimeState, statusHook *laun
 
 	if claim.StopProcessName != "" {
 		r.sources++
-		pids, err := callFindProcessesByName(claim.StopProcessName)
+		pids, err := callFindProcessesByNameContext(ctx, claim.StopProcessName)
 		switch {
 		case err != nil:
 			r.anyUnknown = true
@@ -832,7 +848,16 @@ func evaluateStopEvidence(req StopRequest, claim *RuntimeState, statusHook *laun
 
 	if statusHook != nil {
 		r.sources++
-		verdict, hr := runStatusProbeFunc(statusHook, claim.GameID, profile, remaining)
+		probeRemaining := remaining
+		if deadline, ok := ctx.Deadline(); ok {
+			probeRemaining = time.Until(deadline)
+		}
+		if probeRemaining <= 0 {
+			r.anyUnknown = true
+			r.details = append(r.details, "verification deadline elapsed before the status hook could run")
+			return r
+		}
+		verdict, hr := runStatusProbeFunc(statusHook, claim.GameID, profile, probeRemaining)
 		switch verdict {
 		case StatusRunning:
 			r.running = true

@@ -58,10 +58,12 @@ type Server struct {
 	// JOIN them before a test's TempDir teardown (or a real server exit). A
 	// lease/mirroring goroutine writing runtime.json during RemoveAll is the
 	// TempDir-cleanup race this closes.
-	bgWG         sync.WaitGroup
-	disconnectWG sync.WaitGroup // in-flight peer-close handlers (joined by Shutdown)
-	shutdownCh   chan struct{}
-	shutdownOnce sync.Once
+	bgWG           sync.WaitGroup
+	disconnectWG   sync.WaitGroup // in-flight peer-close handlers (joined by Shutdown)
+	shutdownCh     chan struct{}
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
+	shutdownOnce   sync.Once
 
 	// newController builds the process controller for a start. Injectable so a
 	// test can supply a controller with DETERMINISTIC liveness (exit before
@@ -115,7 +117,12 @@ func (s *Server) Shutdown() {
 	// below) or sees shutdownCh closed and no-ops. No clearBridgeAttachment
 	// write can escape the join.
 	s.mu.Lock()
-	s.shutdownOnce.Do(func() { close(s.shutdownCh) })
+	s.shutdownOnce.Do(func() {
+		close(s.shutdownCh)
+		if s.shutdownCancel != nil {
+			s.shutdownCancel()
+		}
+	})
 	clients := make([]*gabp.Client, 0, len(s.gabpClients))
 	for id, c := range s.gabpClients {
 		if c != nil {
@@ -156,6 +163,7 @@ func (s *Server) admitBackgroundTask() bool {
 }
 
 func NewServer(log util.Logger) *Server {
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	return &Server{
 		log:             log,
 		tools:           make(map[string]*ToolHandler),
@@ -173,6 +181,8 @@ func NewServer(log util.Logger) *Server {
 		instanceID:      newServerInstanceID(),
 		ownerLease:      (&config.GamesConfig{}).GetSessionOwnerLease(),
 		shutdownCh:      make(chan struct{}),
+		shutdownCtx:     shutdownCtx,
+		shutdownCancel:  shutdownCancel,
 		newController:   func() process.ControllerInterface { return process.NewController() },
 	}
 }
@@ -4869,7 +4879,7 @@ func (s *Server) attemptStartupGABPConnection(
 		}
 	}
 
-	ctx, cancel := context.WithCancelCause(context.Background())
+	ctx, cancel := context.WithCancelCause(s.shutdownCtx)
 	defer cancel(nil)
 
 	timeoutCtx, timeoutCancel := context.WithTimeoutCause(ctx, timeout,

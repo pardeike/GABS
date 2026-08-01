@@ -21,6 +21,10 @@
   concurrency); old-binary warning.
 - docs/TROUBLESHOOTING (or a section): the bad-case map table from
   05-start-pipeline.md, verbatim — it doubles as support documentation.
+- docs/releases/v1.1.0.md: user-facing compatibility notes for strict unknown
+  MCP arguments, bounded `timeout`, duplicate-member rejection, and the
+  pre-1.1.0 silent profile-field drop; the release workflow prepends this
+  reviewed note to generated commit/PR notes.
 - example-config.json: one neutral profiled game with hooks incl. the
   wrapper-based status hook.
 - skills/gabs-mcp/SKILL.md (concise additions): check games_show before

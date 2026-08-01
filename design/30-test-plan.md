@@ -30,7 +30,11 @@ struct decoding would silently collapse; static resolvability errors with
 both JSON path and filesystem path; JSON-path accuracy; Windows
 non-executable hook command rejection; the M1 lifecycle feature gate is
 removed (M2.14) — `lifecycle` fields now validate and execute rather than
-being rejected as "not yet supported".
+being rejected as "not yet supported". `AddGame` enforces the same canonical,
+runtime-safe game-ID and portable case-fold/Unicode-normalization collision
+rules as config loading (composed and decomposed forms collide); a rejected add
+does not mutate the map, and every accepted ID round-trips through save plus
+load.
 
 ## T-RES — Resolver
 
@@ -42,7 +46,9 @@ substitution without shell; deep-copy immutability across reload; one
 pinned revision per resolution; hook PATH resolution to absolute;
 `GABS_FORWARD_ENV` equals the actually-injected key set (drift
 assertion); resolved-spec platform-size check (oversized env block/argv →
-structured Stage 2 error naming the part, not E2BIG/spawn failure).
+structured Stage 2 error naming the part, not E2BIG/spawn failure), with
+Darwin-vs-Linux combined/per-string limits, non-4-KiB Linux pages, Darwin's
+valid 200-KiB single argument, and pointer-table/terminator/alignment overhead.
 
 ## T-START — Start pipeline
 
@@ -87,7 +93,11 @@ structured Stage 2 error naming the part, not E2BIG/spawn failure).
   Stage 4/GABP budget; post-proof transition overhead crossing the old
   readiness deadline still restamps the unchanged fencing identity, while a
   successor identity cannot be overwritten. SteamAppId and non-macOS paths
-  retain their current advisory/assistance behavior.
+  retain their current advisory/assistance behavior. Native macOS library
+  candidate scanning continues after loadable-but-incompatible candidates for
+  both the client and API libraries, returns the first ready/not-ready
+  observation, and retains the furthest unavailable evidence only after all
+  candidates are exhausted.
 - Pre-start probes: no claim + any profile's probe running →
   external_instance_detected (+ external snapshot); probes unknown →
   start proceeds with warning listing unprobeable profiles; with claim +
@@ -134,7 +144,9 @@ scenario documented-only (manual test); hook env excludes GABP secrets;
 stderr tail in failure results; PID-reuse fingerprint mismatch;
 inspection errors (permission-denied process table, fingerprint read
 failure) → unknown, never stopped, distinct from no-match;
-stopProcessName collision warning.
+stopProcessName collision warning; built-in process discovery, every per-PID
+signal, and verification name scans cancel at the persisted operation deadline
+(no later PID signaled after expiry).
 
 ## T-FENCE — Phases, transition lock, fencing
 
@@ -156,6 +168,12 @@ discarded (ABA test across claim delete/recreate); the lock is provably
 not held during hook execution (a blocked hook does not prevent the other
 process from reading state); lock acquisition failure surfaces as a
 bounded `operation_in_progress`, never a hang.
+
+Terminal failed-stop and unobserved-start history writes occur while the exact
+launch/operation is still fenced and before its runtime completion commits. A
+forced history write failure reaches the caller and leaves the operation in
+the claim for retry/recovery; a competing retry/successor cannot create a gap
+that silently drops `lastFailure` or `consecutiveFailures`.
 
 Atomic claim publication: a status read racing initial claim publication
 never observes empty/partial JSON (hammer test: reader loop during
@@ -325,7 +343,9 @@ one code (exhaustiveness assertion over the outcome enum).
 (Stages 1–4); CLI start terminates with `started_attachment_deferred` and
 exits without GABP client after Stage 4, and a later server games_connect
 attaches from the claim endpoint; stop/kill from snapshot after server
-exit; repair --forget-runtime.
+exit; repair --forget-runtime. Doctor's broadly-readable findings describe
+the actual contents of config, endpoint/runtime state, logs, history, and lock
+files instead of attributing the per-launch bridge token to all of them.
 
 ## T-ACC — Acceptance (issue scenario, neutral naming)
 
@@ -359,6 +379,12 @@ surfacing exit code + output tail end-to-end.
 - old bridge with no delivery report → overall unknown, zero
   deliveriesVerified; genuinely partial report (one channel mismatched or
   unreported) → overall partial; the two are never conflated.
+- every production server transport return and context-cancellation path calls
+  `Server.Shutdown`; HTTP cancellation waits for its bounded graceful transport
+  shutdown, while stdio cancellation does not wait forever on an
+  uninterruptible stdin read; a `started_bridge_pending` retry with a long GABP
+  timeout is cancelled and joined promptly, and cannot publish a connection
+  after shutdown.
 
 ## Gates
 

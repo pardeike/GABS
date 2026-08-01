@@ -60,7 +60,7 @@ func TestPreSpawnFailurePublishesNoDiagnostics(t *testing.T) {
 	s.SetConfigDir(dir)
 	game := config.GameConfig{
 		ID: "big", Name: "Big", LaunchMode: "DirectPath", Target: exe,
-		Args: []string{strings.Repeat("x", 200000)},
+		Args: definitelyOversizedExecArgs(),
 	}
 	s.RegisterGameManagementTools(&config.GamesConfig{
 		Version: "1.0", Games: map[string]config.GameConfig{game.ID: game},
@@ -83,6 +83,17 @@ func TestPreSpawnFailurePublishesNoDiagnostics(t *testing.T) {
 	if b.Profile != "" || b.ConfigRevision != "" || b.StartedAt != "" {
 		t.Fatalf("a pre-spawn failure must publish NO diagnostics: %+v", b)
 	}
+}
+
+// definitelyOversizedExecArgs exceeds every supported platform's combined
+// hard limit without relying on Linux's page-size-dependent per-string cap:
+// Darwin is 1 MiB, Linux is capped at 6 MiB, and Windows is far smaller.
+func definitelyOversizedExecArgs() []string {
+	args := make([]string, 65)
+	for i := range args {
+		args[i] = strings.Repeat("x", 100*1024)
+	}
+	return args
 }
 
 // TestBridgeJSONDiagnosticsNeverReachLivePath is the M2.11 env-only lock

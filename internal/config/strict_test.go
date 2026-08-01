@@ -183,6 +183,8 @@ func TestGameIDDirectoryCollisionRejected(t *testing.T) {
 	cases := []struct{ name, json, wants string }{
 		{"case variants", `{"version":"1.0","games":{"Adventure":{"id":"Adventure","name":"A","launchMode":"DirectPath","target":"/x"},"adventure":{"id":"adventure","name":"a","launchMode":"DirectPath","target":"/y"}}}`,
 			"same runtime directory"},
+		{"Unicode normalization variants", `{"version":"1.0","games":{"caf\u00e9":{"id":"caf\u00e9","name":"A","launchMode":"DirectPath","target":"/x"},"cafe\u0301":{"id":"cafe\u0301","name":"B","launchMode":"DirectPath","target":"/y"}}}`,
+			"same runtime directory"},
 		// A path-normalizing spelling is now rejected by the per-ID
 		// addressability rule itself — the more precise error, since
 		// ClaimRuntimeState would refuse the same ID at every start.

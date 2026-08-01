@@ -1,6 +1,7 @@
 package process
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -37,13 +38,13 @@ func TestLinuxScanPropagatesInspectionFailures(t *testing.T) {
 
 	// unreadable entries + no match: inspection failure, not stopped
 	writePid("100", "other", 0o000)
-	if _, err := findLinuxProcessesByName("game-bin"); err == nil {
+	if _, err := findLinuxProcessesByName(context.Background(), "game-bin"); err == nil {
 		t.Fatalf("unreadable process entries with no match must be an error")
 	}
 
 	// a positive match wins regardless of unreadable neighbors
 	writePid("200", "game-bin", 0o644)
-	pids, err := findLinuxProcessesByName("game-bin")
+	pids, err := findLinuxProcessesByName(context.Background(), "game-bin")
 	if err != nil || len(pids) != 1 || pids[0] != 200 {
 		t.Fatalf("match must win over unreadable neighbors: %v %v", pids, err)
 	}
@@ -59,7 +60,7 @@ func TestLinuxScanPropagatesInspectionFailures(t *testing.T) {
 	if err := os.RemoveAll(filepath.Join(fake, "300", "cmdline")); err != nil {
 		t.Fatal(err)
 	}
-	pids, err = findLinuxProcessesByName("nothing-matches")
+	pids, err = findLinuxProcessesByName(context.Background(), "nothing-matches")
 	if err != nil || len(pids) != 0 {
 		t.Fatalf("clean scan with vanished entries must be empty+nil: %v %v", pids, err)
 	}
