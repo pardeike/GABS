@@ -342,11 +342,13 @@ func (m *Manager) Start(req StartRequest) (*StartResult, error) {
 			})
 		}
 
-		spawnDeadline := time.Now().UTC().Add(startBudget)
 		restamped, rerr := process.FencedTransition(game.ID, m.configDir, launchID, opID, func(st *process.RuntimeState) error {
-			if st.Operation == nil || !time.Now().Before(st.Operation.Deadline) {
-				return process.ErrFencingViolation
-			}
+			// EnsureFunctionalReadinessWithin returns Ready only when the proof
+			// completed inside its own caller budget. The launch/operation IDs are
+			// the authority here: filesystem or transition-lock overhead after the
+			// proof must not turn success into a false timeout, while a successor
+			// that changed either identity is still rejected by FencedTransition.
+			spawnDeadline := time.Now().UTC().Add(startBudget)
 			st.Operation.Deadline = spawnDeadline
 			st.ProcessStartDeadline = spawnDeadline
 			return nil

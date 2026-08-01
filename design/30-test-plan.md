@@ -79,8 +79,10 @@ structured Stage 2 error naming the part, not E2BIG/spawn failure).
   crash/hang/malformed/oversized output is contained; App-ID environment is
   scrubbed from the helper; failure releases the fresh claim and does not
   mutate history. Success restamps the fenced deadline and preserves the full
-  Stage 4/GABP budget. SteamAppId and non-macOS paths retain their current
-  advisory/assistance behavior.
+  Stage 4/GABP budget; post-proof transition overhead crossing the old
+  readiness deadline still restamps the unchanged fencing identity, while a
+  successor identity cannot be overwritten. SteamAppId and non-macOS paths
+  retain their current advisory/assistance behavior.
 - Pre-start probes: no claim + any profile's probe running →
   external_instance_detected (+ external snapshot); probes unknown →
   start proceeds with warning listing unprobeable profiles; with claim +

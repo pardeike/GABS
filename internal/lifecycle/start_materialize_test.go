@@ -171,17 +171,18 @@ func TestMacSteamManagedReadinessSuccessRestampsFullProcessBudget(t *testing.T) 
 	}
 	m := NewManager(util.NewLogger("error"), dir, "inst-ready-success", &config.GamesConfig{Version: "1.0"}, 0,
 		process.NewSerializedStarterForTesting(), func() process.ControllerInterface { return spy })
+	var probeFinishedAt time.Time
 	restore := steam.SetFunctionalReadinessForTesting(true, func(timeout time.Duration) steam.ReadinessResult {
 		time.Sleep(25 * time.Millisecond)
+		probeFinishedAt = time.Now()
 		return steam.ReadinessResult{Ready: true, Stage: steam.ReadinessStageGlobalUser, Waited: 25 * time.Millisecond, Timeout: timeout}
 	})
 	t.Cleanup(restore)
 
-	probeFinishedAt := time.Now().Add(25 * time.Millisecond)
 	_, err := m.Start(StartRequest{
 		Game:                  config.GameConfig{ID: "adventure", Name: "Adventure", LaunchMode: "SteamManaged", Target: "123456"},
 		LaunchSpec:            process.LaunchSpec{GameId: "adventure", Mode: "SteamManaged", PathOrId: "123456"},
-		StoreReadinessTimeout: 50 * time.Millisecond,
+		StoreReadinessTimeout: 2 * time.Second,
 	})
 	if err == nil {
 		t.Fatal("the spy fails spawn after capturing the restamped deadline")
@@ -191,5 +192,52 @@ func TestMacSteamManagedReadinessSuccessRestampsFullProcessBudget(t *testing.T) 
 	}
 	if remaining := spy.deadlineAtStart.Sub(probeFinishedAt); remaining < 9*time.Second {
 		t.Fatalf("readiness consumed the normal process-start budget: remaining=%v deadline=%v", remaining, spy.deadlineAtStart)
+	}
+}
+
+func TestMacSteamManagedReadinessSuccessRestampsExpiredLeaseByFencingIdentity(t *testing.T) {
+	dir := t.TempDir()
+	appDir := t.TempDir()
+	spy := &spyMaterializeController{
+		resolvedExe: appDir + "/game", resolvedCwd: appDir,
+		configDir: dir, gameID: "factory",
+	}
+	m := NewManager(util.NewLogger("error"), dir, "inst-ready-expired", &config.GamesConfig{Version: "1.0"}, 0,
+		process.NewSerializedStarterForTesting(), func() process.ControllerInterface { return spy })
+
+	var expireErr error
+	restore := steam.SetFunctionalReadinessForTesting(true, func(timeout time.Duration) steam.ReadinessResult {
+		claim, err := process.LoadRuntimeState("factory", dir)
+		if err != nil {
+			expireErr = err
+			return steam.ReadinessResult{Ready: true, Stage: steam.ReadinessStageGlobalUser, Timeout: timeout}
+		}
+		if claim == nil || claim.Operation == nil {
+			expireErr = errors.New("readiness claim or operation is missing")
+			return steam.ReadinessResult{Ready: true, Stage: steam.ReadinessStageGlobalUser, Timeout: timeout}
+		}
+		_, expireErr = process.FencedTransition("factory", dir, claim.LaunchID, claim.Operation.OperationID, func(st *process.RuntimeState) error {
+			expired := time.Now().UTC().Add(-time.Second)
+			st.Operation.Deadline = expired
+			st.ProcessStartDeadline = expired
+			return nil
+		})
+		return steam.ReadinessResult{Ready: true, Stage: steam.ReadinessStageGlobalUser, Timeout: timeout}
+	})
+	t.Cleanup(restore)
+
+	_, err := m.Start(StartRequest{
+		Game:                  config.GameConfig{ID: "factory", Name: "Factory", LaunchMode: "SteamManaged", Target: "123456"},
+		LaunchSpec:            process.LaunchSpec{GameId: "factory", Mode: "SteamManaged", PathOrId: "123456"},
+		StoreReadinessTimeout: time.Second,
+	})
+	if expireErr != nil {
+		t.Fatalf("expiring the old readiness lease: %v", expireErr)
+	}
+	if err == nil {
+		t.Fatal("the spy fails spawn after proving that the restamp reached it")
+	}
+	if !spy.startCalled {
+		t.Fatal("a completed readiness proof must restamp the unchanged fencing identity even after the old lease deadline")
 	}
 }

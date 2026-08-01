@@ -124,9 +124,14 @@ OS process creation — never for resolvability.
   `causeClass: environment`, release the fresh preflight claim, create no
   unobserved runtime, and do not mutate launch history because no workload was
   attempted. On success the operation/process-start deadline is restamped
-  under the original fencing identity with a fresh normal Stage 3/4 budget;
-  `timeout` therefore caps readiness independently, then retains its existing
-  full GABP-wait meaning. Windows/Linux SteamManaged behavior is unchanged.
+  under the original fencing identity with a fresh normal Stage 3/4 budget.
+  The completed readiness proof is authoritative for the readiness timeout:
+  the restamp does not reject the same fenced operation merely because
+  transition/persistence overhead carries wall-clock time past the old
+  readiness deadline. A successor that changed the launch or operation
+  identity first still wins and cannot be overwritten. `timeout` therefore
+  caps readiness independently, then retains its existing full GABP-wait
+  meaning. Windows/Linux SteamManaged behavior is unchanged.
 
 ## Stage 3 — Spawn
 

@@ -933,7 +933,14 @@ contract, not a scratchpad.
       omitted MCP/CLI timeout uses configured/default GABP startup time. SteamAppId
       and non-macOS paths retain M2.15's advisory behavior. A macos-latest no-CGO
       lane covers the platform path; the local no-CGO release-style binary's live
-      hidden probe returned `ready` at `global_user`.)
+      hidden probe returned `ready` at `global_user`. Follow-up CI on 2026-08-01
+      closed two integration gaps: the binding/public bad-case tables now carry
+      identical Steam guidance, and a readiness proof completed within its own
+      budget can restamp the unchanged launch/operation identity even when slow
+      transition persistence crosses the old readiness lease. The successor
+      fence remains authoritative, and the fresh Stage 3/4 budget begins inside
+      the successful restamp transition. A deterministic expired-lease regression
+      plus a non-flaky full-budget test cover the rule.)
 
 ## Milestone 3 — CLI + docs + skill
 
