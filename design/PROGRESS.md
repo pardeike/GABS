@@ -1249,7 +1249,21 @@ contract, not a scratchpad.
       `go test -race ./... -count=1`, go vet, make build, no-CGO builds for all
       five release OS/architecture targets, workflow-YAML parse,
       release-documentation contract, genericity scan, and diff hygiene are
-      green.)
+      green.
+      RELEASE-CI CORRECTION (2026-08-01): the fresh Linux PR run exposed a
+      pre-existing GABP request race through the new async-mirroring fallback
+      regression: when a bridge wrote a complete response and then closed, both
+      the buffered response and disconnect signal could be ready and Go's
+      select could discard the valid response. The request path now consumes a
+      matching response already delivered before EOF, while a closure preserves
+      the reader loop's final transport error instead of freezing the initial
+      nil value at defer registration. A forced response-then-close net.Pipe
+      regression holds both signals ready and covers the arbitration; the
+      original MCP failure passes 500 repetitions. Re-gate: focused tests and
+      race stress, `go test ./... -count=1`, `go test -race ./... -count=1`,
+      go vet, make build, no-CGO builds for all five release targets,
+      workflow-YAML parse, release-documentation contract, module verification,
+      genericity scan, and diff hygiene are green.)
 
 ## Deviations
 

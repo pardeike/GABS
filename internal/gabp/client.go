@@ -289,7 +289,9 @@ func timeoutFromContextOrDefault(ctx context.Context, fallback time.Duration) ti
 
 func (c *Client) messageHandler() {
 	var loopErr error
-	defer c.markDisconnected(loopErr, true)
+	defer func() {
+		_ = c.markDisconnected(loopErr, true)
+	}()
 
 	// The read loop runs on the TRANSPORT flag: it must serve the
 	// handshake itself, before the client counts as authenticated.
@@ -385,14 +387,27 @@ func (c *Client) sendRequestWithTimeout(method string, params interface{}, timeo
 	// Wait for response
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
-
-	select {
-	case resp := <-respCh:
+	responseResult := func(resp *util.GABPMessage) (interface{}, error) {
 		if resp.Error != nil {
 			return nil, fmt.Errorf("GABP error %d: %s", resp.Error.Code, resp.Error.Message)
 		}
 		return resp.Result, nil
+	}
+
+	select {
+	case resp := <-respCh:
+		return responseResult(resp)
 	case <-disconnected:
+		// messageHandler delivers each complete response before it can observe
+		// the following EOF. If both signals are ready, select may choose the
+		// disconnect arbitrarily; preserve the response already received from
+		// the peer rather than converting a successful final reply into a
+		// connection error.
+		select {
+		case resp := <-respCh:
+			return responseResult(resp)
+		default:
+		}
 		return nil, c.connectionUnavailableError()
 	case <-timer.C:
 		return nil, fmt.Errorf("request timeout after %s", timeout)

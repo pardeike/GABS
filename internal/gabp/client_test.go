@@ -380,9 +380,78 @@ func TestCallToolFailsFastWhenConnectionDrops(t *testing.T) {
 	if !strings.Contains(err.Error(), "connection unavailable") {
 		t.Fatalf("expected disconnect error, got: %v", err)
 	}
+	if !strings.Contains(err.Error(), "failed to read message") {
+		t.Fatalf("expected the transport read failure to be preserved, got: %v", err)
+	}
 
 	if err := <-serverDone; err != nil {
 		t.Fatalf("server goroutine failed: %v", err)
+	}
+}
+
+// waitForDisconnectAfterWriteConn makes the response and disconnect signals
+// ready before sendRequestWithTimeout starts waiting. That deterministically
+// exercises the case where a bridge writes its final response and then closes.
+type waitForDisconnectAfterWriteConn struct {
+	net.Conn
+	disconnected <-chan struct{}
+}
+
+func (c *waitForDisconnectAfterWriteConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	if err == nil {
+		<-c.disconnected
+	}
+	return n, err
+}
+
+func TestSendRequestReturnsFinalResponseBeforePeerClose(t *testing.T) {
+	for attempt := 0; attempt < 32; attempt++ {
+		log := util.NewLogger("error")
+		client := NewClient(log)
+		clientConn, serverConn := net.Pipe()
+		blockingConn := &waitForDisconnectAfterWriteConn{
+			Conn:         clientConn,
+			disconnected: client.disconnected,
+		}
+		client.conn = blockingConn
+		client.writer = util.NewLSPFrameWriter(blockingConn)
+		client.reader = util.NewLSPFrameReader(blockingConn)
+		client.connected = true
+
+		serverDone := make(chan error, 1)
+		go func() {
+			defer serverConn.Close()
+			reader := util.NewLSPFrameReader(serverConn)
+			writer := util.NewLSPFrameWriter(serverConn)
+
+			data, err := reader.ReadMessage()
+			if err != nil {
+				serverDone <- err
+				return
+			}
+			var request util.GABPMessage
+			if err := json.Unmarshal(data, &request); err != nil {
+				serverDone <- err
+				return
+			}
+			serverDone <- writer.WriteJSON(util.NewGABPResponse(request.ID, map[string]interface{}{
+				"message": "pong",
+			}))
+		}()
+
+		go client.messageHandler()
+		result, err := client.sendRequestWithTimeout("tools/call", map[string]interface{}{}, time.Second)
+		if err != nil {
+			t.Fatalf("attempt %d: expected the final response, got %v", attempt, err)
+		}
+		if resultMap, ok := result.(map[string]interface{}); !ok || resultMap["message"] != "pong" {
+			t.Fatalf("attempt %d: unexpected response: %#v", attempt, result)
+		}
+		if err := <-serverDone; err != nil {
+			t.Fatalf("attempt %d: server failed: %v", attempt, err)
+		}
+		_ = client.Close()
 	}
 }
 
