@@ -2,17 +2,21 @@ package process
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/pardeike/gabs/internal/launch"
 	"github.com/pardeike/gabs/internal/steam"
 )
 
@@ -20,7 +24,21 @@ var (
 	steamLaunchCommandFactory = defaultSteamLaunchCommandFactory
 	epicLaunchCommandFactory  = defaultEpicLaunchCommandFactory
 	findProcessesByNameFunc   = findProcessesByName
+	// steamResolveAppFunc is injectable so tests can pin a resolved app
+	// without a real Steam library.
+	steamResolveAppFunc = steam.ResolveApp
 )
+
+// SteamApp re-exports the resolved Steam app for test injection.
+type SteamApp = steam.App
+
+// SetSteamResolveAppForTesting swaps the Steam resolver; the returned
+// function restores it.
+func SetSteamResolveAppForTesting(fn func(appID string) (SteamApp, error)) func() {
+	prev := steamResolveAppFunc
+	steamResolveAppFunc = fn
+	return func() { steamResolveAppFunc = prev }
+}
 
 type LaunchSpec struct {
 	GameId          string
@@ -29,6 +47,29 @@ type LaunchSpec struct {
 	Args            []string
 	WorkingDir      string
 	StopProcessName string // Optional process name for stopping the game
+
+	// Resolved launch-profile context (design/02-launch-resolution.md).
+	// Env nil = legacy behavior (inherit os.Environ). Non-nil = the
+	// resolver's config-layer environment; the controller adds only the
+	// managed layer on top.
+	Profile        string
+	Env            map[string]string
+	ContextEnvKeys []string
+	AbsentEnvNames []string
+
+	// RuntimeDir is the per-game runtime directory (bridge.json,
+	// launch.log). Empty falls back to the default ~/.gabs/<gameId>.
+	RuntimeDir string
+
+	// AppliedInputs are the applied launch-input names (never values) and
+	// ConfigRevision the snapshot pinned at resolution — both persisted
+	// into the runtime claim.
+	AppliedInputs  []string
+	ConfigRevision string
+
+	// Lifecycle is the resolved hook snapshot, persisted into the runtime
+	// claim so stop/status never consult mutable config (design/07).
+	Lifecycle *launch.ResolvedLifecycle
 }
 
 type BridgeInfo struct {
@@ -44,6 +85,28 @@ type Controller struct {
 	bridgeInfo *BridgeInfo
 	waitOnce   sync.Once // guards c.cmd.Wait() to prevent multiple calls
 	waitDone   chan struct{}
+
+	// resolvedSteamApp is the SteamManaged app pinned by
+	// MaterializeSpawnSpec so digesting, sizing, and spawning consume one
+	// immutable specification.
+	resolvedSteamApp *steam.App
+
+	// Stage 3 spawnState observers (design/05); nil for legacy callers.
+	// beforeSpawn returning an error ABORTS the spawn: OS process creation
+	// must not run against an unpublished or superseded claim.
+	beforeSpawn func() error
+	afterSpawn  func(pid int, startTime int64, spawnErr error)
+
+	// spawnFingerprint is the (pid, startTime) captured at the moment of
+	// process creation — pinned once, read cross-goroutine, so a later
+	// publication can never fingerprint an unrelated reuse of the PID number.
+	spawnFingerprint atomic.Pointer[spawnIdentity]
+}
+
+// spawnIdentity is the immutable process identity captured at spawn.
+type spawnIdentity struct {
+	pid       int
+	startTime int64
 }
 
 // Configure sets up the controller with the given launch specification
@@ -106,22 +169,30 @@ func (c *Controller) Start() error {
 	case "SteamAppId":
 		cmdName, cmdArgs = steamLaunchCommandFactory(c.spec.PathOrId)
 	case "SteamManaged":
-		app, err := steam.ResolveApp(c.spec.PathOrId)
-		if err != nil {
-			return &ProcessError{
-				Type:    ProcessErrorTypeConfiguration,
-				Context: fmt.Sprintf("failed to resolve Steam app %s", c.spec.PathOrId),
-				Err:     err,
+		// The spec was materialized before digesting and sizing:
+		// resolution, digesting, sizing, and spawning must not
+		// independently derive different commands. Fall back to resolving
+		// here only for legacy callers that never materialized.
+		app := c.resolvedSteamApp
+		if app == nil {
+			resolved, err := steamResolveAppFunc(c.spec.PathOrId)
+			if err != nil {
+				return &ProcessError{
+					Type:    ProcessErrorTypeConfiguration,
+					Context: fmt.Sprintf("failed to resolve Steam app %s", c.spec.PathOrId),
+					Err:     err,
+				}
+			}
+			app = &resolved
+			if c.spec.WorkingDir == "" {
+				c.spec.WorkingDir = app.WorkingDir
 			}
 		}
-		if err := steam.EnsureClientRunning(); err != nil {
-			return &ProcessError{
-				Type:    ProcessErrorTypeStart,
-				Context: fmt.Sprintf("failed to prepare Steam client for %s", c.spec.GameId),
-				Err:     err,
-			}
-		}
-		if err := steam.EnsureAppIDFile(app); err != nil {
+		// EnsureClientRunning is deliberately NOT called here: the
+		// Steam-client store-launcher assistance is best-effort Stage-2 work in
+		// the start manager, charged against the operation deadline — never a
+		// spawn-time step that could fail the launch or run twice (design/05).
+		if err := steam.EnsureAppIDFile(*app); err != nil {
 			return &ProcessError{
 				Type:    ProcessErrorTypeConfiguration,
 				Context: fmt.Sprintf("failed to prepare Steam app id file for %s", c.spec.GameId),
@@ -130,9 +201,6 @@ func (c *Controller) Start() error {
 		}
 		cmdName = app.Executable
 		cmdArgs = c.spec.Args
-		if c.spec.WorkingDir == "" {
-			c.spec.WorkingDir = app.WorkingDir
-		}
 	case "EpicAppId":
 		cmdName, cmdArgs = epicLaunchCommandFactory(c.spec.PathOrId)
 	case "CustomCommand":
@@ -155,12 +223,64 @@ func (c *Controller) Start() error {
 	// Set up environment variables
 	c.setupEnvironment()
 
-	// Start the process
-	if err := c.cmd.Start(); err != nil {
+	// Child stdout/stderr go to a per-launch log file whose descriptors
+	// stay valid after any GABS process exits — never parent-owned pipes,
+	// which would turn a CLI exit into EPIPE for a logging game
+	// (design/05-start-pipeline.md, Stage 3). Truncated at each spawn; the
+	// capped tail is the "why did it die" evidence in failure results.
+	if err := os.MkdirAll(c.runtimeDir(), 0o700); err != nil {
 		return &ProcessError{
 			Type:    ProcessErrorTypeStart,
-			Context: fmt.Sprintf("failed to start %s (mode: %s, target: %s)", c.spec.GameId, c.spec.Mode, c.spec.PathOrId),
+			Context: fmt.Sprintf("cannot create runtime directory for %s launch log", c.spec.GameId),
 			Err:     err,
+		}
+	}
+	logFile, err := os.OpenFile(c.launchLogPath(), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		// The per-launch log is the mandated evidence channel (design/05
+		// Stage 3): starting a child without it silently discards the
+		// why-did-it-die evidence.
+		return &ProcessError{
+			Type:    ProcessErrorTypeStart,
+			Context: fmt.Sprintf("cannot open per-launch log for %s", c.spec.GameId),
+			Err:     err,
+		}
+	}
+	c.cmd.Stdout = logFile
+	c.cmd.Stderr = logFile
+	defer logFile.Close() // the child keeps its own descriptor
+
+	// spawnState transitions bracket the actual OS process creation
+	// (design/05 Stage 3): immediately before → spawning, immediately
+	// after → spawned with PID + fingerprint, or failed.
+	if c.beforeSpawn != nil {
+		if err := c.beforeSpawn(); err != nil {
+			return err
+		}
+	}
+	if err := c.cmd.Start(); err != nil {
+		if c.afterSpawn != nil {
+			c.afterSpawn(0, 0, err)
+		}
+		ctxMsg := fmt.Sprintf("failed to start %s (mode: %s, target: %s)", c.spec.GameId, c.spec.Mode, c.spec.PathOrId)
+		if hint := startErrorHintFor(err, runtime.GOOS); hint != "" {
+			ctxMsg += "; " + hint
+		}
+		return &ProcessError{
+			Type:    ProcessErrorTypeStart,
+			Context: ctxMsg,
+			Err:     err,
+		}
+	}
+	{
+		pid := c.cmd.Process.Pid
+		start, ferr := ProcessStartTime(pid)
+		if ferr != nil {
+			start = 0 // degrade to existence-only evidence, never block the spawn
+		}
+		c.spawnFingerprint.Store(&spawnIdentity{pid: pid, startTime: start})
+		if c.afterSpawn != nil {
+			c.afterSpawn(pid, start, nil)
 		}
 	}
 
@@ -171,8 +291,133 @@ func (c *Controller) Start() error {
 	return nil
 }
 
+// SetSpawnObservers installs the Stage 3 spawnState callbacks: before runs
+// immediately before OS process creation, after immediately after with the
+// PID + start-time fingerprint (or the spawn error).
+func (c *Controller) SetSpawnObservers(before func() error, after func(pid int, startTime int64, spawnErr error)) {
+	c.beforeSpawn = before
+	c.afterSpawn = after
+}
+
 // setupEnvironment configures environment variables for the process
 func (c *Controller) setupEnvironment() {
+	c.cmd.Env = c.buildEnvironment()
+}
+
+// FinalEnvironment exposes the fully materialized child environment
+// (config layers + managed layer) for pre-spawn checks.
+func (c *Controller) FinalEnvironment() []string {
+	return c.buildEnvironment()
+}
+
+// buildEnvironment produces the child environment. With a resolved spec
+// (Env non-nil), the config layers come from the launch resolver and the
+// controller adds only the managed layer — GABS identity, GABP endpoint,
+// platform requirements, and the delivery-contract variables
+// GABS_FORWARD_ENV / GABS_ABSENT_ENV (design/03-context-delivery.md).
+// Managed variables always win; output ordering is deterministic.
+func (c *Controller) buildEnvironment() []string {
+	if c.spec.Env == nil {
+		return c.buildLegacyEnvironment()
+	}
+
+	env := make(map[string]string, len(c.spec.Env)+10)
+	for k, v := range c.spec.Env {
+		env[k] = v
+	}
+
+	managed := map[string]string{
+		"GABS_GAME_ID":     c.spec.GameId,
+		"GABS_BRIDGE_PATH": c.getBridgePath(),
+	}
+	if c.spec.Mode == "SteamManaged" {
+		managed["SteamAppId"] = c.spec.PathOrId
+		managed["SteamGameId"] = c.spec.PathOrId
+	}
+	if c.bridgeInfo != nil {
+		managed["GABP_SERVER_PORT"] = strconv.Itoa(c.bridgeInfo.Port)
+		managed["GABP_TOKEN"] = c.bridgeInfo.Token
+	}
+	if c.spec.Profile != "" {
+		managed["GABS_PROFILE"] = c.spec.Profile
+	}
+	// Windows platform variables are managed: pinned from the parent
+	// value (C:\Windows only as fallback) so config layers can neither
+	// remove nor override them, and they participate in GABS_FORWARD_ENV.
+	// Resolved launches must not leak Windows variables into unix children.
+	if runtime.GOOS == "windows" {
+		systemRoot := os.Getenv("SystemRoot")
+		if systemRoot == "" {
+			systemRoot = "C:\\Windows"
+		}
+		windir := os.Getenv("WINDIR")
+		if windir == "" {
+			windir = systemRoot
+		}
+		managed["SystemRoot"] = systemRoot
+		managed["WINDIR"] = windir
+	}
+	// Final absence is computed against the managed layer: a config unset
+	// of a managed name (SteamAppId, SystemRoot) is re-added above, and
+	// exporting it as both present and must-be-absent would hand wrappers
+	// and delivery verification contradictory metadata (design/03).
+	absent := make([]string, 0, len(c.spec.AbsentEnvNames))
+	for _, name := range c.spec.AbsentEnvNames {
+		reAdded := false
+		for k := range managed {
+			if k == name || (runtime.GOOS == "windows" && strings.EqualFold(k, name)) {
+				reAdded = true
+				break
+			}
+		}
+		if !reAdded {
+			absent = append(absent, name)
+		}
+	}
+	if len(absent) > 0 {
+		managed["GABS_ABSENT_ENV"] = strings.Join(absent, ",")
+	}
+
+	// GABS_FORWARD_ENV: every name a wrapper must carry across a filtering
+	// boundary — the managed names plus the config-context key names.
+	forward := make([]string, 0, len(managed)+len(c.spec.ContextEnvKeys)+1)
+	for k := range managed {
+		forward = append(forward, k)
+	}
+	forward = append(forward, "GABS_FORWARD_ENV")
+	forward = append(forward, c.spec.ContextEnvKeys...)
+	sort.Strings(forward)
+	forward = dedupeSorted(forward)
+	managed["GABS_FORWARD_ENV"] = strings.Join(forward, ",")
+
+	for k, v := range managed {
+		if runtime.GOOS == "windows" {
+			// Windows env keys are case-insensitive: remove case-variants
+			// so the managed spelling is the only survivor.
+			for existing := range env {
+				if existing != k && strings.EqualFold(existing, k) {
+					delete(env, existing)
+				}
+			}
+		}
+		env[k] = v
+	}
+
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, k+"="+env[k])
+	}
+	return out
+}
+
+// buildLegacyEnvironment preserves the pre-profile behavior bit-for-bit for
+// launches without resolved context.
+func (c *Controller) buildLegacyEnvironment() []string {
 	bridgePath := c.getBridgePath()
 	bridgeEnvVars := []string{
 		fmt.Sprintf("GABS_GAME_ID=%s", c.spec.GameId),
@@ -196,7 +441,17 @@ func (c *Controller) setupEnvironment() {
 	if os.Getenv("SystemRoot") == "" {
 		env = append(env, "SystemRoot=C:\\Windows", "WINDIR=C:\\Windows")
 	}
-	c.cmd.Env = append(env, bridgeEnvVars...)
+	return append(env, bridgeEnvVars...)
+}
+
+func dedupeSorted(in []string) []string {
+	out := in[:0]
+	for i, v := range in {
+		if i == 0 || in[i-1] != v {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // IsRunning queries the actual system state to determine if the process is running
@@ -205,7 +460,7 @@ func (c *Controller) IsRunning() bool {
 	// For Steam/Epic launchers, check for the actual game process by name if configured
 	if c.spec.Mode == "SteamAppId" || c.spec.Mode == "EpicAppId" {
 		if c.spec.StopProcessName != "" {
-			pids, err := findProcessesByNameFunc(c.spec.StopProcessName)
+			pids, err := callFindProcessesByName(c.spec.StopProcessName)
 			if err != nil {
 				return false
 			}
@@ -220,11 +475,8 @@ func (c *Controller) IsRunning() bool {
 		return c.isRunningByName()
 	}
 
-	// Check if the process has already been waited for
-	if c.cmd.ProcessState != nil {
-		return c.isRunningByName()
-	}
-
+	// waitDone is the race-free "already reaped" signal; reading
+	// cmd.ProcessState here would race the waitForExit goroutine's Wait().
 	select {
 	case <-c.waitDone:
 		return c.isRunningByName()
@@ -251,7 +503,7 @@ func (c *Controller) isRunningByName() bool {
 	if c.spec.StopProcessName == "" {
 		return false
 	}
-	pids, err := findProcessesByNameFunc(c.spec.StopProcessName)
+	pids, err := callFindProcessesByName(c.spec.StopProcessName)
 	if err != nil {
 		return false
 	}
@@ -274,14 +526,11 @@ func (c *Controller) WaitForProcessStart(timeout time.Duration) error {
 		select {
 		case <-ctx.Done():
 			return &ProcessError{
-				Type:    ProcessErrorTypeStart,
+				Type:    ProcessErrorTypeUnobserved,
 				Context: fmt.Sprintf("timed out waiting for %s to start", c.spec.GameId),
 				Err:     fmt.Errorf("process not found in system after %v", timeout),
 			}
 		case <-ticker.C:
-			if c.cmd != nil && c.cmd.ProcessState != nil {
-				return nil
-			}
 			select {
 			case <-c.waitDone:
 				return nil
@@ -309,7 +558,7 @@ func (c *Controller) waitForProcessNameStart(timeout time.Duration) error {
 		select {
 		case <-ctx.Done():
 			return &ProcessError{
-				Type:    ProcessErrorTypeStart,
+				Type:    ProcessErrorTypeUnobserved,
 				Context: fmt.Sprintf("timed out waiting for %s to start", c.spec.GameId),
 				Err:     fmt.Errorf("process %q not found in system after %v", c.spec.StopProcessName, timeout),
 			}
@@ -396,6 +645,49 @@ func (c *Controller) Kill() error {
 	return nil
 }
 
+// MaterializeSpawnSpec resolves the mode-specific executable and effective
+// working directory BEFORE spawn, so digesting, platform sizing, and the
+// spawn itself all consume one immutable specification.
+// For SteamManaged this resolves the Steam app once and pins its
+// executable and default working directory; Start reuses exactly these
+// values. Other modes return the already-final values.
+func (c *Controller) MaterializeSpawnSpec() (exe string, workingDir string, err error) {
+	switch c.spec.Mode {
+	case "SteamManaged":
+		app, rerr := steamResolveAppFunc(c.spec.PathOrId)
+		if rerr != nil {
+			return "", "", &ProcessError{
+				Type:    ProcessErrorTypeConfiguration,
+				Context: fmt.Sprintf("failed to resolve Steam app %s", c.spec.PathOrId),
+				Err:     rerr,
+			}
+		}
+		c.resolvedSteamApp = &app
+		if c.spec.WorkingDir == "" {
+			c.spec.WorkingDir = app.WorkingDir
+		}
+		return app.Executable, c.spec.WorkingDir, nil
+	default:
+		return c.spec.PathOrId, c.spec.WorkingDir, nil
+	}
+}
+
+// TerminateDirectChild kills and reaps the direct child this controller
+// started, if it is still alive — the pre-clear reap required before a
+// stopped verdict removes the claim (design/04). It never touches
+// name-matched processes; the workload's fate is the verification
+// pipeline's business, not this method's.
+func (c *Controller) TerminateDirectChild() {
+	if c.cmd == nil || c.cmd.Process == nil || c.DirectChildExited() {
+		return
+	}
+	_ = c.cmd.Process.Kill()
+	select {
+	case <-c.waitDone:
+	case <-time.After(5 * time.Second):
+	}
+}
+
 // Restart stops and then starts the process
 func (c *Controller) Restart() error {
 	// Stop then Start, preserving spec
@@ -416,6 +708,18 @@ func (c *Controller) GetPID() int {
 	return c.cmd.Process.Pid
 }
 
+// SpawnFingerprint returns the PID and start-time fingerprint captured at
+// process creation, or zeros when no spawn happened or the start time was
+// unavailable. It is the only identity safe to publish after the fact: a
+// fresh PID lookup once the child may have exited could fingerprint an
+// unrelated process that reused the number.
+func (c *Controller) SpawnFingerprint() (int, int64) {
+	if id := c.spawnFingerprint.Load(); id != nil {
+		return id.pid, id.startTime
+	}
+	return 0, 0
+}
+
 // GetLaunchMode returns the launch mode
 func (c *Controller) GetLaunchMode() string {
 	return c.spec.Mode
@@ -432,10 +736,11 @@ func (c *Controller) IsLauncherProcessRunning() bool {
 		return false
 	}
 
-	if c.cmd.ProcessState != nil {
-		return false
-	}
-
+	// waitDone is the race-free "already reaped" signal (closed after
+	// waitForExit's cmd.Wait() returns); reading c.cmd.ProcessState here would
+	// race that Wait()'s write, and once the process is reaped Signal(0) already
+	// returns ErrProcessDone via os.Process's own done-tracking — so this branch
+	// covers the reaped case without the unsynchronized read (see getExitCode).
 	select {
 	case <-c.waitDone:
 		return false
@@ -516,16 +821,77 @@ func SetLaunchCommandFactoriesForTesting(
 	}
 }
 
-func (c *Controller) getBridgePath() string {
+// launchLogPath is the per-launch child output file beside bridge.json.
+func (c *Controller) launchLogPath() string {
+	return filepath.Join(c.runtimeDir(), "launch.log")
+}
+
+// runtimeDir returns the per-game runtime directory: the one stamped from the
+// active config dir when present, else the legacy ~/.gabs/<gameId> default.
+func (c *Controller) runtimeDir() string {
+	if c.spec.RuntimeDir != "" {
+		return c.spec.RuntimeDir
+	}
+	return c.defaultRuntimeDir()
+}
+
+// defaultRuntimeDir is the pre-profile location, used only when no runtime dir
+// was stamped onto the spec.
+func (c *Controller) defaultRuntimeDir() string {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(".gabs", c.spec.GameId, "bridge.json")
+		return filepath.Join(".gabs", c.spec.GameId)
 	}
-	return filepath.Join(homeDir, ".gabs", c.spec.GameId, "bridge.json")
+	return filepath.Join(homeDir, ".gabs", c.spec.GameId)
+}
+
+// LaunchLogTail returns up to maxBytes from the end of the child output
+// log — evidence for spawn/exit failures.
+func (c *Controller) LaunchLogTail(maxBytes int64) string {
+	f, err := os.Open(c.launchLogPath())
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	offset := int64(0)
+	if fi.Size() > maxBytes {
+		offset = fi.Size() - maxBytes
+	}
+	buf := make([]byte, fi.Size()-offset)
+	if _, err := f.ReadAt(buf, offset); err != nil {
+		return ""
+	}
+	return string(buf)
+}
+
+// startErrorHintFor maps platform-specific spawn errors to precise hints.
+// ERROR_ELEVATION_REQUIRED (740): the target requires elevation and GABS
+// deliberately does not elevate (design/03, platform rules).
+func startErrorHintFor(err error, goos string) string {
+	if goos != "windows" {
+		return ""
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) && int(errno) == 740 {
+		return "the target requires elevation; GABS does not elevate — remove the elevation requirement or launch it outside GABS"
+	}
+	return ""
+}
+
+// getBridgePath is the endpoint-cache path handed to the workload as
+// GABS_BRIDGE_PATH. It must follow the active runtime directory: hardcoding
+// $HOME/.gabs here made GABS write bridge.json under --configDir while telling
+// the game to read a stale file elsewhere, with a different port and token.
+func (c *Controller) getBridgePath() string {
+	return filepath.Join(c.runtimeDir(), "bridge.json")
 }
 
 func (c *Controller) stopByProcessName(processName string, force bool, grace time.Duration) error {
-	pids, err := findProcessesByNameFunc(processName)
+	pids, err := callFindProcessesByName(processName)
 	if err != nil {
 		return fmt.Errorf("failed to find processes named '%s': %w", processName, err)
 	}
@@ -577,6 +943,10 @@ const (
 	ProcessErrorTypeStop
 	ProcessErrorTypeStatus
 	ProcessErrorTypeNotFound
+	// ProcessErrorTypeUnobserved: the spawn succeeded but nothing became
+	// observable within the process-start budget — distinct from
+	// spawn_failed (design/05 Stage 4); URL modes map it to `unobserved`.
+	ProcessErrorTypeUnobserved
 )
 
 func (e *ProcessError) Error() string {
@@ -596,6 +966,12 @@ func (e *ProcessError) Error() string {
 	}
 }
 
+// Unwrap exposes the wrapped cause so the start pipeline can see a
+// pre-spawn fencing loss (ErrFencingViolation / ErrNoRuntimeClaim) that the
+// controller's beforeSpawn abort surfaces, rather than misreporting a
+// deliberately-never-attempted spawn as spawn_failed.
+func (e *ProcessError) Unwrap() error { return e.Err }
+
 // Helper functions for cross-platform process management
 func getTerminationSignal() os.Signal {
 	switch runtime.GOOS {
@@ -608,10 +984,26 @@ func getTerminationSignal() os.Signal {
 
 // killProcess forcefully terminates a process by PID
 func killProcess(pid int) error {
+	return killProcessContext(context.Background(), pid)
+}
+
+func killProcessContext(ctx context.Context, pid int) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	switch runtime.GOOS {
 	case "windows":
-		cmd := exec.Command("taskkill", "/F", "/PID", strconv.Itoa(pid))
-		return cmd.Run()
+		cmd := exec.CommandContext(ctx, "taskkill", "/F", "/PID", strconv.Itoa(pid))
+		if err := cmd.Run(); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return err
+		}
+		return nil
 	default:
 		// Unix-like systems
 		process, err := os.FindProcess(pid)
@@ -624,23 +1016,45 @@ func killProcess(pid int) error {
 
 // terminateProcess gracefully terminates a process by PID with a timeout
 func terminateProcess(pid int, grace time.Duration) error {
+	return terminateProcessContext(context.Background(), pid, grace)
+}
+
+func terminateProcessContext(ctx context.Context, pid int, grace time.Duration) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	switch runtime.GOOS {
 	case "windows":
 		// On Windows, try gentle termination first, then force kill if timeout
-		cmd := exec.Command("taskkill", "/PID", strconv.Itoa(pid))
+		cmd := exec.CommandContext(ctx, "taskkill", "/PID", strconv.Itoa(pid))
 		if err := cmd.Run(); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return err
 		}
 
 		// Wait for process to exit gracefully
 		if grace > 0 {
-			time.Sleep(grace)
+			timer := time.NewTimer(grace)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			}
 			// Check if process still exists
-			checkCmd := exec.Command("tasklist", "/FI", "PID eq "+strconv.Itoa(pid), "/FO", "CSV")
+			checkCmd := exec.CommandContext(ctx, "tasklist", "/FI", "PID eq "+strconv.Itoa(pid), "/FO", "CSV")
 			output, err := checkCmd.Output()
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			if err == nil && strings.Contains(string(output), strconv.Itoa(pid)) {
 				// Process still exists, force kill it
-				return killProcess(pid)
+				return killProcessContext(ctx, pid)
 			}
 		}
 		return nil
@@ -669,7 +1083,12 @@ func terminateProcess(pid int, grace time.Duration) error {
 				return nil
 			case <-time.After(grace):
 				// Grace period expired, force kill
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				return process.Kill()
+			case <-ctx.Done():
+				return ctx.Err()
 			}
 		}
 
@@ -678,15 +1097,24 @@ func terminateProcess(pid int, grace time.Duration) error {
 }
 
 // findProcessesByName finds all processes with the given name
-func findProcessesByName(name string) ([]int, error) {
+func findProcessesByName(ctx context.Context, name string) ([]int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var pids []int
 
 	switch runtime.GOOS {
 	case "windows":
 		// Use tasklist command on Windows
-		cmd := exec.Command("tasklist", "/FI", "IMAGENAME eq "+name, "/FO", "CSV", "/NH")
+		cmd := exec.CommandContext(ctx, "tasklist", "/FI", "IMAGENAME eq "+name, "/FO", "CSV", "/NH")
 		output, err := cmd.Output()
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			return nil, err
 		}
 
@@ -704,19 +1132,22 @@ func findProcessesByName(name string) ([]int, error) {
 			}
 		}
 	case "linux":
-		return findLinuxProcessesByName(name)
+		return findLinuxProcessesByName(ctx, name)
 	default:
-		return findProcessesByNameWithPgrep(name)
+		return findProcessesByNameWithPgrep(ctx, name)
 	}
 
 	return pids, nil
 }
 
-func findProcessesByNameWithPgrep(name string) ([]int, error) {
+func findProcessesByNameWithPgrep(ctx context.Context, name string) ([]int, error) {
 	var pids []int
-	cmd := exec.Command("pgrep", "-x", name)
+	cmd := exec.CommandContext(ctx, "pgrep", "-x", name)
 	output, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		// pgrep returns exit code 1 if no processes found, which is not an error for us
 		if exitError, ok := err.(*exec.ExitError); ok && exitError.ExitCode() == 1 {
 			return pids, nil
@@ -735,37 +1166,73 @@ func findProcessesByNameWithPgrep(name string) ([]int, error) {
 	return pids, nil
 }
 
-func findLinuxProcessesByName(name string) ([]int, error) {
-	var pids []int
+// linuxProcRoot is injectable so the scan's error handling is testable on
+// any platform.
+var linuxProcRoot = "/proc"
 
-	entries, err := os.ReadDir("/proc")
+// findLinuxProcessesByName scans the process table. Inspection failures
+// (e.g. EACCES under hidepid) must surface as errors so liveness reports
+// unknown, never a false stopped (design/04); only normal process-
+// disappearance races are ignored. Any positive match still wins — a found
+// process is running-evidence regardless of unreadable neighbors.
+func findLinuxProcessesByName(ctx context.Context, name string) ([]int, error) {
+	var pids []int
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	entries, err := os.ReadDir(linuxProcRoot)
 	if err != nil {
 		return nil, err
 	}
 
+	var inspectErr error
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		pid, err := strconv.Atoi(entry.Name())
 		if err != nil {
 			continue
 		}
-		if linuxProcessMatchesName(pid, name) {
+		match, err := linuxProcessMatchesName(pid, name)
+		if err != nil {
+			inspectErr = err
+			continue
+		}
+		if match {
 			pids = append(pids, pid)
 		}
 	}
 
+	if len(pids) == 0 && inspectErr != nil {
+		return nil, fmt.Errorf("process table not fully inspectable: %w", inspectErr)
+	}
 	return pids, nil
 }
 
-func linuxProcessMatchesName(pid int, name string) bool {
-	procDir := filepath.Join("/proc", strconv.Itoa(pid))
+func linuxProcessMatchesName(pid int, name string) (bool, error) {
+	procDir := filepath.Join(linuxProcRoot, strconv.Itoa(pid))
 
-	if comm, err := os.ReadFile(filepath.Join(procDir, "comm")); err == nil && strings.TrimSpace(string(comm)) == name {
-		return true
+	var inspectErr error
+	if comm, err := os.ReadFile(filepath.Join(procDir, "comm")); err == nil {
+		if strings.TrimSpace(string(comm)) == name {
+			return true, nil
+		}
+	} else if !isProcessGoneError(err) {
+		inspectErr = err
 	}
 
 	cmdline, err := os.ReadFile(filepath.Join(procDir, "cmdline"))
-	if err != nil || len(cmdline) == 0 {
-		return false
+	if err != nil {
+		if isProcessGoneError(err) {
+			// disappeared mid-scan: an ordinary race, not an inspection failure
+			return false, nil
+		}
+		return false, err
+	}
+	if len(cmdline) == 0 {
+		return false, inspectErr
 	}
 
 	argv0End := strings.IndexByte(string(cmdline), 0)
@@ -774,5 +1241,45 @@ func linuxProcessMatchesName(pid int, name string) bool {
 	}
 	argv0 := string(cmdline[:argv0End])
 
-	return argv0 == name || filepath.Base(argv0) == name
+	if argv0 == name || filepath.Base(argv0) == name {
+		return true, nil
+	}
+	return false, inspectErr
+}
+
+func isProcessGoneError(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH)
+}
+
+// DirectChildExited reports whether the spawned direct child has been
+// reaped — the adoption signal when the workload is still observable by
+// name (design/05 Stage 4). waitDone is the race-free exit signal.
+func (c *Controller) DirectChildExited() bool {
+	if c.waitDone == nil {
+		return false
+	}
+	select {
+	case <-c.waitDone:
+		return true
+	default:
+		return false
+	}
+}
+
+// ExitCode returns the direct child's exit code, or -1 while it runs (or
+// when it was killed by a signal). Reading ProcessState is safe only after
+// waitDone closes.
+func (c *Controller) ExitCode() int {
+	if c.waitDone == nil {
+		return -1
+	}
+	select {
+	case <-c.waitDone:
+	default:
+		return -1
+	}
+	if c.cmd == nil || c.cmd.ProcessState == nil {
+		return -1
+	}
+	return c.cmd.ProcessState.ExitCode()
 }

@@ -45,9 +45,9 @@ gabs server --http localhost:8080
 
 ### 3. AI Control
 AI uses MCP tools to control games:
-- `games.start {"gameId": "factory"}` - Start game and create GABP bridge
-- `games.status {"gameId": "factory"}` - Check game status
-- `games.stop {"gameId": "factory"}` - Stop game gracefully
+- `games_start {"gameId": "factory"}` - Start game and create GABP bridge
+- `games_status {"gameId": "factory"}` - Check game status
+- `games_stop {"gameId": "factory"}` - Stop game gracefully
 
 ## Configuration Modes
 
@@ -134,7 +134,7 @@ Configure the client to connect to your GABS HTTP endpoint.
 gabs games add factory-survival
 gabs games add factory-creative
 gabs games add adventure-a
-gabs games add terraria-world1
+gabs games add sandbox-world1
 
 # Start GABS
 gabs server --http :8080
@@ -242,7 +242,7 @@ Game integrations should:
 1. **Use appropriate connection mode:**
    - Use stdio when the AI client runs locally
    - Use HTTP when a remote client needs to reach GABS
-   - Use `games.connect` when you need to reattach to an already running game
+   - Use `games_connect` when you need to reattach to an already running game
 
 2. **Configure proper timeouts:**
    - Match reconnect settings to bridge startup behavior
@@ -293,9 +293,10 @@ environment instead.
 
 ### Environment Variables
 
-**GABS Configuration:**
-- `GABS_CONFIG_DIR`: Override default config directory  
-- `GABS_LOG_LEVEL`: Set default log level
+**GABS Configuration:** GABS reads its config directory and log level from
+command-line flags, not environment variables:
+- `--configDir <dir>`: override the default config directory (`~/.gabs`)
+- `--log-level <lvl>`: set the log level (`trace|debug|info|warn|error`)
 
 **GABP Bridge (Set by GABS for Game Bridges):**
 - `GABS_GAME_ID`: Game identifier passed to bridge

@@ -1,0 +1,923 @@
+package process
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"runtime"
+	"time"
+
+	"github.com/pardeike/gabs/internal/config"
+	"github.com/pardeike/gabs/internal/launch"
+)
+
+// Stable stop/kill codes (design/06, design/10).
+const (
+	OperationActionStop = "stop"
+	OperationActionKill = "kill"
+
+	RefusalStopUnsupported = "stop_unsupported"
+	RefusalKillUnsupported = "kill_unsupported"
+
+	OutcomeTerminated             = "terminated"
+	OutcomeActionSucceededRunning = "action_succeeded_running"
+	OutcomeTerminationUnverified  = "termination_unverified"
+	OutcomeActionFailed           = "action_failed"
+	OutcomeActionTimedOut         = "action_timed_out"
+	OutcomeInterrupted            = "interrupted"
+
+	// Pinned built-in strategies (design/07). The pin is decided at claim
+	// creation for the launching platform; executors dispatch on it so a
+	// stop after restart or from another GABS process runs what the launch
+	// decided.
+	BuiltinGracefulSigterm  = "sigterm"
+	BuiltinGracefulTaskkill = "taskkill"
+	BuiltinForceSigkill     = "sigkill"
+	BuiltinForceTaskkill    = "taskkill_force"
+
+	// builtinActionBudget bounds the hook-less action step (a signal send
+	// plus at most one process scan); hooks bring their own timeouts.
+	builtinActionBudget = 10 * time.Second
+)
+
+// Injectable primitives: tests control the action, the verification probe,
+// the built-in signal executors, and the poll cadence.
+var (
+	runActionHookFunc      = RunActionHook
+	runStatusProbeFunc     = RunStatusHookClipped
+	builtinTerminateFunc   = builtinTerminate
+	builtinKillFunc        = builtinKill
+	stopVerifyPollInterval = 500 * time.Millisecond
+)
+
+// errStopRefusal aborts the admission transition without persisting: a
+// refusal never writes.
+var errStopRefusal = errors.New("stop refused")
+
+// StopRequest is one stop or kill attempt against the runtime snapshot.
+// The claim is the context — callers never pass current config (design/07).
+type StopRequest struct {
+	GameID     string
+	ConfigDir  string
+	InstanceID string
+	Action     string // OperationActionStop | OperationActionKill
+
+	// GABPLive reports whether this process holds a live bridge connection
+	// for the game right now; nil when the caller cannot know (CLI).
+	GABPLive func() bool
+	// SelfConnection reports whether this process's current bound
+	// connection for the claim is the one with the given connectionID and
+	// its socket is live — the removal guards' self-owned re-check.
+	SelfConnection func(connectionID string) bool
+	// ReapLauncher terminates and reaps a still-live launcher child this
+	// process started — called before a stopped verdict clears the claim
+	// (design/04); nil when the caller tracks no child.
+	ReapLauncher func()
+
+	// HistoryProfile and HistoryContextHash are the pinned track-record
+	// coordinates (from the claim, never recomputed from hot config): a
+	// verified stop records cleanStops++ and a failed action records its
+	// failure under the same removal/completion lock (design/20).
+	HistoryProfile     string
+	HistoryContextHash string
+}
+
+// StopRefusal is a structured refusal: nothing was executed and nothing
+// was persisted.
+type StopRefusal struct {
+	Code          string // operation_in_progress | stop_unsupported | kill_unsupported
+	Message       string
+	Phase         string
+	ActiveProfile string
+	Operation     *RuntimeOperation
+	KillCapable   bool // stop_unsupported only: whether games_kill is the way out
+}
+
+// StopOutcome is the terminal result of an executed action, including what
+// was persisted as lastActionResult (nil when the claim was removed).
+type StopOutcome struct {
+	Code          string
+	Action        string
+	ActiveProfile string
+	HookResult    *HookResult
+	Detail        string
+	Warnings      []string
+	ClaimRemoved  bool
+	FinalPhase    string
+	Result        *RuntimeActionResult
+}
+
+// ExecuteStopAction implements design/06: bounded single-operation
+// admission under the transition lock, hook-or-builtin action execution
+// with the lock released, and the post-action verification matrix. Exactly
+// one of outcome/refusal is non-nil on a nil error.
+func ExecuteStopAction(req StopRequest) (*StopOutcome, *StopRefusal, error) {
+	if req.Action != OperationActionStop && req.Action != OperationActionKill {
+		return nil, nil, fmt.Errorf("unknown lifecycle action %q", req.Action)
+	}
+	now := time.Now().UTC()
+
+	var (
+		refusal    *StopRefusal
+		op         RuntimeOperation
+		priorPhase string
+		profile    string
+		actionHook *launch.ResolvedHook
+		claimSnap  RuntimeState
+	)
+
+	_, terr := TransitionRuntimeState(req.GameID, req.ConfigDir, transitionLockGateTimeout, func(s *RuntimeState) error {
+		// One lifecycle operation per game at a time: an in-flight attempt
+		// refuses immediately with its timing — never queue, never block.
+		if cur := s.Operation; cur != nil {
+			if OperationInFlight(cur, now) {
+				opCopy := *cur
+				refusal = &StopRefusal{
+					Code:          RefusalOperationInFlight,
+					Message:       fmt.Sprintf("a %s operation on %s begun %s is still in progress (deadline %s); re-check after the deadline", cur.Action, req.GameID, cur.AttemptStartedAt.Format(time.RFC3339), cur.Deadline.Format(time.RFC3339)),
+					Phase:         s.Phase,
+					ActiveProfile: EffectiveClaimProfile(s),
+					Operation:     &opCopy,
+				}
+				return errStopRefusal
+			}
+			// Expired or provably dead attempt: record the interruption and
+			// proceed — retrying is what the idempotent-hook contract is for
+			// (design/07). Its late completion is fenced out by operationID.
+			s.LastActionResult = &RuntimeActionResult{
+				Action:    cur.Action,
+				Outcome:   OutcomeInterrupted,
+				Detail:    fmt.Sprintf("a previous %s attempt begun %s never completed", cur.Action, cur.AttemptStartedAt.Format(time.RFC3339)),
+				Timestamp: now,
+			}
+			s.Operation = nil
+			if s.Phase == PhaseStopping || s.Phase == PhaseKilling {
+				s.Phase = PhaseActive
+			}
+		}
+
+		hook, builtinOK := actionCapability(s, req.Action)
+		if hook == nil && !builtinOK {
+			refusal = unsupportedRefusal(s, req)
+			return errStopRefusal
+		}
+		actionHook = hook
+		priorPhase = s.Phase
+		profile = EffectiveClaimProfile(s)
+
+		execPID := os.Getpid()
+		execStart, _ := ProcessStartTime(execPID)
+		op = RuntimeOperation{
+			OperationID:          NewFencingID(),
+			Action:               req.Action,
+			ExecutorInstanceID:   req.InstanceID,
+			ExecutorPID:          execPID,
+			ExecutorPIDStartTime: execStart,
+			AttemptStartedAt:     now,
+			Deadline:             now.Add(actionBudget(hook) + verifyBudget(hook)),
+		}
+		s.Operation = &op
+		if req.Action == OperationActionKill {
+			s.Phase = PhaseKilling
+		} else {
+			s.Phase = PhaseStopping
+		}
+		claimSnap = *s
+		return nil
+	})
+	switch {
+	case terr == nil:
+	case errors.Is(terr, errStopRefusal):
+		return nil, refusal, nil
+	case errors.Is(terr, ErrTransitionLockBusy):
+		// Bounded, never a hang (design/06): contention reads as an
+		// operation in progress; the caller re-checks.
+		return nil, &StopRefusal{
+			Code:    RefusalOperationInFlight,
+			Message: fmt.Sprintf("another lifecycle operation on %s holds the transition lock; re-check games_status shortly", req.GameID),
+		}, nil
+	default:
+		return nil, nil, terr
+	}
+
+	outcome := &StopOutcome{Action: req.Action, ActiveProfile: profile}
+
+	// The action runs with the lock released (design/06: the lock is never
+	// held while a hook runs or anything waits).
+	actionFailed := ""
+	failDetail := ""
+	if actionHook != nil {
+		ok, hr := runActionHookFunc(actionHook, req.GameID, profile)
+		hrCopy := hr
+		outcome.HookResult = &hrCopy
+		if !ok {
+			actionFailed = OutcomeActionFailed
+			if hr.TimedOut {
+				actionFailed = OutcomeActionTimedOut
+			}
+			if hr.ExecError != nil {
+				failDetail = fmt.Sprintf("%s hook failed to run: %v", req.Action, hr.ExecError)
+			}
+		}
+	} else {
+		actionDeadline := op.AttemptStartedAt.Add(actionBudget(nil))
+		if !op.Deadline.IsZero() && op.Deadline.Before(actionDeadline) {
+			actionDeadline = op.Deadline
+		}
+		actionCtx, cancelAction := context.WithDeadline(context.Background(), actionDeadline)
+		warnings, err := runBuiltinAction(actionCtx, &claimSnap, req.Action)
+		cancelAction()
+		outcome.Warnings = append(outcome.Warnings, warnings...)
+		if err != nil {
+			actionFailed = OutcomeActionFailed
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				actionFailed = OutcomeActionTimedOut
+			}
+			failDetail = err.Error()
+		}
+	}
+
+	if actionFailed != "" {
+		result := &RuntimeActionResult{Action: req.Action, Outcome: actionFailed, Detail: failDetail, Timestamp: time.Now().UTC()}
+		attachHookEvidence(result, outcome.HookResult)
+		outcome.Code = actionFailed
+		outcome.Detail = failDetail
+		// On failure the phase returns to where it was and the attempt's
+		// result is persisted (design/06).
+		persistStopCompletion(req, claimSnap.LaunchID, op.OperationID, priorPhase, "", result, outcome)
+		return outcome, nil, nil
+	}
+
+	verdictCode, verdictDetail := verifyTermination(req, &claimSnap, op, actionHook, profile, outcome)
+	outcome.Detail = verdictDetail
+	outcome.Code = verdictCode
+
+	switch verdictCode {
+	case OutcomeTerminated:
+		// Before a stopped verdict clears the claim, terminate and reap any
+		// still-live launcher child this process started (design/04).
+		if req.ReapLauncher != nil {
+			req.ReapLauncher()
+		}
+		err := removeRuntimeStateForStopCompletion(req, claimSnap.LaunchID, op.OperationID)
+		switch {
+		case err == nil:
+			outcome.ClaimRemoved = true
+		case errors.Is(err, errStopAttachmentLive):
+			// A live foreign bridge attachment appeared between the last
+			// evidence round and the removal: a claim is never cleared under
+			// a live bridge (design/04, T-FENCE) — downgrade to unverified.
+			verdictDetail = "a live bridge attachment appeared during verification; " + verdictDetail
+			outcome.Detail = verdictDetail
+			outcome.Code = OutcomeTerminationUnverified
+			result := &RuntimeActionResult{Action: req.Action, Outcome: OutcomeTerminationUnverified, Detail: verdictDetail, Timestamp: time.Now().UTC()}
+			attachHookEvidence(result, outcome.HookResult)
+			persistStopCompletion(req, claimSnap.LaunchID, op.OperationID, priorPhase, "", result, outcome)
+			return outcome, nil, nil
+		case errors.Is(err, ErrFencingViolation) || errors.Is(err, ErrNoRuntimeClaim):
+			outcome.Warnings = append(outcome.Warnings, fmt.Sprintf("the %s completion was superseded and left the current claim untouched", req.Action))
+		default:
+			// Verified termination, but the clean-stop credit (and thus removal)
+			// failed. removeRuntimeStateForStopCompletion already
+			// persisted the clean-stop as a self-contained pending event under
+			// the SAME lock that observed the failure (no post-release gap, no
+			// discarded error), so the claim remains and a later deleter or the
+			// stop retry reconciles the credit by its own stored operationID.
+			outcome.Warnings = append(outcome.Warnings, fmt.Sprintf("verified termination, but the claim could not be removed: %v", err))
+		}
+		outcome.FinalPhase = ""
+	case OutcomeActionSucceededRunning:
+		// Positive running evidence after a successful action: the claim
+		// stays and — running seen — the phase promotes to active
+		// (design/20: any later observation promotes).
+		result := &RuntimeActionResult{Action: req.Action, Outcome: verdictCode, Detail: verdictDetail, Timestamp: time.Now().UTC()}
+		attachHookEvidence(result, outcome.HookResult)
+		persistStopCompletion(req, claimSnap.LaunchID, op.OperationID, PhaseActive, RuntimeStateStatusRunning, result, outcome)
+	default: // termination_unverified
+		result := &RuntimeActionResult{Action: req.Action, Outcome: verdictCode, Detail: verdictDetail, Timestamp: time.Now().UTC()}
+		attachHookEvidence(result, outcome.HookResult)
+		persistStopCompletion(req, claimSnap.LaunchID, op.OperationID, priorPhase, "", result, outcome)
+	}
+	return outcome, nil, nil
+}
+
+// executorProvablyGone reports whether an operation's executor fingerprint
+// is positively stopped — unknown is not gone (design/04).
+func executorProvablyGone(op *RuntimeOperation) bool {
+	if op.ExecutorPID <= 0 {
+		return false
+	}
+	v, _ := VerifyPIDFingerprint(op.ExecutorPID, op.ExecutorPIDStartTime)
+	return v == StatusStopped
+}
+
+// actionCapability resolves what can execute the action: the pinned hook
+// (profile overrides already merged at resolution), else the built-in
+// fallback when a usable target is pinned. Kill never considers the stop
+// hook and stop never considers the kill hook (design/06).
+func actionCapability(s *RuntimeState, action string) (*launch.ResolvedHook, bool) {
+	var hook *launch.ResolvedHook
+	if s.Lifecycle != nil {
+		if action == OperationActionKill {
+			hook = s.Lifecycle.Kill
+		} else {
+			hook = s.Lifecycle.Stop
+		}
+	}
+	return hook, builtinTargetExists(s)
+}
+
+// ClaimActionSupported reports whether stop or kill has ANY mechanism on
+// this claim — a pinned lifecycle hook for the action, or the built-in
+// fallback (workload PID / stopProcessName). Status surfaces consult it so
+// nextActions only advertise executable operations.
+func ClaimActionSupported(s *RuntimeState, action string) bool {
+	if s == nil {
+		return false
+	}
+	hook, builtinOK := actionCapability(s, action)
+	return hook != nil || builtinOK
+}
+
+// builtinTargetExists reports whether the built-in fallback has anything to
+// act on: a pinned workload PID (helper PIDs are never the workload,
+// design/04) or a pinned stopProcessName.
+func builtinTargetExists(s *RuntimeState) bool {
+	if s.PIDRole == PIDRoleWorkload && s.GamePID > 0 {
+		return true
+	}
+	return s.StopProcessName != ""
+}
+
+func unsupportedRefusal(s *RuntimeState, req StopRequest) *StopRefusal {
+	mode := ""
+	if s.LaunchMode != "" {
+		mode = fmt.Sprintf(" (%s launch)", s.LaunchMode)
+	}
+	if req.Action == OperationActionKill {
+		return &StopRefusal{
+			Code:          RefusalKillUnsupported,
+			Message:       fmt.Sprintf("no force-capable action exists for %s%s: no kill hook is pinned and no workload PID or stopProcessName is available. Configure a kill hook or 'stopProcessName' — kill never falls back to the graceful stop hook", req.GameID, mode),
+			Phase:         s.Phase,
+			ActiveProfile: EffectiveClaimProfile(s),
+		}
+	}
+	killHook, builtinOK := actionCapability(s, OperationActionKill)
+	return &StopRefusal{
+		Code:          RefusalStopUnsupported,
+		Message:       fmt.Sprintf("no graceful stop action exists for %s%s: no stop hook is pinned and no workload PID or stopProcessName is available. Configure a stop hook or 'stopProcessName' — stop never silently escalates to kill", req.GameID, mode),
+		Phase:         s.Phase,
+		ActiveProfile: EffectiveClaimProfile(s),
+		KillCapable:   killHook != nil || builtinOK,
+	}
+}
+
+// EffectiveClaimProfile is the profile a claim's pinned hooks execute with
+// and the activeProfile MCP results report: the selected profile, or the
+// observed profile for external snapshots (design/05 Stage 2, design/10).
+func EffectiveClaimProfile(s *RuntimeState) string {
+	if s.Source == SourceExternal && s.ObservedProfile != "" && s.ObservedProfile != ObservedProfileUnknown {
+		return s.ObservedProfile
+	}
+	return s.Profile
+}
+
+func actionBudget(hook *launch.ResolvedHook) time.Duration {
+	if hook != nil {
+		return resolveHookTimeout(hook)
+	}
+	return builtinActionBudget
+}
+
+func verifyBudget(hook *launch.ResolvedHook) time.Duration {
+	if hook != nil && hook.VerifyTimeoutSeconds > 0 {
+		return time.Duration(hook.VerifyTimeoutSeconds) * time.Second
+	}
+	return time.Duration(config.VerifyTimeoutDefault) * time.Second
+}
+
+func attachHookEvidence(result *RuntimeActionResult, hr *HookResult) {
+	if hr == nil {
+		return
+	}
+	code := hr.ExitCode
+	result.ExitCode = &code
+	result.StderrTail = hr.StderrTail
+	result.TreeKillWarning = hr.TreeKillWarning
+}
+
+// persistStopCompletion merges the attempt's result into the latest claim,
+// fenced by launchID + operationID: a completion racing a kill that removed
+// the claim is discarded and can never resurrect state (design/06).
+func persistStopCompletion(req StopRequest, launchID, operationID, phase, status string, result *RuntimeActionResult, outcome *StopOutcome) {
+	var credit func(*RuntimeState) error
+	if req.HistoryContextHash != "" && (result.Outcome == OutcomeActionFailed || result.Outcome == OutcomeActionTimedOut) {
+		credit = func(cur *RuntimeState) error {
+			class := Classify(result.Outcome, ClassifyContext{}).Class
+			return ApplyActionFailureLocked(req.GameID, req.ConfigDir, req.HistoryProfile, req.HistoryContextHash,
+				result.Outcome, class, cur.AppliedInputNames, result.Timestamp)
+		}
+	}
+	final, err := FencedTransitionWithCredit(req.GameID, req.ConfigDir, launchID, operationID, func(s *RuntimeState) error {
+		if phase != "" {
+			s.Phase = phase
+		}
+		if status != "" {
+			s.Status = status
+		}
+		s.Operation = nil
+		s.LastActionResult = result
+		return nil
+	}, credit)
+	if err != nil {
+		if errors.Is(err, ErrFencingViolation) || errors.Is(err, ErrNoRuntimeClaim) {
+			outcome.Warnings = append(outcome.Warnings, fmt.Sprintf("the %s result was not persisted: the runtime claim was superseded while the action ran", req.Action))
+			return
+		}
+		outcome.Warnings = append(outcome.Warnings, fmt.Sprintf("the %s result and its history could not be persisted atomically; the operation remains fenced for recovery: %v", req.Action, err))
+		return
+	}
+	outcome.Result = result
+	outcome.FinalPhase = final.Phase
+
+}
+
+// errStopAttachmentLive refuses a terminated-removal because the current
+// claim carries a live foreign bridge attachment: never cleared under a
+// live bridge (design/04).
+var errStopAttachmentLive = errors.New("live foreign bridge attachment")
+
+// cleanStopCompletion is a direct stop completion's clean-stop credit, recorded
+// as a self-contained pending event before removal.
+type cleanStopCompletion struct {
+	operationID string
+	profile     string
+	contextHash string
+}
+
+// removeRuntimeStateForStopCompletion removes the claim only while it still
+// carries the completing attempt's launch and operation identity, and only when
+// no fresh fingerprint-matched foreign attachment lease exists. A verified stop
+// records its clean-stop as a self-contained pending event and credits it (with
+// every other pending event) inside the SAME lock BEFORE removal; a history
+// write failure aborts the removal so the claim — and its pending event —
+// survives for a later retry, never lost with the deleted claim.
+func removeRuntimeStateForStopCompletion(req StopRequest, launchID, operationID string) error {
+	var completion *cleanStopCompletion
+	if req.HistoryContextHash != "" {
+		completion = &cleanStopCompletion{operationID: operationID, profile: req.HistoryProfile, contextHash: req.HistoryContextHash}
+	}
+	return removeRuntimeStateGuarded(req.GameID, req.ConfigDir, req.InstanceID, launchID, operationID, req.SelfConnection, completion)
+}
+
+// removeRuntimeStateGuarded removes the claim under the transition lock. Before
+// removal it reconciles EVERY pending history event on the claim — clean stops
+// and verified deliveries — crediting each by its own self-contained identity;
+// a completion (a direct stop that just verified termination)
+// first appends its clean-stop as a pending event. A credit-write failure
+// persists the pending lists under this lock and ABORTS removal, so the claim
+// and its un-credited events survive for a later deleter/status retry — nothing
+// is lost with the deleted claim, and nothing is credited to a successor's
+// operation/connection.
+func removeRuntimeStateGuarded(gameID, configDir, instanceID, launchID, operationID string, selfLive func(connectionID string) bool, completion *cleanStopCompletion) error {
+	lock, err := AcquireTransitionLock(gameID, configDir, transitionLockGateTimeout)
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+	cur, err := loadRuntimeStateLocked(gameID, configDir)
+	if err != nil {
+		return err
+	}
+	if cur == nil {
+		return ErrNoRuntimeClaim
+	}
+	if cur.LaunchID != launchID {
+		return ErrFencingViolation
+	}
+	if cur.Operation == nil || cur.Operation.OperationID != operationID {
+		return ErrFencingViolation
+	}
+	if attachmentBlocksRemoval(cur.Attachment, instanceID, selfLive) {
+		return errStopAttachmentLive
+	}
+	if completion != nil {
+		// Never dropped at a cap — termination already verified, so a refusal
+		// would be permanent loss; this claim's pending records are
+		// credited and removed immediately below.
+		cur.PendingCleanStops = appendPendingCredit(cur.PendingCleanStops,
+			pendingCleanStopEvent(completion.operationID, completion.profile, completion.contextHash, time.Now().UTC()))
+	}
+	// Credit every pending event, remove the claim, then GC the markers — GC is
+	// gated behind the durable removal so an intervening reconcile can never drop
+	// a marker whose removal has not committed. A credit failure
+	// persists the pending lists and aborts; a removal failure keeps the markers.
+	return creditPendingThenRemoveLocked(gameID, configDir, cur)
+}
+
+// attachmentBlocksRemoval is the tri-state final-deletion guard (design/04):
+// only a positively dead owner, an expired lease, or a malformed record
+// permits removal. A self-owned record defers to the caller's actual
+// in-process connection state — selfLive is evaluated under the lock, so a
+// bridge that attached between the last evidence poll and the removal is
+// seen; a caller that cannot know its own socket state (nil selfLive) is
+// treated conservatively. A foreign owner whose fingerprint cannot be
+// inspected is uncertainty, never permission to delete.
+func attachmentBlocksRemoval(a *RuntimeAttachment, instanceID string, selfLive func(connectionID string) bool) bool {
+	if a == nil {
+		return false
+	}
+	if a.OwnerPID <= 0 || a.OwnerPIDStartTime == 0 {
+		return false // malformed: never evidence (design/04)
+	}
+	if a.LeaseDeadline.IsZero() || !time.Now().Before(a.LeaseDeadline) {
+		return false // expired: history
+	}
+	if attachmentOwnedBy(a, instanceID) {
+		if selfLive == nil {
+			return true
+		}
+		return selfLive(a.ConnectionID)
+	}
+	switch v, _ := VerifyPIDFingerprint(a.OwnerPID, a.OwnerPIDStartTime); v {
+	case StatusStopped:
+		return false // positively dead: the connection died with the owner
+	default:
+		return true // running, or inspection failure: never delete on uncertainty
+	}
+}
+
+// ReleaseStartClaim removes a start attempt's own claim after a failure —
+// fenced by the launch identity AND the exact original start operation it
+// created, so a cleanup path that lost a race (its claim superseded, its
+// operation cleared by recovery or completion, a bridge attached) can never
+// delete state it no longer owns (design/06). Completions that legitimately
+// cleared the operation make their own fully fenced decisions instead of
+// passing through this generic failure cleanup.
+func ReleaseStartClaim(gameID, configDir, instanceID, launchID, operationID string, selfLive func(connectionID string) bool) error {
+	return removeRuntimeStateGuarded(gameID, configDir, instanceID, launchID, operationID, selfLive, nil)
+}
+
+// RemoveRuntimeStateIfCurrent removes the claim only while it still carries
+// the evaluated launch identity, no operation at all, and no removal-
+// blocking attachment — the status path's fenced removal (design/06): a
+// stopped verdict computed over a seconds-long hook must never delete a
+// successor claim, an attempt that was admitted meanwhile (expired or not —
+// its recovery is not the status path's business), or a claim a bridge just
+// attached to (self-owned records are re-checked against the caller's live
+// socket under the lock).
+func RemoveRuntimeStateIfCurrent(gameID, configDir, instanceID, launchID string, selfLive func(connectionID string) bool) error {
+	lock, err := AcquireTransitionLock(gameID, configDir, transitionLockGateTimeout)
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+	cur, err := loadRuntimeStateLocked(gameID, configDir)
+	if err != nil {
+		return err
+	}
+	if cur == nil {
+		return nil // already gone: the goal state
+	}
+	if cur.LaunchID != launchID {
+		return ErrFencingViolation
+	}
+	if cur.Operation != nil {
+		return ErrFencingViolation
+	}
+	if attachmentBlocksRemoval(cur.Attachment, instanceID, selfLive) {
+		return ErrFencingViolation
+	}
+	// The status funnel removes a stopped/stale active claim here: credit every
+	// pending history event (verified deliveries, clean stops), remove the claim,
+	// then GC the markers behind the durable removal so none is lost with the
+	// claim and none replays. A credit-write failure persists the
+	// pending lists and aborts, leaving the claim for a later status retry.
+	return creditPendingThenRemoveLocked(gameID, configDir, cur)
+}
+
+// runBuiltinAction executes the pinned built-in fallback: signal a verified
+// workload PID and return; only when that PID is absent, stopped, or unsafe to
+// use does it scan and signal every stopProcessName match. Signaling nothing
+// (already gone) is not a failure — verification decides the outcome; only an
+// inability to act (scan error, all signals refused) fails the action.
+func runBuiltinAction(ctx context.Context, claim *RuntimeState, action string) ([]string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var warnings []string
+	graceful, force := pinnedBuiltinStrategies(claim)
+	signal := func(pid int) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if action == OperationActionKill {
+			return builtinKillFunc(ctx, force, pid)
+		}
+		return builtinTerminateFunc(ctx, graceful, pid)
+	}
+
+	if claim.PIDRole == PIDRoleWorkload && claim.GamePID > 0 {
+		switch v, detail := VerifyPIDFingerprint(claim.GamePID, claim.PIDStartTime); v {
+		case StatusRunning:
+			if err := signal(claim.GamePID); err != nil {
+				return warnings, fmt.Errorf("failed to signal workload pid %d: %w", claim.GamePID, err)
+			}
+			return warnings, nil
+		case StatusUnknown:
+			// A PID that cannot be verified must not be signaled: a reused
+			// PID would receive the signal (design/04).
+			warnings = append(warnings, fmt.Sprintf("pinned workload PID %d could not be verified (%s); not signaling it, falling back to the process name", claim.GamePID, detail))
+		}
+		// provably stopped: fall through to the name
+	}
+
+	if claim.StopProcessName == "" {
+		return warnings, nil // nothing left to act on; verification decides
+	}
+	pids, err := callFindProcessesByNameContext(ctx, claim.StopProcessName)
+	if err != nil {
+		return warnings, fmt.Errorf("process scan for %q failed: %w", claim.StopProcessName, err)
+	}
+	if len(pids) == 0 {
+		return warnings, nil
+	}
+	if len(pids) > 1 {
+		warnings = append(warnings, fmt.Sprintf("%d processes named %q matched; signaling all of them — configure a more specific stopProcessName if this is wrong", len(pids), claim.StopProcessName))
+	}
+	signaled := 0
+	var lastErr error
+	for _, pid := range pids {
+		if err := signal(pid); err != nil {
+			lastErr = err
+			warnings = append(warnings, fmt.Sprintf("failed to signal pid %d: %v", pid, err))
+			continue
+		}
+		signaled++
+	}
+	if signaled == 0 && lastErr != nil {
+		return warnings, fmt.Errorf("failed to signal any process named %q: %w", claim.StopProcessName, lastErr)
+	}
+	return warnings, nil
+}
+
+func pinnedBuiltinStrategies(claim *RuntimeState) (string, string) {
+	if bf := claim.BuiltinFallback; bf != nil && bf.GracefulStrategy != "" && bf.ForceStrategy != "" {
+		return bf.GracefulStrategy, bf.ForceStrategy
+	}
+	return builtinStrategiesForPlatform()
+}
+
+func builtinStrategiesForPlatform() (string, string) {
+	if runtime.GOOS == "windows" {
+		return BuiltinGracefulTaskkill, BuiltinForceTaskkill
+	}
+	return BuiltinGracefulSigterm, BuiltinForceSigkill
+}
+
+// The strategy pin names the mechanism; on any one machine the platform
+// implementation is that mechanism (claims never move between OSes), so
+// the executors dispatch to the existing platform helpers.
+func builtinTerminate(ctx context.Context, strategy string, pid int) error {
+	_ = strategy
+	return terminateProcessContext(ctx, pid, 0)
+}
+
+func builtinKill(ctx context.Context, strategy string, pid int) error {
+	_ = strategy
+	return killProcessContext(ctx, pid)
+}
+
+// stopEvidenceRound is one verification poll over the existing evidence
+// sources (design/06): positive sources can prove running or stopped;
+// bridge evidence (live GABP, fresh foreign attachment lease) keeps the
+// claim but never upgrades to a positive running verdict — it cannot
+// distinguish a workload surviving the action from a socket that has not
+// yet noticed death (T-FENCE: unverified, never cleared, under a live
+// bridge).
+type stopEvidenceRound struct {
+	sources       int
+	running       bool
+	anyUnknown    bool
+	bridgeLive    bool
+	gabpInProcess bool // this process's own live connection (contradiction rule)
+	hookStopped   bool // the status hook explicitly reported stopped
+	details       []string
+}
+
+func (r stopEvidenceRound) allStopped() bool {
+	return r.sources > 0 && !r.running && !r.anyUnknown && !r.bridgeLive
+}
+
+func (r stopEvidenceRound) noSources() bool {
+	return r.sources == 0 && !r.bridgeLive
+}
+
+func verifyTermination(req StopRequest, claim *RuntimeState, op RuntimeOperation, actionHook *launch.ResolvedHook, profile string, outcome *StopOutcome) (string, string) {
+	window := verifyBudget(actionHook)
+	deadline := time.Now().Add(window)
+	if !op.Deadline.IsZero() && op.Deadline.Before(deadline) {
+		deadline = op.Deadline
+	}
+	// Never invent time beyond the persisted operation deadline. If the action
+	// consumed the whole budget, termination is unverified; starting a fresh
+	// scan here would leave a stale invocation acting after another caller may
+	// legitimately recover or supersede the expired operation.
+	if !deadline.After(time.Now()) {
+		return OutcomeTerminationUnverified, "the operation deadline elapsed before termination could be verified"
+	}
+
+	var statusHook *launch.ResolvedHook
+	if claim.Lifecycle != nil {
+		statusHook = claim.Lifecycle.Status
+	}
+
+	var last stopEvidenceRound
+	superseded := false
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		// Every round reads the LATEST claim: attachment changes during
+		// stop verification are the ordinary case (design/06) — a bridge
+		// attaching while the hook ran must be seen, and a cleared record
+		// must stop counting. The pinned context (hooks, PID, name) is
+		// immutable within a launch, so the reload only changes what can
+		// legitimately change.
+		cur, err := LoadRuntimeState(req.GameID, req.ConfigDir)
+		switch {
+		case err != nil:
+			// Transient read failure: evaluate against the last known
+			// snapshot rather than inventing evidence.
+		case cur == nil || cur.LaunchID != claim.LaunchID:
+			// The claim was removed or replaced mid-verification: every
+			// completion write would be fenced out — stop polling.
+			superseded = true
+		default:
+			claim = cur
+		}
+		if superseded {
+			break
+		}
+		roundCtx, cancelRound := context.WithTimeout(context.Background(), remaining)
+		last = evaluateStopEvidence(roundCtx, req, claim, statusHook, profile, remaining)
+		cancelRound()
+		if last.allStopped() || last.noSources() {
+			break
+		}
+		sleep := stopVerifyPollInterval
+		if until := time.Until(deadline); until < sleep {
+			sleep = until
+		}
+		if sleep > 0 {
+			time.Sleep(sleep)
+		}
+	}
+
+	if superseded {
+		outcome.Warnings = append(outcome.Warnings, fmt.Sprintf("the runtime claim was removed or replaced while the %s was verified; the result applies to the finished launch only", req.Action))
+		detail := joinDetails(last.details)
+		if detail == "" {
+			detail = "verification abandoned: the claim was superseded"
+		}
+		return OutcomeTerminationUnverified, detail
+	}
+
+	// Contradiction rule (design/04): this process's own live bridge versus
+	// an explicit stopped verdict from the status hook is running, with a
+	// warning about the hook — never resolved by unverified limbo. The
+	// narrow unverified treatments remain for the stop-only wrapper (no
+	// independent source) and for foreign persisted leases (T-FENCE).
+	if last.gabpInProcess && last.hookStopped {
+		outcome.Warnings = append(outcome.Warnings,
+			"status hook reports stopped while the GABP bridge is live; the bridge wins — check the hook's exit-code contract")
+		return OutcomeActionSucceededRunning, joinDetails(last.details)
+	}
+
+	detail := joinDetails(last.details)
+	switch {
+	case last.noSources():
+		// No independent evidence source exists at all: hook success alone
+		// stands as the stop-only-wrapper evidence (design/06).
+		return OutcomeTerminated, "no independent evidence source exists; the successful action stands as termination evidence"
+	case last.allStopped():
+		return OutcomeTerminated, detail
+	case last.running:
+		return OutcomeActionSucceededRunning, detail
+	default:
+		return OutcomeTerminationUnverified, detail
+	}
+}
+
+func evaluateStopEvidence(ctx context.Context, req StopRequest, claim *RuntimeState, statusHook *launch.ResolvedHook, profile string, remaining time.Duration) stopEvidenceRound {
+	var r stopEvidenceRound
+
+	if claim.PIDRole == PIDRoleWorkload && claim.GamePID > 0 {
+		r.sources++
+		switch v, detail := VerifyPIDFingerprint(claim.GamePID, claim.PIDStartTime); v {
+		case StatusRunning:
+			r.running = true
+			r.details = append(r.details, fmt.Sprintf("workload pid %d is running", claim.GamePID))
+		case StatusUnknown:
+			r.anyUnknown = true
+			r.details = append(r.details, fmt.Sprintf("workload pid %d could not be inspected (%s)", claim.GamePID, detail))
+		default:
+			r.details = append(r.details, fmt.Sprintf("workload pid %d is gone", claim.GamePID))
+		}
+	}
+
+	if claim.StopProcessName != "" {
+		r.sources++
+		pids, err := callFindProcessesByNameContext(ctx, claim.StopProcessName)
+		switch {
+		case err != nil:
+			r.anyUnknown = true
+			r.details = append(r.details, fmt.Sprintf("process scan for %q failed: %v", claim.StopProcessName, err))
+		case len(pids) > 0:
+			r.running = true
+			r.details = append(r.details, fmt.Sprintf("%d process(es) named %q still running", len(pids), claim.StopProcessName))
+		default:
+			r.details = append(r.details, fmt.Sprintf("no process named %q", claim.StopProcessName))
+		}
+	}
+
+	if statusHook != nil {
+		r.sources++
+		probeRemaining := remaining
+		if deadline, ok := ctx.Deadline(); ok {
+			probeRemaining = time.Until(deadline)
+		}
+		if probeRemaining <= 0 {
+			r.anyUnknown = true
+			r.details = append(r.details, "verification deadline elapsed before the status hook could run")
+			return r
+		}
+		verdict, hr := runStatusProbeFunc(statusHook, claim.GameID, profile, probeRemaining)
+		switch verdict {
+		case StatusRunning:
+			r.running = true
+			r.details = append(r.details, fmt.Sprintf("status hook reports running (exit %d)", hr.ExitCode))
+		case StatusStopped:
+			r.hookStopped = true
+			r.details = append(r.details, fmt.Sprintf("status hook reports stopped (exit %d)", hr.ExitCode))
+		default:
+			r.anyUnknown = true
+			switch {
+			case hr.TimedOut:
+				r.details = append(r.details, "status hook timed out")
+			case hr.ExecError != nil:
+				r.details = append(r.details, fmt.Sprintf("status hook failed to run: %v", hr.ExecError))
+			default:
+				r.details = append(r.details, fmt.Sprintf("status hook exit %d is unclassified", hr.ExitCode))
+			}
+		}
+	}
+
+	if req.GABPLive != nil && req.GABPLive() {
+		r.bridgeLive = true
+		r.gabpInProcess = true
+		r.details = append(r.details, "the GABP bridge connection is still live")
+	}
+
+	if a := claim.Attachment; a != nil && !attachmentOwnedBy(a, req.InstanceID) {
+		// A foreign attachment record is evidence only while the lease is
+		// fresh and the owner fingerprint matches a live process; a
+		// self-owned record defers to the in-process connection state
+		// (GABPLive), which is more current than the persisted lease.
+		if a.OwnerPID > 0 && a.OwnerPIDStartTime != 0 && !a.LeaseDeadline.IsZero() && time.Now().Before(a.LeaseDeadline) {
+			switch v, _ := VerifyPIDFingerprint(a.OwnerPID, a.OwnerPIDStartTime); v {
+			case StatusRunning:
+				r.bridgeLive = true
+				r.details = append(r.details, fmt.Sprintf("another process (pid %d) holds a fresh bridge attachment lease", a.OwnerPID))
+			case StatusUnknown:
+				r.anyUnknown = true
+				r.details = append(r.details, fmt.Sprintf("a bridge attachment lease owner (pid %d) could not be inspected", a.OwnerPID))
+			}
+		}
+	}
+
+	return r
+}
+
+func attachmentOwnedBy(a *RuntimeAttachment, instanceID string) bool {
+	if instanceID != "" && a.OwnerInstanceID != "" {
+		return a.OwnerInstanceID == instanceID
+	}
+	return a.OwnerPID == os.Getpid()
+}
+
+func joinDetails(details []string) string {
+	out := ""
+	for i, d := range details {
+		if i > 0 {
+			out += "; "
+		}
+		out += d
+	}
+	return out
+}

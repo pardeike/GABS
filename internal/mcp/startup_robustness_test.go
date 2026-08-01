@@ -33,7 +33,7 @@ func TestGamesStartCapsSynchronousGABPWaitForLargeTimeout(t *testing.T) {
 		Games: map[string]config.GameConfig{game.ID: game},
 	}
 
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 10*time.Millisecond, 20*time.Millisecond)
 
@@ -66,7 +66,13 @@ func TestGamesStartCapsSynchronousGABPWaitForLargeTimeout(t *testing.T) {
 	}
 }
 
-func TestGamesStartUsesLauncherReusedBridgeEnvironmentWithoutMutatingBridgeFile(t *testing.T) {
+// TestGamesStartRejectsStaleLauncherBridgeEnvironment: a workload that
+// still carries a previous launch's bridge environment is never adopted as
+// an attach credential (design/03: the per-launch token exists exactly to
+// reject the delayed-superseded-process case). The start stays non-error,
+// surfaces stale_bridge_credential, and the claim's fresh credential is
+// never replaced.
+func TestGamesStartRejectsStaleLauncherBridgeEnvironment(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("process environment inspection is not supported on Windows")
 	}
@@ -105,7 +111,7 @@ func TestGamesStartUsesLauncherReusedBridgeEnvironmentWithoutMutatingBridgeFile(
 	pidPath := filepath.Join(tmpDir, "game.pid")
 	scriptPath := filepath.Join(tmpDir, "launch-stale-env.sh")
 	script := fmt.Sprintf(`#!/bin/sh
-GABP_SERVER_PORT=%d GABP_TOKEN=%s GABS_GAME_ID=%s GABS_BRIDGE_PATH=%s GABS_HELPER_PROCESS=1 %s -test.run=TestSharedRuntimeStateHelperProcess &
+GABP_SERVER_PORT=%d GABP_TOKEN=%s GABS_GAME_ID=%s GABS_BRIDGE_PATH=%s GABSTEST_HELPER_PROCESS=1 %s -test.run=TestSharedRuntimeStateHelperProcess &
 echo $! > %s
 wait
 `, stalePort, staleToken, game.ID, shellQuote(bridgePath), shellQuote(exe), shellQuote(pidPath))
@@ -143,7 +149,7 @@ wait
 	})
 	defer restoreFinder()
 
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 10*time.Millisecond, 20*time.Millisecond)
 
@@ -164,16 +170,35 @@ wait
 	})
 
 	if strings.Contains(startText, `"isError":true`) {
-		t.Fatalf("start should adopt stale launcher env and return a bounded non-error result, got: %s", startText)
+		t.Fatalf("a stale launcher env start is bounded and non-error (bridge-pending), got: %s", startText)
+	}
+	if !strings.Contains(startText, "stale_bridge_credential") {
+		t.Fatalf("the stale environment must surface stale_bridge_credential, got: %s", startText)
 	}
 
-	_, adoptedPort, adoptedToken, err := config.ReadBridgeJSON(game.ID, tmpDir)
+	_, filePort, fileToken, err := config.ReadBridgeJSON(game.ID, tmpDir)
 	if err != nil {
 		t.Fatalf("failed to read internal bridge endpoint: %v", err)
 	}
-	if adoptedPort != freshPort || adoptedToken != freshToken {
+	// The port is reusable, but the token rotates per launch (design/03) —
+	// the file must carry the freshly minted credential, and the stale
+	// process environment must never replace it anywhere.
+	if filePort != freshPort {
 		statusText := marshalMessage(t, server.HandleMessage(toolCallMessage("status-stale-launcher", "games.status", game.ID)))
-		t.Fatalf("expected internal bridge endpoint to remain debug-only %d/%s, got %d/%s; status: %s", freshPort, freshToken, adoptedPort, adoptedToken, statusText)
+		t.Fatalf("expected internal bridge endpoint to keep port %d, got %d; status: %s", freshPort, filePort, statusText)
+	}
+	if fileToken == staleToken {
+		t.Fatalf("the stale process-env token must never be written into the bridge file")
+	}
+	if fileToken == freshToken {
+		t.Fatalf("the per-launch token must rotate on start; the pre-start token is still in the bridge file")
+	}
+	claim, err := process.LoadRuntimeState(game.ID, tmpDir)
+	if err != nil || claim == nil || claim.Endpoint == nil {
+		t.Fatalf("the claim must keep its endpoint: %+v %v", claim, err)
+	}
+	if claim.Endpoint.Token == staleToken || claim.Endpoint.Port == stalePort {
+		t.Fatalf("the claim endpoint must never be replaced by the stale environment: %+v", claim.Endpoint)
 	}
 }
 
@@ -199,7 +224,7 @@ func TestGamesStartRejectsOccupiedEndpointCache(t *testing.T) {
 		t.Fatalf("failed to seed endpoint cache: %v", err)
 	}
 
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 10*time.Millisecond, 20*time.Millisecond)
 
@@ -221,8 +246,18 @@ func TestGamesStartRejectsOccupiedEndpointCache(t *testing.T) {
 	if !strings.Contains(startText, `"status":"endpoint_cache_in_use"`) {
 		t.Fatalf("expected endpoint_cache_in_use status, got: %s", startText)
 	}
-	if !strings.Contains(startText, `"resetEndpoint":true`) || !strings.Contains(startText, "games_connect") {
-		t.Fatalf("expected connect and reset next actions, got: %s", startText)
+	// Neither games_connect (requires a claim) nor games_status (reports
+	// stopped without inspecting the socket) can answer anything here, so
+	// neither may be a recommended action; the honest diagnostic is an
+	// OS-level port inspection named in the text.
+	if strings.Contains(startText, `"tool":"games_connect"`) || strings.Contains(startText, `"tool":"games_status"`) {
+		t.Fatalf("no-op recovery tools must not be recommended for an occupied endpoint cache, got: %s", startText)
+	}
+	if !strings.Contains(startText, "lsof") || !strings.Contains(startText, "netstat") {
+		t.Fatalf("the result must name an OS-level port inspection, got: %s", startText)
+	}
+	if !strings.Contains(startText, `"resetEndpoint":true`) {
+		t.Fatalf("expected the reset next action, got: %s", startText)
 	}
 	if runtimeState, err := process.LoadRuntimeState(game.ID, tmpDir); err != nil {
 		t.Fatalf("failed to inspect runtime state: %v", err)

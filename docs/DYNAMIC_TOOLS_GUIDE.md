@@ -57,10 +57,10 @@ AdventureGame-Specific Tools (if adventure also starts):
 
 GABS can also have multiple live sessions. Runtime ownership is a short
 active-owner lease, not a permanent lock on an AI client session. If another session is
-actively using a running game, `games.start`, `games.connect`, and game-bound
+actively using a running game, `games_start`, `games_connect`, and game-bound
 tool calls return quickly instead of competing. Once that lease goes idle,
-`games.connect` naturally moves ownership to the current session. Use
-`games.connect {"forceTakeover": true}` only when intentionally overriding an
+`games_connect` naturally moves ownership to the current session. Use
+`games_connect {"forceTakeover": true}` only when intentionally overriding an
 active owner immediately.
 
 When a game is not connecting cleanly, call `games_status` first. Its structured
@@ -82,6 +82,12 @@ configure `timeouts.startup.gabpConnectSeconds` to increase the total connection
 budget. `games_start` still returns after a bounded initial wait; GABS keeps
 trying in the background and `games_connect` can adopt a running process
 environment if a launcher reused older GABP values.
+
+On macOS SteamManaged starts, the same value independently caps the pre-spawn
+Steam readiness proof. If that returns `store_client_not_ready`, no game
+process exists to connect to: preserve the original profile/launch inputs and
+retry `games_start` after Steam settles. Only `reason: readiness_timeout` is a
+case where increasing the timeout may help.
 
 ## AI Discovery Strategies
 

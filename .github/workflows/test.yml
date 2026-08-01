@@ -27,3 +27,71 @@ jobs:
 
       - name: Run tests
         run: go test -v ./...
+
+  # Public docs, the example config, and the skill must use only neutral,
+  # fictional game names — GABS is game-agnostic (design/31).
+  genericity:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Public-surface genericity scan
+        run: ./scripts/genericity-scan.sh
+
+  # Windows runs vet/build plus the process, lifecycle, and CLI packages. The
+  # process package holds the Windows-specific lifecycle code (Job Objects,
+  # LockFileEx, GetProcessTimes, cmd.exe hooks); internal/lifecycle and the
+  # cmd/gabs CLI are exercised by their portable tests (the cross-process
+  # subprocess T-CLI uses the test binary itself as the game, so it runs here
+  # too), while unix-script-based cells t.Skip on Windows. The wider internal/mcp
+  # suite's fixtures are still unix-pathed and not yet ported to this lane.
+  test-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@v6.3.0
+        with:
+          go-version: '1.22'
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Run process, lifecycle, and CLI tests
+        run: go test -v ./internal/process/ ./internal/lifecycle/ ./cmd/gabs/
+
+  # macOS owns the SteamManaged native readiness probe. Run the whole suite
+  # with the same no-CGO constraint used for release binaries so the purego
+  # client-library path cannot silently acquire a build-machine dependency.
+  test-macos:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@v6.3.0
+        with:
+          go-version: '1.22'
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build without CGO
+        env:
+          CGO_ENABLED: '0'
+        run: go build ./...
+
+      - name: Run tests without CGO
+        env:
+          CGO_ENABLED: '0'
+        run: go test -v ./...

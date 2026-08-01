@@ -15,7 +15,7 @@ func TestStripOutputSchema(t *testing.T) {
 	// Helper to create a server with public tools/list tools (one with
 	// outputSchema, one without).
 	setupServer := func(strip bool) *Server {
-		server := NewServerForTesting(logger)
+		server := NewServerForTesting(t, logger)
 
 		gamesConfig := &config.GamesConfig{
 			StripOutputSchema: strip,

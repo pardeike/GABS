@@ -40,12 +40,14 @@ Where the two disagree, the spec wins.
     and `GABS_ABSENT_ENV`). Keep the Windows SystemRoot/WINDIR and
     SteamManaged `SteamAppId`/`SteamGameId` injections in the managed
     layer.
-  - `Controller.Start` currently calls `steam.EnsureClientRunning()`
-    *before* `cmd.Start()` and fails the launch if it errors — this
-    contradicts the advisory contract and must change: keep it as bounded
-    best-effort assistance whose failure becomes the Stage 2 warning,
-    never a start failure (chosen over outright removal to preserve the
-    existing helpful ensure-Steam behavior).
+  - `Controller.Start` performs no Steam assistance. Stage 2 owns the macOS
+    SteamManaged functional-readiness gate immediately before spawning. Its
+    native `steamclient.dylib` calls execute only in a hidden child invocation
+    of the current GABS binary; the parent passes the configured App ID, bounds
+    child runtime/output, opens Steam once, polls with fresh children, and maps
+    typed pipe/global-user/app-state/Steamworks-init readiness evidence.
+    The gate restamps the fenced operation/process-start deadline on success so
+    readiness time cannot consume the normal spawn/verification budget.
   - URL modes (`SteamAppId`/`EpicAppId`): the tracked child is the
     `open`/`xdg-open`/`cmd start` helper. Stage 4 must never count its
     liveness as workload evidence nor classify its expected prompt exit
@@ -310,8 +312,15 @@ Where the two disagree, the spec wins.
      platform hard limit (32 KiB env block on Windows, OS argv limits) is
      a structured pre-spawn **error** at Stage 2 naming the oversized
      part — never allowed through to an opaque CreateProcess/E2BIG
-     failure. An optional conservative warning threshold below the hard
-     limit may additionally warn.
+     failure. Unix accounting follows the running kernel, not a shared
+     heuristic: Darwin uses `kern.argmax` and charges strings, argv/envp
+     pointer entries, both NULL terminators, and alignment; Linux derives
+     the combined ceiling from the current `RLIMIT_STACK`, applies the
+     32-page per-string limit using the current page size, and charges
+     pointer entries plus the kernel's executable-path copy. If an exact
+     hard limit is unavailable, do not invent a smaller rejecting limit.
+     An optional conservative warning threshold below the hard limit may
+     additionally warn, but it can never become a pre-spawn refusal.
 
 ## Behavior details worth pinning
 
@@ -344,9 +353,10 @@ Where the two disagree, the spec wins.
   only: background bridge attach success promotes to active; any later
   status/start/stop observation promotes (running seen) or clears
   (definitively stopped). No poller goroutine.
-- Steam-client advisory: best-effort process-name scan
-  (steam/steamwebhelper on the platform); absence → warning string, never
-  a block.
+- Steam-client handling: URL modes and non-macOS behavior retain the
+  best-effort process-name advisory. On macOS SteamManaged, prove an
+  app-specific client-library pipe/global-user/app-state/API-init proof before spawn; failure
+  is typed `store_client_not_ready`, releases the claim, and starts nothing.
 - Stop sequence: TryLock → read snapshot → persist phase=stopping (+
   deadline) → resolve action (profile hook → game hook → built-in) → run
   under timeout → verify (status hook poll ≤ verifyTimeoutSeconds,

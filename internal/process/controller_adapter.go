@@ -11,9 +11,17 @@ type ControllerInterface interface {
 	Kill() error
 	IsRunning() bool
 	GetPID() int
+	SpawnFingerprint() (pid int, startTime int64)
 	GetLaunchMode() string
 	GetStopProcessName() string
 	IsLauncherProcessRunning() bool
+	FinalEnvironment() []string
+	LaunchLogTail(maxBytes int64) string
+	SetSpawnObservers(before func() error, after func(pid int, startTime int64, spawnErr error))
+	DirectChildExited() bool
+	ExitCode() int
+	TerminateDirectChild()
+	MaterializeSpawnSpec() (exe string, workingDir string, err error)
 }
 
 // NewController creates a new controller instance

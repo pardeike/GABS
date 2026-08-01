@@ -35,7 +35,7 @@ func TestGamesStatusStopsReportingRunningAfterProcessExits(t *testing.T) {
 		},
 	}
 
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
@@ -102,7 +102,7 @@ func TestGamesStatusReportsAndCleansStaleSharedRuntimeState(t *testing.T) {
 	}
 	bridgePath := writeBridgeFileForStatusTest(t, tmpDir, game.ID, 49152, "stale-runtime-token")
 
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
@@ -148,7 +148,7 @@ func TestGamesStatusTreatsClosedBridgeFileAsIdleDurableEndpoint(t *testing.T) {
 		return bridgeListenerDiagnostic{Checked: true, Open: false, Method: "test"}
 	})
 
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
@@ -186,10 +186,11 @@ func TestGamesStatusDoesNotConsumeAcceptOnceBridgeBeforeConnect(t *testing.T) {
 
 	bridgeToken := "accept-once-token"
 	writeBridgeFileForStatusTest(t, tmpDir, game.ID, listener.Addr().(*net.TCPAddr).Port, bridgeToken)
+	seedClaimEndpointForTest(t, tmpDir, game.ID, listener.Addr().(*net.TCPAddr).Port, bridgeToken)
 	serverDone := make(chan error, 1)
 	go serveTestGabpSession(listener, bridgeToken, serverDone)
 
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
@@ -250,7 +251,7 @@ func TestGamesStatusTreatsUnverifiedStoppedBridgeFileAsIdleDurableEndpoint(t *te
 		return bridgeListenerDiagnostic{Error: "passive listener inspection unavailable"}
 	})
 
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
@@ -292,7 +293,7 @@ func TestGamesStatusIgnoresBridgeFileMismatchWhenProcessEnvironmentIsReadable(t 
 	}
 	cmd := exec.Command(exe, "-test.run=TestSharedRuntimeStateHelperProcess")
 	cmd.Env = append(os.Environ(),
-		"GABS_HELPER_PROCESS=1",
+		"GABSTEST_HELPER_PROCESS=1",
 		"GABP_SERVER_PORT=49153",
 		"GABP_TOKEN=process-token",
 		"GABS_GAME_ID="+game.ID,
@@ -316,7 +317,7 @@ func TestGamesStatusIgnoresBridgeFileMismatchWhenProcessEnvironmentIsReadable(t 
 		t.Fatalf("failed to seed runtime state: %v", err)
 	}
 
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
@@ -359,7 +360,7 @@ func TestGamesStatusWarnsWhenReadableProcessEnvironmentLacksEndpoint(t *testing.
 		t.Fatalf("failed to locate test executable: %v", err)
 	}
 	cmd := exec.Command(exe, "-test.run=TestSharedRuntimeStateHelperProcess")
-	cmd.Env = append(os.Environ(), "GABS_HELPER_PROCESS=1")
+	cmd.Env = append(os.Environ(), "GABSTEST_HELPER_PROCESS=1")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("failed to start helper process: %v", err)
 	}
@@ -378,7 +379,7 @@ func TestGamesStatusWarnsWhenReadableProcessEnvironmentLacksEndpoint(t *testing.
 		t.Fatalf("failed to seed runtime state: %v", err)
 	}
 
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 

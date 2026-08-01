@@ -1,0 +1,292 @@
+package main
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+
+	"github.com/pardeike/gabs/internal/launch"
+	"github.com/pardeike/gabs/internal/process"
+	"github.com/pardeike/gabs/internal/util"
+)
+
+// runXattrWrite sets a synthetic com.apple.quarantine attribute (macOS only).
+func runXattrWrite(path string) error {
+	return exec.Command("xattr", "-w", "com.apple.quarantine", "0081;00000000;test;", path).Run()
+}
+
+func TestConflationWarning(t *testing.T) {
+	if conflationWarning(&launch.ResolvedHook{Command: "docker"}) == "" {
+		t.Fatal("a docker status hook must produce a conflation advisory")
+	}
+	if conflationWarning(&launch.ResolvedHook{Command: "/usr/local/bin/podman"}) == "" {
+		t.Fatal("podman conflates the same way and must warn")
+	}
+	if conflationWarning(&launch.ResolvedHook{Command: "/opt/status-wrapper.sh"}) != "" {
+		t.Fatal("a wrapper script (non-conflating basename) must not warn")
+	}
+	if conflationWarning(nil) != "" {
+		t.Fatal("a nil hook must not warn")
+	}
+}
+
+// doctor is profile-aware: it validates and reports every launchable context,
+// and flags a docker-style conflating status hook (advisory) — design/11.
+func TestDoctorProfileAwareAndConflationLint(t *testing.T) {
+	dir := t.TempDir()
+	writeCLIConfig(t, dir, `{"version":"1.0","games":{"g":{"id":"g","name":"G","launchMode":"DirectPath","target":"/bin/true","defaultProfile":"fast","lifecycle":{"status":{"command":"docker","args":["inspect","g"]}},"profiles":{"fast":{"args":["--fast"]},"slow":{"args":["--slow"]}}}}}`)
+	log := util.NewLogger("error")
+
+	out := captureStdout(t, func() { runDoctor(log, "g", dir, false) })
+	// Assert on basename-robust signals: the resolver may expand "docker" to an
+	// absolute path (e.g. /usr/bin/docker) on a host that has it installed, so
+	// the raw command line is environment-dependent, but the conflation lint is
+	// basename-matched and stable.
+	for _, want := range []string{`profile "fast"`, `profile "slow"`, "default context", "status hook:", "conflates 'stopped'"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("doctor output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// An invalid config is itself a finding (its ValidationError names the JSON
+// path), and doctor still prints the track record — no early return (design/11).
+func TestDoctorInvalidConfigStillReportsTrackRecord(t *testing.T) {
+	dir := t.TempDir()
+	// profiles configured without the required defaultProfile.
+	writeCLIConfig(t, dir, `{"version":"1.0","games":{"g":{"id":"g","name":"G","launchMode":"DirectPath","target":"/bin/true","profiles":{"a":{}}}}}`)
+	log := util.NewLogger("error")
+
+	var code int
+	out := captureStdout(t, func() { code = runDoctor(log, "g", dir, false) })
+	if code != 1 {
+		t.Fatalf("an invalid config must make doctor exit 1, got %d", code)
+	}
+	if !strings.Contains(out, "Configuration: invalid") || !strings.Contains(out, "defaultProfile") {
+		t.Fatalf("doctor must name the config validation problem:\n%s", out)
+	}
+	if !strings.Contains(out, "Track record") {
+		t.Fatalf("doctor must still print the track record after a config finding:\n%s", out)
+	}
+}
+
+func TestDoctorBroadlyReadableWarning(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits are meaningless on Windows (NTFS ACLs govern)")
+	}
+	dir := t.TempDir()
+	writeCLIConfig(t, dir, `{"version":"1.0","games":{"g":{"id":"g","name":"G","launchMode":"DirectPath","target":"/bin/true"}}}`)
+	// writeCLIConfig writes 0600; loosen it so the warning fires.
+	if err := os.Chmod(filepath.Join(dir, "config.json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	log := util.NewLogger("error")
+	out := captureStdout(t, func() { runDoctor(log, "g", dir, false) })
+	if !strings.Contains(out, "broadly readable") {
+		t.Fatalf("a 0644 config must trigger the broadly-readable warning:\n%s", out)
+	}
+}
+
+func TestDoctorBroadlyReadableWarningsDescribeEachFileAccurately(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits are meaningless on Windows (NTFS ACLs govern)")
+	}
+	dir := t.TempDir()
+	writeCLIConfig(t, dir, `{"version":"1.0","apiKey":"configured-secret","games":{"g":{"id":"g","name":"G","launchMode":"DirectPath","target":"/bin/true","env":{"PRIVATE_SETTING":"value"}}}}`)
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.Chmod(configPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gameDir := filepath.Join(dir, "g")
+	if err := os.MkdirAll(gameDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"runtime.json", "bridge.json", "launch.log", "history.json", "transition.lock", "bridge.lock"} {
+		path := filepath.Join(gameDir, name)
+		if err := os.WriteFile(path, []byte("test"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	out := captureStdout(t, func() {
+		doctorPermissions(&doctorReport{healthy: true}, dir, "g")
+	})
+	lineFor := func(name string) string {
+		t.Helper()
+		for _, line := range strings.Split(out, "\n") {
+			if strings.Contains(line, name) {
+				return line
+			}
+		}
+		t.Fatalf("permission output has no warning for %s:\n%s", name, out)
+		return ""
+	}
+
+	configLine := lineFor("config.json")
+	if !strings.Contains(configLine, "HTTP API key") || !strings.Contains(configLine, "configured environment values") {
+		t.Fatalf("config warning describes the wrong contents: %s", configLine)
+	}
+	if strings.Contains(configLine, "per-launch bridge token") {
+		t.Fatalf("config warning falsely attributes the runtime bridge token: %s", configLine)
+	}
+	for _, name := range []string{"runtime.json", "bridge.json"} {
+		if line := lineFor(name); !strings.Contains(line, "per-launch bridge token") || !strings.Contains(line, "endpoint state") {
+			t.Fatalf("%s warning does not describe its credential state: %s", name, line)
+		}
+	}
+	for name, want := range map[string]string{
+		"launch.log":      "game or game-side bridge output",
+		"history.json":    "launch targets, arguments, working directories, and diagnostic history",
+		"transition.lock": "GABS coordination metadata",
+		"bridge.lock":     "GABS coordination metadata",
+	} {
+		line := lineFor(name)
+		if !strings.Contains(line, want) {
+			t.Fatalf("%s warning missing %q: %s", name, want, line)
+		}
+		if strings.Contains(line, "per-launch bridge token") {
+			t.Fatalf("%s warning falsely attributes the runtime bridge token: %s", name, line)
+		}
+	}
+}
+
+// doctor prints the full track record and --show-last-good prints the proven
+// context after a verified start (design/08, design/11).
+func TestDoctorTrackRecordAndLastGood(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a unix sleeper; the cmd lifecycle tests run on the unix CI lanes")
+	}
+	dir, gameID := setupSleeperGame(t)
+	log := util.NewLogger("error")
+
+	if code := startGameCLI(log, gameID, dir, "", nil); code != 0 {
+		t.Fatalf("start exit = %d", code)
+	}
+	claim, _ := process.LoadRuntimeState(gameID, dir)
+	if claim != nil {
+		registerClaimCleanup(t, claim)
+	}
+
+	out := captureStdout(t, func() { runDoctor(log, gameID, dir, true) })
+	if !strings.Contains(out, "Track record:") || !strings.Contains(out, "started 1") {
+		t.Fatalf("doctor must show the verified start in the track record:\n%s", out)
+	}
+	if !strings.Contains(out, "Last known good:") || !strings.Contains(out, "context hash:") {
+		t.Fatalf("--show-last-good must print the proven context:\n%s", out)
+	}
+
+	if code := stopGameCLI(log, gameID, dir, process.OperationActionStop); code != 0 {
+		t.Fatalf("stop exit = %d", code)
+	}
+}
+
+// A bare, PATH-resolved target must not be falsely marked unhealthy (the removed
+// raw os.Stat(game.Target) contradicted the resolver loop).
+func TestDoctorPathTargetNotFalselyUnhealthy(t *testing.T) {
+	dir := t.TempDir()
+	bare := "sh"
+	if runtime.GOOS == "windows" {
+		bare = "cmd"
+	}
+	writeCLIConfig(t, dir, `{"version":"1.0","games":{"g":{"id":"g","name":"G","launchMode":"DirectPath","target":"`+bare+`"}}}`)
+	log := util.NewLogger("error")
+	out := captureStdout(t, func() { runDoctor(log, "g", dir, false) })
+	if strings.Contains(out, "Target path: not found") {
+		t.Fatalf("a PATH-resolved bare target must not be reported not-found:\n%s", out)
+	}
+	if !strings.Contains(out, "resolves") {
+		t.Fatalf("a PATH-resolved target's default context should resolve:\n%s", out)
+	}
+}
+
+// A relative target is resolved against its workingDir, not the doctor's cwd.
+func TestDoctorRelativeTargetResolvesAgainstWorkingDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "run.bin"), []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// JSON-escape the workingDir (Windows backslashes).
+	wd := strings.ReplaceAll(dir, `\`, `\\`)
+	writeCLIConfig(t, dir, `{"version":"1.0","games":{"g":{"id":"g","name":"G","launchMode":"DirectPath","target":"./run.bin","workingDir":"`+wd+`"}}}`)
+	log := util.NewLogger("error")
+	out := captureStdout(t, func() { runDoctor(log, "g", dir, false) })
+	if strings.Contains(out, "Target path: not found") {
+		t.Fatalf("a workingDir-relative target must resolve, not raw-stat fail:\n%s", out)
+	}
+	if !strings.Contains(out, "resolves") {
+		t.Fatalf("the relative target's default context should resolve:\n%s", out)
+	}
+}
+
+// The macOS doctor contract (design/20): quarantine attribute + translocation
+// warning for relative targets.
+func TestDoctorMacOSQuarantineAndTranslocation(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS-only doctor contract (com.apple.quarantine / App Translocation)")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "app.bin")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := runXattrWrite(bin); err != nil {
+		t.Skipf("cannot set quarantine xattr: %v", err)
+	}
+	log := util.NewLogger("error")
+
+	// Absolute quarantined target -> quarantine warning.
+	writeCLIConfig(t, dir, `{"version":"1.0","games":{"g":{"id":"g","name":"G","launchMode":"DirectPath","target":"`+bin+`"}}}`)
+	out := captureStdout(t, func() { runDoctor(log, "g", dir, false) })
+	if !strings.Contains(out, "com.apple.quarantine") {
+		t.Fatalf("a quarantined target must warn:\n%s", out)
+	}
+
+	// Relative target -> translocation warning.
+	writeCLIConfig(t, dir, `{"version":"1.0","games":{"g":{"id":"g","name":"G","launchMode":"DirectPath","target":"./app.bin","workingDir":"`+dir+`"}}}`)
+	out = captureStdout(t, func() { runDoctor(log, "g", dir, false) })
+	if !strings.Contains(out, "App-Translocated") {
+		t.Fatalf("a relative macOS target must warn about translocation:\n%s", out)
+	}
+}
+
+// A quarantined .app can carry com.apple.quarantine on the bundle root while its
+// inner Contents/MacOS binary has none (extended attributes are path-specific).
+// Doctor must still warn: it resolves the bundle to its inner executable, so it
+// must also check the configured bundle path (design/20).
+func TestDoctorMacOSQuarantineOnBundleRootOnly(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS-only doctor contract (com.apple.quarantine on .app bundle root)")
+	}
+	dir := t.TempDir()
+	bundle := filepath.Join(dir, "Probe.app")
+	inner := filepath.Join(bundle, "Contents", "MacOS")
+	if err := os.MkdirAll(inner, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(inner, "Probe") // bundle-name convention -> resolves here
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Quarantine ONLY the bundle root, not the inner executable.
+	if err := runXattrWrite(bundle); err != nil {
+		t.Skipf("cannot set quarantine xattr: %v", err)
+	}
+	// Guard: the inner executable must be clean, or the test would not exercise
+	// the bundle-root miss it is meant to catch.
+	if targetHasQuarantineAttr(exe) {
+		t.Fatalf("test setup: inner executable %q unexpectedly carries quarantine", exe)
+	}
+
+	log := util.NewLogger("error")
+	writeCLIConfig(t, dir, `{"version":"1.0","games":{"g":{"id":"g","name":"G","launchMode":"DirectPath","target":"`+bundle+`"}}}`)
+	out := captureStdout(t, func() { runDoctor(log, "g", dir, false) })
+	if !strings.Contains(out, "com.apple.quarantine") {
+		t.Fatalf("a .app whose bundle root carries quarantine must warn even when the inner binary does not:\n%s", out)
+	}
+}

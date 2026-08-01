@@ -105,3 +105,54 @@ func TestConfigPathsDirectoryOperations(t *testing.T) {
 		}
 	})
 }
+
+// Finding 2 (round 6): the ID→runtime-directory mapping must be INJECTIVE.
+// Non-canonical spellings that clean to a directory another ID owns must be
+// rejected, so status/history/stop for one ID cannot reach another ID's claim.
+// Legitimate nested-slash and RFC-6901 (`~`) IDs stay valid.
+func TestValidateGameIDCanonicalInjective(t *testing.T) {
+	valid := []string{"adventure", "factory/old", "a/b/c", "~", "a/~/b", "My-Game_1", "123456"}
+	for _, id := range valid {
+		if err := ValidateGameID(id); err != nil {
+			t.Errorf("valid canonical ID %q was rejected: %v", id, err)
+		}
+	}
+	// Every entry aliases a *different* spelling's directory (or escapes), so all
+	// must be rejected.
+	invalid := []string{
+		"factory/../adventure", // cleans to "adventure"
+		"adventure/",           // trailing slash → "adventure"
+		"a//b",                 // empty segment → "a/b"
+		"./a",                  // "." segment → "a"
+		"a/.",                  // → "a"
+		"a/../b",               // → "b"
+		"..",                   // escapes
+		".",                    // → "" (base itself)
+		`a\b`,                  // backslash: a Windows separator (per-OS alias)
+	}
+	for _, id := range invalid {
+		if err := ValidateGameID(id); err == nil {
+			t.Errorf("non-canonical/aliasing ID %q was accepted (breaks injectivity)", id)
+		}
+	}
+}
+
+// The concrete cross-ID reproduction: "factory/../adventure", "adventure/" and
+// "adventure" must NOT all resolve to the same runtime directory. Only the
+// canonical "adventure" resolves; the aliases are rejected before any path is
+// handed back.
+func TestSafeGameDirRejectsAliasesOfAnotherID(t *testing.T) {
+	cp, err := NewConfigPaths(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := cp.SafeGameDir("adventure")
+	if err != nil {
+		t.Fatalf("the canonical ID must resolve: %v", err)
+	}
+	for _, alias := range []string{"factory/../adventure", "adventure/", "./adventure"} {
+		if dir, err := cp.SafeGameDir(alias); err == nil {
+			t.Fatalf("alias %q resolved to %q (canonical was %q) — mapping is not injective", alias, dir, canonical)
+		}
+	}
+}

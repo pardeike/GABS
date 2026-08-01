@@ -30,11 +30,11 @@ func TestGamesConnectTakesOverIdleRuntimeOwner(t *testing.T) {
 	gamesConfig := roamingGamesConfig()
 	log := util.NewLogger("error")
 
-	ownerServer := NewServerForTesting(log)
+	ownerServer := NewServerForTesting(t, log)
 	ownerServer.SetConfigDir(tmpDir)
 	ownerServer.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
-	joinerServer := NewServerForTesting(log)
+	joinerServer := NewServerForTesting(t, log)
 	joinerServer.SetConfigDir(tmpDir)
 	joinerServer.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
@@ -85,6 +85,9 @@ func TestGamesConnectTakesOverIdleRuntimeOwner(t *testing.T) {
 		t.Fatalf("expected joiner lease to be active: %#v", runtimeState)
 	}
 
+	// Detach synchronously so the async disconnect handler cannot race the
+	// temp-dir teardown with attachment-record writes.
+	joinerServer.CleanupGABPConnection("adventure")
 	if err := <-serverDone; err != nil {
 		t.Fatalf("test GABP server failed: %v", err)
 	}
@@ -103,10 +106,11 @@ func TestGameBoundCallBlocksOldOwnerAfterRoamingTakeover(t *testing.T) {
 	go serveTestGabpSession(listener, bridgeToken, serverDone)
 
 	writeBridgeJSONForTest(t, tmpDir, "adventure", listener.Addr().(*net.TCPAddr).Port, bridgeToken)
+	seedClaimEndpointForTest(t, tmpDir, "adventure", listener.Addr().(*net.TCPAddr).Port, bridgeToken)
 	gamesConfig := roamingGamesConfig()
 	log := util.NewLogger("error")
 
-	ownerServer := NewServerForTesting(log)
+	ownerServer := NewServerForTesting(t, log)
 	ownerServer.SetConfigDir(tmpDir)
 	ownerServer.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
@@ -125,16 +129,16 @@ func TestGameBoundCallBlocksOldOwnerAfterRoamingTakeover(t *testing.T) {
 		t.Fatalf("expected owner connect to succeed, got: %s", connectText)
 	}
 
-	newOwner := process.RuntimeState{
-		GameID:          "adventure",
-		Status:          process.RuntimeStateStatusRunning,
-		OwnerPID:        os.Getpid(),
-		OwnerInstanceID: "new-owner-instance",
-		OwnerLastActive: time.Now().UTC(),
-		OwnerLeaseUntil: time.Now().UTC().Add(time.Minute),
-		GamePID:         os.Getpid(),
-	}
-	if err := process.SaveRuntimeState("adventure", tmpDir, newOwner); err != nil {
+	// Ownership roams to another session ON THE SAME LAUNCH (a takeover
+	// refreshes owner fields; the launch identity is untouched) — the old
+	// owner's client stays credential-bound, so the ownership gate is the
+	// guard that must block it.
+	if _, err := process.TransitionRuntimeState("adventure", tmpDir, time.Second, func(st *process.RuntimeState) error {
+		st.OwnerInstanceID = "new-owner-instance"
+		st.OwnerLastActive = time.Now().UTC()
+		st.OwnerLeaseUntil = time.Now().UTC().Add(time.Minute)
+		return nil
+	}); err != nil {
 		t.Fatalf("failed to move runtime ownership: %v", err)
 	}
 
@@ -158,6 +162,7 @@ func TestGameBoundCallBlocksOldOwnerAfterRoamingTakeover(t *testing.T) {
 		t.Fatalf("expected runtime owner block, got: %s", callText)
 	}
 
+	ownerServer.CleanupGABPConnection("adventure")
 	if err := <-serverDone; err != nil {
 		t.Fatalf("test GABP server failed: %v", err)
 	}
@@ -178,7 +183,7 @@ func TestGamesConnectClearsRuntimeOwnerAfterFailedDial(t *testing.T) {
 	gamesConfig := roamingGamesConfig()
 	log := util.NewLogger("error")
 
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
@@ -217,6 +222,42 @@ func roamingGamesConfig() *config.GamesConfig {
 				Target:     "/Applications/AdventureGameMac.app/Contents/MacOS/AdventureGame by ExampleStudio Studios",
 			},
 		},
+	}
+}
+
+// seedClaimEndpointForTest publishes a current-schema active claim carrying
+// the endpoint — the authoritative attach source games_connect requires
+// since the bridge.json demotion (design/07). The workload evidence is this
+// test process itself.
+func seedClaimEndpointForTest(t *testing.T, configDir, gameID string, port int, token string) {
+	t.Helper()
+	spec := process.LaunchSpec{GameId: gameID, Mode: "DirectPath", PathOrId: "/opt/game"}
+	st := process.NewRuntimeState(spec, process.RuntimeStateStatusRunning)
+	st.Phase = process.PhaseActive
+	st.SpawnState = process.SpawnStateSpawned
+	st.GamePID = os.Getpid()
+	if start, err := process.ProcessStartTime(os.Getpid()); err == nil {
+		st.PIDStartTime = start
+	}
+	st.Endpoint = &process.RuntimeEndpoint{Port: port, Token: token}
+	if err := process.SaveRuntimeState(gameID, configDir, st); err != nil {
+		t.Fatalf("failed to seed runtime claim: %v", err)
+	}
+}
+
+// setClaimGamePIDForTest re-points the seeded claim's workload evidence at
+// a specific process (e.g. a spawned helper whose environment the test
+// wants inspected).
+func setClaimGamePIDForTest(t *testing.T, configDir, gameID string, pid int) {
+	t.Helper()
+	st, err := process.LoadRuntimeState(gameID, configDir)
+	if err != nil || st == nil {
+		t.Fatalf("failed to load seeded claim: %v", err)
+	}
+	st.GamePID = pid
+	st.PIDStartTime = 0 // existence-only evidence is enough for these tests
+	if err := process.SaveRuntimeState(gameID, configDir, *st); err != nil {
+		t.Fatalf("failed to update seeded claim: %v", err)
 	}
 }
 

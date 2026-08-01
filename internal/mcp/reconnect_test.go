@@ -55,6 +55,10 @@ func TestGamesConnectCanReattachUsingBridgeConfigWithoutTrackedProcess(t *testin
 	if err := os.WriteFile(filepath.Join(bridgeDir, "bridge.json"), bridgeData, 0644); err != nil {
 		t.Fatalf("failed to write bridge.json: %v", err)
 	}
+	seedClaimEndpointForTest(t, tmpDir, "adventure", listener.Addr().(*net.TCPAddr).Port, bridgeToken)
+	// The claim is the authoritative attach source (design/07); the
+	// diagnostic file above is deliberately left with the same content but
+	// is not what connect may read.
 
 	gamesConfig := &config.GamesConfig{
 		Games: map[string]config.GameConfig{
@@ -68,7 +72,7 @@ func TestGamesConnectCanReattachUsingBridgeConfigWithoutTrackedProcess(t *testin
 	}
 
 	log := util.NewLogger("error")
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, 1*time.Second)
 
@@ -133,12 +137,17 @@ func TestGamesConnectCanReattachUsingBridgeConfigWithoutTrackedProcess(t *testin
 		t.Fatalf("expected mirrored tool after reconnect, got: %s", toolsText)
 	}
 
+	server.CleanupGABPConnection("adventure")
 	if err := <-serverDone; err != nil {
 		t.Fatalf("test GABP server failed: %v", err)
 	}
 }
 
-func TestGamesConnectPrefersReadableProcessEnvironmentOverBridgeFile(t *testing.T) {
+// TestGamesConnectCorroboratesProcessEnvironmentWithClaim: the claim's
+// per-launch endpoint is the only attach credential; a readable process
+// environment carrying exactly that credential corroborates it (Source
+// process-environment) — it never replaces it (design/03).
+func TestGamesConnectCorroboratesProcessEnvironmentWithClaim(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("process environment inspection is not supported on Windows")
 	}
@@ -150,10 +159,11 @@ func TestGamesConnectPrefersReadableProcessEnvironmentOverBridgeFile(t *testing.
 	}
 	defer listener.Close()
 
-	processToken := "process-env-token"
+	claimToken := "claim-endpoint-token"
 	serverDone := make(chan error, 1)
-	go serveTestGabpSession(listener, processToken, serverDone)
+	go serveTestGabpSession(listener, claimToken, serverDone)
 
+	// The diagnostic file deliberately carries garbage: it must never be read.
 	writeBridgeJSONForTest(t, tmpDir, "adventure", unusedLocalPort(t), "bridge-file-token")
 
 	exe, err := os.Executable()
@@ -162,9 +172,9 @@ func TestGamesConnectPrefersReadableProcessEnvironmentOverBridgeFile(t *testing.
 	}
 	cmd := exec.Command(exe, "-test.run=TestSharedRuntimeStateHelperProcess")
 	cmd.Env = append(os.Environ(),
-		"GABS_HELPER_PROCESS=1",
+		"GABSTEST_HELPER_PROCESS=1",
 		fmt.Sprintf("GABP_SERVER_PORT=%d", listener.Addr().(*net.TCPAddr).Port),
-		"GABP_TOKEN="+processToken,
+		"GABP_TOKEN="+claimToken,
 		"GABS_GAME_ID=adventure",
 	)
 	if err := cmd.Start(); err != nil {
@@ -175,15 +185,8 @@ func TestGamesConnectPrefersReadableProcessEnvironmentOverBridgeFile(t *testing.
 		_, _ = cmd.Process.Wait()
 	}()
 
-	runtimeState := process.RuntimeState{
-		GameID:   "adventure",
-		Status:   process.RuntimeStateStatusRunning,
-		OwnerPID: os.Getpid(),
-		GamePID:  cmd.Process.Pid,
-	}
-	if err := process.SaveRuntimeState("adventure", tmpDir, runtimeState); err != nil {
-		t.Fatalf("failed to write runtime state: %v", err)
-	}
+	seedClaimEndpointForTest(t, tmpDir, "adventure", listener.Addr().(*net.TCPAddr).Port, claimToken)
+	setClaimGamePIDForTest(t, tmpDir, "adventure", cmd.Process.Pid)
 
 	gamesConfig := &config.GamesConfig{
 		Games: map[string]config.GameConfig{
@@ -196,14 +199,14 @@ func TestGamesConnectPrefersReadableProcessEnvironmentOverBridgeFile(t *testing.
 		},
 	}
 
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
 	connectText := marshalMessage(t, server.HandleMessage(&Message{
 		JSONRPC: "2.0",
 		Method:  "tools/call",
-		ID:      json.RawMessage(`"connect-process-env-first"`),
+		ID:      json.RawMessage(`"connect-env-corroborated"`),
 		Params: map[string]interface{}{
 			"name": "games.connect",
 			"arguments": map[string]interface{}{
@@ -214,18 +217,100 @@ func TestGamesConnectPrefersReadableProcessEnvironmentOverBridgeFile(t *testing.
 	}))
 
 	if strings.Contains(connectText, `"isError":true`) {
-		t.Fatalf("expected connect to use process env endpoint, got: %s", connectText)
+		t.Fatalf("expected connect via the claim endpoint (env-corroborated), got: %s", connectText)
 	}
 	if !strings.Contains(connectText, fmt.Sprintf("port %d", listener.Addr().(*net.TCPAddr).Port)) {
-		t.Fatalf("expected connect response to use process env port, got: %s", connectText)
+		t.Fatalf("expected connect response to use the claim endpoint port, got: %s", connectText)
 	}
 
+	server.CleanupGABPConnection("adventure")
 	if err := <-serverDone; err != nil {
 		t.Fatalf("test GABP server failed: %v", err)
 	}
 }
 
-func TestGamesConnectDoesNotUseBridgeFileWhenReadableProcessEnvironmentLacksEndpoint(t *testing.T) {
+// TestGamesConnectRejectsStaleProcessEnvironment: a workload demonstrably
+// running with another launch's credentials is the delayed-superseded-
+// process case — connect fails fast with the stable
+// stale_bridge_credential code and never dials either credential.
+func TestGamesConnectRejectsStaleProcessEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process environment inspection is not supported on Windows")
+	}
+
+	tmpDir := t.TempDir()
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("failed to locate helper executable: %v", err)
+	}
+	cmd := exec.Command(exe, "-test.run=TestSharedRuntimeStateHelperProcess")
+	cmd.Env = append(os.Environ(),
+		"GABSTEST_HELPER_PROCESS=1",
+		fmt.Sprintf("GABP_SERVER_PORT=%d", unusedLocalPort(t)),
+		"GABP_TOKEN=old-launch-token",
+		"GABS_GAME_ID=adventure",
+	)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to start helper process: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	}()
+
+	seedClaimEndpointForTest(t, tmpDir, "adventure", unusedLocalPort(t), "fresh-launch-token")
+	setClaimGamePIDForTest(t, tmpDir, "adventure", cmd.Process.Pid)
+
+	gamesConfig := &config.GamesConfig{
+		Games: map[string]config.GameConfig{
+			"adventure": {
+				ID:         "adventure",
+				Name:       "AdventureGame",
+				LaunchMode: "DirectPath",
+				Target:     "/Applications/AdventureGameMac.app/Contents/MacOS/AdventureGame by ExampleStudio Studios",
+			},
+		},
+	}
+
+	server := NewServerForTesting(t, util.NewLogger("error"))
+	server.SetConfigDir(tmpDir)
+	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
+
+	startAt := time.Now()
+	connectText := marshalMessage(t, server.HandleMessage(&Message{
+		JSONRPC: "2.0",
+		Method:  "tools/call",
+		ID:      json.RawMessage(`"connect-stale-env"`),
+		Params: map[string]interface{}{
+			"name": "games.connect",
+			"arguments": map[string]interface{}{
+				"gameId":  "adventure",
+				"timeout": 5,
+			},
+		},
+	}))
+
+	if !strings.Contains(connectText, `"isError":true`) {
+		t.Fatalf("a stale credential must refuse the attach, got: %s", connectText)
+	}
+	if !strings.Contains(connectText, `"code":"stale_bridge_credential"`) {
+		t.Fatalf("expected the stable stale_bridge_credential code, got: %s", connectText)
+	}
+	if elapsed := time.Since(startAt); elapsed > 3*time.Second {
+		t.Fatalf("the stale refusal must not dial or wait, took %v", elapsed)
+	}
+	claim, err := process.LoadRuntimeState("adventure", tmpDir)
+	if err != nil || claim == nil || claim.Endpoint == nil || claim.Endpoint.Token != "fresh-launch-token" {
+		t.Fatalf("the claim's credential must never be replaced: %+v %v", claim, err)
+	}
+}
+
+// TestGamesConnectDiagnosesMissingBridgeEnvironmentWithoutDialing: a
+// readable workload environment that provably lacks the bridge variables
+// means no dial can succeed — connect diagnoses instead of timing out, and
+// never falls back to the diagnostic bridge file.
+func TestGamesConnectDiagnosesMissingBridgeEnvironmentWithoutDialing(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("process environment inspection is not supported on Windows")
 	}
@@ -238,7 +323,7 @@ func TestGamesConnectDoesNotUseBridgeFileWhenReadableProcessEnvironmentLacksEndp
 		t.Fatalf("failed to locate helper executable: %v", err)
 	}
 	cmd := exec.Command(exe, "-test.run=TestSharedRuntimeStateHelperProcess")
-	cmd.Env = append(os.Environ(), "GABS_HELPER_PROCESS=1")
+	cmd.Env = append(os.Environ(), "GABSTEST_HELPER_PROCESS=1")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("failed to start helper process: %v", err)
 	}
@@ -247,15 +332,8 @@ func TestGamesConnectDoesNotUseBridgeFileWhenReadableProcessEnvironmentLacksEndp
 		_, _ = cmd.Process.Wait()
 	}()
 
-	runtimeState := process.RuntimeState{
-		GameID:   "adventure",
-		Status:   process.RuntimeStateStatusRunning,
-		OwnerPID: os.Getpid(),
-		GamePID:  cmd.Process.Pid,
-	}
-	if err := process.SaveRuntimeState("adventure", tmpDir, runtimeState); err != nil {
-		t.Fatalf("failed to write runtime state: %v", err)
-	}
+	seedClaimEndpointForTest(t, tmpDir, "adventure", unusedLocalPort(t), "claim-token")
+	setClaimGamePIDForTest(t, tmpDir, "adventure", cmd.Process.Pid)
 
 	gamesConfig := &config.GamesConfig{
 		Games: map[string]config.GameConfig{
@@ -268,7 +346,7 @@ func TestGamesConnectDoesNotUseBridgeFileWhenReadableProcessEnvironmentLacksEndp
 		},
 	}
 
-	server := NewServerForTesting(util.NewLogger("error"))
+	server := NewServerForTesting(t, util.NewLogger("error"))
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 
@@ -292,7 +370,7 @@ func TestGamesConnectDoesNotUseBridgeFileWhenReadableProcessEnvironmentLacksEndp
 		t.Fatalf("expected readable missing-env diagnosis, got: %s", connectText)
 	}
 	if strings.Contains(connectText, "Failed to connect to GABP server") || strings.Contains(connectText, "after 1s") {
-		t.Fatalf("connect should not dial the internal endpoint when process env is readable but missing, got: %s", connectText)
+		t.Fatalf("connect should not dial when the environment provably lacks the bridge, got: %s", connectText)
 	}
 }
 
@@ -330,6 +408,7 @@ func TestGamesCallToolFailsFastAndStatusTurnsDisconnectedAfterBridgeDrop(t *test
 	if err := os.WriteFile(filepath.Join(bridgeDir, "bridge.json"), bridgeData, 0644); err != nil {
 		t.Fatalf("failed to write bridge.json: %v", err)
 	}
+	seedClaimEndpointForTest(t, tmpDir, "adventure", listener.Addr().(*net.TCPAddr).Port, bridgeToken)
 
 	gamesConfig := &config.GamesConfig{
 		Games: map[string]config.GameConfig{
@@ -343,7 +422,7 @@ func TestGamesCallToolFailsFastAndStatusTurnsDisconnectedAfterBridgeDrop(t *test
 	}
 
 	log := util.NewLogger("error")
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, 1*time.Second)
 
@@ -400,8 +479,13 @@ func TestGamesCallToolFailsFastAndStatusTurnsDisconnectedAfterBridgeDrop(t *test
 		},
 	})
 	statusText := marshalMessage(t, statusResp)
-	if !strings.Contains(statusText, "GABP disconnected") {
+	// The claim-first status is more truthful post-drop: the workload
+	// evidence still says running, the bridge is gone.
+	if !strings.Contains(statusText, "GABP bridge disconnected") && !strings.Contains(statusText, "GABP disconnected") {
 		t.Fatalf("expected disconnected status after bridge drop, got: %s", statusText)
+	}
+	if !strings.Contains(statusText, `"status":"running-disconnected"`) {
+		t.Fatalf("expected running-disconnected after bridge drop with live workload evidence, got: %s", statusText)
 	}
 
 	if err := <-serverDone; err != nil {
@@ -443,6 +527,7 @@ func TestGamesCallToolCanInferGameFromQualifiedName(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bridgeDir, "bridge.json"), bridgeData, 0644); err != nil {
 		t.Fatalf("failed to write bridge.json: %v", err)
 	}
+	seedClaimEndpointForTest(t, tmpDir, "adventure", listener.Addr().(*net.TCPAddr).Port, bridgeToken)
 
 	gamesConfig := &config.GamesConfig{
 		Games: map[string]config.GameConfig{
@@ -456,7 +541,7 @@ func TestGamesCallToolCanInferGameFromQualifiedName(t *testing.T) {
 	}
 
 	log := util.NewLogger("error")
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, 1*time.Second)
 
@@ -553,11 +638,11 @@ func TestGamesConnectForceTakeoverCanOverrideSharedOwner(t *testing.T) {
 	}
 
 	log := util.NewLogger("error")
-	ownerServer := NewServerForTesting(log)
+	ownerServer := NewServerForTesting(t, log)
 	ownerServer.SetConfigDir(tmpDir)
 	ownerServer.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, 1*time.Second)
 
-	joinerServer := NewServerForTesting(log)
+	joinerServer := NewServerForTesting(t, log)
 	joinerServer.SetConfigDir(tmpDir)
 	joinerServer.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, 1*time.Second)
 
@@ -669,6 +754,7 @@ func TestGamesCallToolBlocksUntilAttentionIsAcknowledged(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bridgeDir, "bridge.json"), bridgeData, 0644); err != nil {
 		t.Fatalf("failed to write bridge.json: %v", err)
 	}
+	seedClaimEndpointForTest(t, tmpDir, "adventure", listener.Addr().(*net.TCPAddr).Port, bridgeToken)
 
 	gamesConfig := &config.GamesConfig{
 		Games: map[string]config.GameConfig{
@@ -682,7 +768,7 @@ func TestGamesCallToolBlocksUntilAttentionIsAcknowledged(t *testing.T) {
 	}
 
 	log := util.NewLogger("error")
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 	defer server.CleanupGABPConnection("adventure")
@@ -812,6 +898,7 @@ func TestMirroredToolCallBlocksWhileAttentionIsOpen(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bridgeDir, "bridge.json"), bridgeData, 0644); err != nil {
 		t.Fatalf("failed to write bridge.json: %v", err)
 	}
+	seedClaimEndpointForTest(t, tmpDir, "adventure", listener.Addr().(*net.TCPAddr).Port, bridgeToken)
 
 	gamesConfig := &config.GamesConfig{
 		Games: map[string]config.GameConfig{
@@ -825,7 +912,7 @@ func TestMirroredToolCallBlocksWhileAttentionIsOpen(t *testing.T) {
 	}
 
 	log := util.NewLogger("error")
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 	defer server.CleanupGABPConnection("adventure")
@@ -901,6 +988,7 @@ func TestDiagnosticsToolCanBypassAttentionGate(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bridgeDir, "bridge.json"), bridgeData, 0644); err != nil {
 		t.Fatalf("failed to write bridge.json: %v", err)
 	}
+	seedClaimEndpointForTest(t, tmpDir, "adventure", listener.Addr().(*net.TCPAddr).Port, bridgeToken)
 
 	gamesConfig := &config.GamesConfig{
 		Games: map[string]config.GameConfig{
@@ -914,7 +1002,7 @@ func TestDiagnosticsToolCanBypassAttentionGate(t *testing.T) {
 	}
 
 	log := util.NewLogger("error")
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 	server.SetConfigDir(tmpDir)
 	server.RegisterGameManagementTools(gamesConfig, 100*time.Millisecond, time.Second)
 	defer server.CleanupGABPConnection("adventure")

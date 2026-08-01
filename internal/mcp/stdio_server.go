@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -14,9 +15,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"runtime"
+
 	"github.com/pardeike/gabs/internal/config"
 	"github.com/pardeike/gabs/internal/gabp"
+	"github.com/pardeike/gabs/internal/launch"
+	"github.com/pardeike/gabs/internal/lifecycle"
 	"github.com/pardeike/gabs/internal/process"
+	"github.com/pardeike/gabs/internal/steam"
 	"github.com/pardeike/gabs/internal/util"
 	"github.com/pardeike/gabs/internal/version"
 )
@@ -28,6 +34,7 @@ type Server struct {
 	resources         map[string]*ResourceHandler
 	games             map[string]process.ControllerInterface // Track running games
 	configDir         string                                 // Config directory for bridge files
+	configStore       *config.Store                          // Hot-reload snapshot source (nil in tests)
 	apiKey            string                                 // API key for HTTP authentication
 	mu                sync.RWMutex
 	writers           []util.FrameWriter       // Track client connections for notifications
@@ -38,11 +45,32 @@ type Server struct {
 	gabpClients       map[string]*gabp.Client  // Track GABP connections per game
 	gabpAttention     map[string]*gameAttentionState
 	gabpDisconnects   map[string]gabpDisconnectRecord
-	starter           *process.SerializedStarter // Serialized process starter
+	bridgeAttachments map[string]bridgeAttachmentRef // Current persisted attachment identity per game (lazy-init)
+	starter           *process.SerializedStarter     // Serialized process starter
 	gamesConfig       *config.GamesConfig
 	instanceID        string
 	ownerLease        time.Duration
 	stripOutputSchema bool // Strip outputSchema from tools/list responses
+
+	// Background-task lifecycle: every detached task — async
+	// tool mirroring, attention setup, and the attachment lease refresher —
+	// registers with bgWG and honors shutdownCh, so Shutdown() can cancel and
+	// JOIN them before a test's TempDir teardown (or a real server exit). A
+	// lease/mirroring goroutine writing runtime.json during RemoveAll is the
+	// TempDir-cleanup race this closes.
+	bgWG           sync.WaitGroup
+	disconnectWG   sync.WaitGroup // in-flight peer-close handlers (joined by Shutdown)
+	shutdownCh     chan struct{}
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
+	shutdownOnce   sync.Once
+
+	// newController builds the process controller for a start. Injectable so a
+	// test can supply a controller with DETERMINISTIC liveness (exit before
+	// Stage 4, or verified-then-Stage-5-death) — a real subprocess's timing is
+	// non-deterministic under -race and would credit or skip the Stage-4 start
+	// by luck. Defaults to process.NewController.
+	newController func() process.ControllerInterface
 }
 
 type gabpDisconnectRecord struct {
@@ -56,28 +84,6 @@ const ServerInstructions = `GABS controls configured local games and mirrors con
 For game-specific actions, call games_tool_names with brief=true, inspect one tool with games_tool_detail, then invoke it through games_call_tool.
 Prefer strict-safe tool names such as games_start; dotted aliases remain accepted. Public tools/list is kept stable and core-only, so retry games_tool_names or connect before assuming a bridge tool is missing.`
 
-type gameAlreadyActiveError struct {
-	status string
-}
-
-func (e *gameAlreadyActiveError) Error() string {
-	switch e.status {
-	case process.RuntimeStateStatusStarting:
-		return "game launch is already in progress"
-	default:
-		return "game is already running"
-	}
-}
-
-func (e *gameAlreadyActiveError) ToolMessage(game config.GameConfig) string {
-	switch e.status {
-	case process.RuntimeStateStatusStarting:
-		return fmt.Sprintf("Game '%s' (%s) is already starting. Wait for launch to finish, then use games_connect if you need to attach to the existing instance.", game.ID, game.Name)
-	default:
-		return fmt.Sprintf("Game '%s' (%s) is already running. Use games_status or games_connect instead of starting it again.", game.ID, game.Name)
-	}
-}
-
 // ToolHandler represents a tool handler function
 type ToolHandler struct {
 	Tool    Tool
@@ -90,7 +96,74 @@ type ResourceHandler struct {
 	Handler  func() ([]Content, error)
 }
 
+// SetControllerFactoryForTesting injects a deterministic controller builder.
+// Tests use it to prove exit before Stage 4 (no workloadStart) or a
+// Stage-4-verified-then-Stage-5-death without depending on subprocess timing
+// under -race.
+func (s *Server) SetControllerFactoryForTesting(f func() process.ControllerInterface) {
+	s.newController = f
+}
+
+// Shutdown cancels and JOINS every background task the server started
+// (async mirroring, attention setup, attachment lease refresh).
+// It signals shutdownCh, disconnects live GABP clients to unblock any task
+// parked in a blocking read/RPC, then waits for all registered goroutines to
+// return. Idempotent. Tests register this via t.Cleanup so no background write
+// can race TempDir teardown; a real server calls it on exit.
+func (s *Server) Shutdown() {
+	// Signal shutdown AND snapshot/detach clients under one lock so it is
+	// atomic with dispatchGABPDisconnect's guarded Add: a peer-close handler
+	// either registered with disconnectWG before this point (and is joined
+	// below) or sees shutdownCh closed and no-ops. No clearBridgeAttachment
+	// write can escape the join.
+	s.mu.Lock()
+	s.shutdownOnce.Do(func() {
+		close(s.shutdownCh)
+		if s.shutdownCancel != nil {
+			s.shutdownCancel()
+		}
+	})
+	clients := make([]*gabp.Client, 0, len(s.gabpClients))
+	for id, c := range s.gabpClients {
+		if c != nil {
+			clients = append(clients, c)
+		}
+		delete(s.gabpClients, id)
+	}
+	s.bridgeAttachments = nil
+	s.mu.Unlock()
+
+	// Close clients to unblock any task parked in a blocking read/RPC, then
+	// JOIN both the background tasks and any in-flight disconnect handler.
+	for _, c := range clients {
+		_ = c.Close()
+	}
+	s.disconnectWG.Wait()
+	s.bgWG.Wait()
+	// The test config dir is a caller-owned t.TempDir(); the framework removes
+	// it. Shutdown owns only the JOIN, never a directory.
+}
+
+// admitBackgroundTask registers a background task with the shutdown join,
+// atomic with Shutdown closing admission. The shutdownCh check
+// and bgWG.Add happen together under s.mu — the SAME lock Shutdown holds when
+// it closes shutdownCh — so no positive Add can race bgWG.Wait(). Returns
+// false (registering nothing) once shutdown has begun; the caller must then
+// NOT start the goroutine. On true, the caller owns exactly one bgWG.Done().
+func (s *Server) admitBackgroundTask() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	select {
+	case <-s.shutdownCh:
+		return false
+	default:
+	}
+	s.bgWG.Add(1)
+	return true
+}
+
 func NewServer(log util.Logger) *Server {
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	return &Server{
 		log:             log,
 		tools:           make(map[string]*ToolHandler),
@@ -107,52 +180,21 @@ func NewServer(log util.Logger) *Server {
 		starter:         process.NewSerializedStarter(), // Initialize serialized starter
 		instanceID:      newServerInstanceID(),
 		ownerLease:      (&config.GamesConfig{}).GetSessionOwnerLease(),
+		shutdownCh:      make(chan struct{}),
+		shutdownCtx:     shutdownCtx,
+		shutdownCancel:  shutdownCancel,
+		newController:   func() process.ControllerInterface { return process.NewController() },
 	}
 }
 
-// NewServerForTesting creates a server with shorter timeouts for testing
-func NewServerForTesting(log util.Logger) *Server {
-	return &Server{
-		log:             log,
-		tools:           make(map[string]*ToolHandler),
-		resources:       make(map[string]*ResourceHandler),
-		games:           make(map[string]process.ControllerInterface),
-		configDir:       "", // Will be set by SetConfigDir
-		writers:         make([]util.FrameWriter, 0),
-		gameTools:       make(map[string][]string),
-		gameToolAliases: make(map[string]gameToolAlias),
-		gameResources:   make(map[string][]string),
-		gabpClients:     make(map[string]*gabp.Client),
-		gabpAttention:   make(map[string]*gameAttentionState),
-		gabpDisconnects: make(map[string]gabpDisconnectRecord),
-		starter:         process.NewSerializedStarterForTesting(), // Use testing timeouts
-		instanceID:      newServerInstanceID(),
-		ownerLease:      (&config.GamesConfig{}).GetSessionOwnerLease(),
-	}
-}
+// NewServerForTesting lives in server_testing_test.go: it takes a
+// testing.TB so its config dir is a caller-owned t.TempDir() that the framework
+// removes, and Shutdown is registered via t.Cleanup — no leaked isolated dirs,
+// universal background-task join.
 
 func newServerInstanceID() string {
 	seq := atomic.AddUint64(&serverInstanceCounter, 1)
 	return fmt.Sprintf("%d-%d-%d", os.Getpid(), time.Now().UnixNano(), seq)
-}
-
-func (s *Server) runtimeOwnerLeaseDuration() time.Duration {
-	if s.ownerLease > 0 {
-		return s.ownerLease
-	}
-	return (&config.GamesConfig{}).GetSessionOwnerLease()
-}
-
-func (s *Server) runtimeOwnerLeaseForOperation(operationTimeout time.Duration) time.Duration {
-	lease := s.runtimeOwnerLeaseDuration()
-	if operationTimeout <= 0 {
-		return lease
-	}
-	operationLease := operationTimeout + 5*time.Second
-	if operationLease > lease {
-		return operationLease
-	}
-	return lease
 }
 
 func (s *Server) gameConfigForRuntimeOwnership(gameID string) config.GameConfig {
@@ -165,6 +207,50 @@ func (s *Server) gameConfigForRuntimeOwnership(gameID string) config.GameConfig 
 }
 
 func (s *Server) saveRuntimeOwnerLease(game config.GameConfig, state *process.RuntimeState, operationTimeout time.Duration) (*process.RuntimeState, error) {
+	now := time.Now().UTC()
+	lease := s.runtimeOwnerLeaseForOperation(operationTimeout)
+
+	if state != nil && state.SchemaVersion >= process.RuntimeSchemaVersion && state.LaunchID != "" {
+		// Current-schema claims: the refresh is fenced to the launch the
+		// caller loaded — ownership on a successor claim is never touched —
+		// and mutates only its own fields under the transition lock, so
+		// concurrent fenced writes (attachment records, phase promotions)
+		// survive (design/06). Pinned fields stay pinned: an intentionally
+		// empty stopProcessName is part of the launch snapshot and is never
+		// refilled from current config (design/07; only the explicit
+		// legacy normalization may consult config).
+		expectedLaunchID := state.LaunchID
+		updated, err := process.FencedTransition(game.ID, s.configDir, expectedLaunchID, "", func(st *process.RuntimeState) error {
+			st.Status = process.RuntimeStateStatusRunning
+			*st = process.RefreshRuntimeOwnerLease(*st, os.Getpid(), s.instanceID, lease, now)
+			return nil
+		})
+		if err != nil {
+			if errors.Is(err, process.ErrFencingViolation) || errors.Is(err, process.ErrNoRuntimeClaim) {
+				return nil, fmt.Errorf("the runtime claim for '%s' was replaced or removed while preparing this operation; re-check games_status and retry", game.ID)
+			}
+			return nil, err
+		}
+		return updated, nil
+	}
+
+	// Legacy path (no claim, or a pre-profile claim): create or refresh the
+	// ownership record under the transition lock so it can never overwrite
+	// a current-schema claim published in between.
+	lock, err := process.AcquireTransitionLock(game.ID, s.configDir, lifecycleLockTimeout)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Release()
+
+	current, err := process.LoadRuntimeState(game.ID, s.configDir)
+	if err != nil {
+		return nil, err
+	}
+	if current != nil && current.SchemaVersion >= process.RuntimeSchemaVersion {
+		return nil, fmt.Errorf("a launch claim for '%s' was published while preparing this operation; re-check games_status and retry", game.ID)
+	}
+
 	updatedState := process.RuntimeState{
 		GameID:          game.ID,
 		Status:          process.RuntimeStateStatusRunning,
@@ -172,18 +258,15 @@ func (s *Server) saveRuntimeOwnerLease(game config.GameConfig, state *process.Ru
 		OwnerInstanceID: s.instanceID,
 		StopProcessName: game.StopProcessName,
 	}
-	if state != nil {
-		updatedState = *state
+	if current != nil {
+		updatedState = *current
 		updatedState.GameID = game.ID
 		updatedState.Status = process.RuntimeStateStatusRunning
-		updatedState.OwnerPID = os.Getpid()
-		updatedState.OwnerInstanceID = s.instanceID
 		if updatedState.StopProcessName == "" {
 			updatedState.StopProcessName = game.StopProcessName
 		}
 	}
-
-	updatedState = process.RefreshRuntimeOwnerLease(updatedState, os.Getpid(), s.instanceID, s.runtimeOwnerLeaseForOperation(operationTimeout), time.Now().UTC())
+	updatedState = process.RefreshRuntimeOwnerLease(updatedState, os.Getpid(), s.instanceID, lease, now)
 	if err := process.SaveRuntimeState(game.ID, s.configDir, updatedState); err != nil {
 		return nil, err
 	}
@@ -200,10 +283,37 @@ func (s *Server) restoreRuntimeOwnerAfterFailedConnect(gameID string, previousSt
 		return
 	}
 
+	if currentState.SchemaVersion >= process.RuntimeSchemaVersion {
+		// Current-schema claims: the rollback is fenced to the exact launch
+		// whose ownership this connect refreshed — owner PID/instance alone
+		// cannot distinguish a successor launch from the same server — and
+		// it restores ownership fields only, never the whole stale snapshot,
+		// and never deletes a launch claim.
+		if previousState == nil || previousState.LaunchID != currentState.LaunchID {
+			return
+		}
+		if _, err := process.FencedTransition(gameID, s.configDir, previousState.LaunchID, "", func(st *process.RuntimeState) error {
+			st.Status = previousState.Status
+			st.OwnerPID = previousState.OwnerPID
+			st.OwnerInstanceID = previousState.OwnerInstanceID
+			st.OwnerLeaseUntil = previousState.OwnerLeaseUntil
+			st.OwnerLastActive = previousState.OwnerLastActive
+			return nil
+		}); err != nil && !errors.Is(err, process.ErrFencingViolation) && !errors.Is(err, process.ErrNoRuntimeClaim) {
+			s.log.Warnw("failed to restore runtime ownership after connect failure", "gameId", gameID, "error", err)
+		}
+		return
+	}
+
 	if previousState == nil {
 		if err := process.RemoveRuntimeState(gameID, s.configDir); err != nil {
 			s.log.Warnw("failed to clear runtime ownership after connect failure", "gameId", gameID, "error", err)
 		}
+		return
+	}
+	if previousState.SchemaVersion >= process.RuntimeSchemaVersion {
+		// A schema-0 ownership record replaced a launch claim? Impossible
+		// via the fenced refresh; do not guess.
 		return
 	}
 
@@ -270,6 +380,45 @@ func (s *Server) ensureRuntimeOwnershipForGameCall(gameID, action string, operat
 	return nil
 }
 
+// strictArgs rejects unknown tool arguments with the stable unknown_argument
+// code, the offending path, and the sorted allowed names. Every core handler
+// enforces this independently of client-side schema validation
+// (design/10-mcp-surface.md).
+func strictArgs(args map[string]interface{}, allowed ...string) *ToolResult {
+	allowedSet := make(map[string]bool, len(allowed))
+	for _, a := range allowed {
+		allowedSet[a] = true
+	}
+	var unknown []string
+	for k := range args {
+		if !allowedSet[k] {
+			unknown = append(unknown, k)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+	sortedAllowed := append([]string(nil), allowed...)
+	sort.Strings(sortedAllowed)
+	return &ToolResult{
+		Content: []Content{{Type: "text", Text: fmt.Sprintf(
+			"Unknown argument %q. Allowed arguments: %s", unknown[0], strings.Join(sortedAllowed, ", "))}},
+		IsError: true,
+		StructuredContent: map[string]interface{}{
+			"code":    "unknown_argument",
+			"path":    "/" + unknown[0],
+			"unknown": unknown,
+			"allowed": sortedAllowed,
+			// A wrong request is call-class — fix the call, not the config
+			// (design/08). It still carries the neutral track-record line: no
+			// context exists to hash.
+			"causeClass":  process.CauseCall,
+			"trackRecord": process.TrackRecordLine(nil),
+		},
+	}
+}
+
 func parseOptionalPositiveIntValue(raw interface{}, key string) (int, bool, *ToolResult) {
 	if raw == nil {
 		return 0, false, nil
@@ -277,6 +426,15 @@ func parseOptionalPositiveIntValue(raw interface{}, key string) (int, bool, *Too
 
 	var value int
 	switch typed := raw.(type) {
+	case json.Number:
+		parsed, err := strconv.ParseInt(typed.String(), 10, 0)
+		if err != nil {
+			return 0, false, &ToolResult{
+				Content: []Content{{Type: "text", Text: fmt.Sprintf("Argument '%s' must be an integer", key)}},
+				IsError: true,
+			}
+		}
+		value = int(parsed)
 	case float64:
 		if typed != float64(int(typed)) {
 			return 0, false, &ToolResult{
@@ -353,7 +511,40 @@ func parseOptionalTimeoutSecondsArg(args map[string]interface{}, key string, def
 		return defaultValue, nil
 	}
 
-	return time.Duration(seconds) * time.Second, nil
+	return clampedSecondsToDuration(seconds), nil
+}
+
+// clampedSecondsToDuration / clampedMillisToDuration convert an accepted native
+// integer to a Duration, saturating at the largest representable Duration. A
+// caller can supply a positive integer that, multiplied by time.Second/
+// time.Millisecond, overflows int64 into a NEGATIVE (or unrelated) duration;
+// these keep the value positive and monotonic. addClampedDuration saturates a
+// sum the same way.
+func clampedSecondsToDuration(seconds int) time.Duration {
+	if seconds <= 0 {
+		return 0
+	}
+	if int64(seconds) > int64(math.MaxInt64)/int64(time.Second) {
+		return time.Duration(math.MaxInt64)
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func clampedMillisToDuration(ms int) time.Duration {
+	if ms <= 0 {
+		return 0
+	}
+	if int64(ms) > int64(math.MaxInt64)/int64(time.Millisecond) {
+		return time.Duration(math.MaxInt64)
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+func addClampedDuration(a, b time.Duration) time.Duration {
+	if b > 0 && a > time.Duration(math.MaxInt64)-b {
+		return time.Duration(math.MaxInt64)
+	}
+	return a + b
 }
 
 func deriveMirroredToolCallTimeout(args map[string]interface{}, defaultValue time.Duration) (time.Duration, *ToolResult) {
@@ -362,7 +553,7 @@ func deriveMirroredToolCallTimeout(args map[string]interface{}, defaultValue tim
 	if timeoutMs, hasValue, invalidArg := parseOptionalPositiveIntValue(args["timeoutMs"], "timeoutMs"); invalidArg != nil {
 		return defaultValue, invalidArg
 	} else if hasValue {
-		candidate := time.Duration(timeoutMs)*time.Millisecond + (5 * time.Second)
+		candidate := addClampedDuration(clampedMillisToDuration(timeoutMs), 5*time.Second)
 		if candidate > timeout {
 			timeout = candidate
 		}
@@ -371,7 +562,7 @@ func deriveMirroredToolCallTimeout(args map[string]interface{}, defaultValue tim
 	if timeoutSeconds, hasValue, invalidArg := parseOptionalPositiveIntValue(args["timeout"], "timeout"); invalidArg != nil {
 		return defaultValue, invalidArg
 	} else if hasValue {
-		candidate := time.Duration(timeoutSeconds) * time.Second
+		candidate := clampedSecondsToDuration(timeoutSeconds)
 		if candidate > timeout {
 			timeout = candidate
 		}
@@ -398,21 +589,27 @@ type startupConnectResult struct {
 }
 
 func bridgeEndpointInUseResult(game config.GameConfig, endpointErr *config.BridgeEndpointInUseError) *ToolResult {
-	gameArg := map[string]interface{}{"gameId": game.ID}
 	resetArg := map[string]interface{}{"gameId": game.ID, "resetEndpoint": true}
+	// games_connect is deliberately NOT recommended here: reaching endpoint
+	// preparation means no runtime claim existed (a claim would have refused
+	// the start earlier), the failed attempt's fresh claim is released, and
+	// connect requires a claim. games_status is equally useless for the
+	// stated question: with no claim it reports the game stopped and never
+	// inspects the socket or its owner — reading that "stopped" as permission
+	// to reset would rotate the endpoint out from under a lost instance. The
+	// only honest diagnostic is an OS-level port inspection.
 	return &ToolResult{
 		Content: []Content{{
 			Type: "text",
-			Text: fmt.Sprintf("GABS endpoint cache for game '%s' uses port %d, but that port is already listening. This session did not start another process because the cached endpoint may belong to an already-running game-side bridge. Use games_connect to attach, or start again with resetEndpoint only after confirming that the cached endpoint should be rotated.", game.ID, endpointErr.Port),
+			Text: fmt.Sprintf("GABS endpoint cache for game '%s' uses port %d, but that port is already listening. This session did not start another process. No runtime claim exists, so games_status will report this game stopped and CANNOT identify the port's listener, and games_connect cannot attach without a claim. Identify the listener with an OS tool first — e.g. `lsof -nP -iTCP:%d -sTCP:LISTEN` (macOS/Linux) or `netstat -ano | findstr :%d` (Windows). If it is a lost instance of this game, stop that process externally; only if the listener is unrelated or gone should you start again with resetEndpoint to rotate the cached endpoint.", game.ID, endpointErr.Port, endpointErr.Port, endpointErr.Port),
 		}},
 		StructuredContent: map[string]interface{}{
+			"code":   "endpoint_unavailable",
 			"gameId": game.ID,
 			"status": "endpoint_cache_in_use",
 			"port":   endpointErr.Port,
 			"nextActions": []map[string]interface{}{
-				mcpNextAction("games_status", gameArg, "Inspect runtime ownership and process status."),
-				mcpNextAction("games_connect", gameArg, "Attach if an already-running game-side bridge owns the cached endpoint."),
-				mcpNextAction("games_start", resetArg, "Rotate the endpoint cache and start a new process only after confirming the cached endpoint is not an existing game."),
+				mcpNextAction("games_start", resetArg, "Rotate the endpoint cache and start a new process ONLY after an OS-level port inspection (lsof/netstat) confirmed the listener is not a lost instance of this game."),
 			},
 		},
 		IsError: true,
@@ -493,6 +690,59 @@ func (s *Server) SetConfigDir(configDir string) {
 	s.configDir = configDir
 }
 
+// configUnavailableResult reports a startup-invalid configuration with no
+// last-known-good snapshot.
+func configUnavailableResult(cerr *config.ConfigError) *ToolResult {
+	msg := "Configuration is invalid and no last-known-good snapshot exists."
+	if cerr != nil {
+		msg = fmt.Sprintf("%s %v", msg, cerr.Err)
+	}
+	return &ToolResult{
+		Content: []Content{{Type: "text", Text: msg}},
+		IsError: true,
+		StructuredContent: map[string]interface{}{
+			"code": "config_invalid",
+		},
+	}
+}
+
+// SetConfigStore enables hot config reload: handlers fetch a fresh snapshot
+// per call instead of using the pointer captured at registration. Without a
+// store (tests), the startup config doubles as an immutable snapshot.
+func (s *Server) SetConfigStore(store *config.Store) {
+	s.configStore = store
+	// Prime the last-known-good snapshot immediately: startup validated the
+	// config already, and without priming, a config that turns invalid
+	// before the first tool call would leave the store with no
+	// last-known-good to serve read-only callers.
+	if store != nil {
+		_, _ = store.Snapshot()
+	}
+}
+
+// currentGamesConfig returns the per-call configuration plus any config
+// error. Semantics per design/09: (cfg, nil) valid; (cfg, err) disk invalid,
+// last-known-good served — reads proceed, starts must refuse; (nil, err)
+// startup-invalid with no last-known-good.
+func (s *Server) currentGamesConfig() (*config.GamesConfig, string, *config.ConfigError) {
+	if s.configStore == nil {
+		return s.gamesConfig, "startup", nil
+	}
+	snap, cerr := s.configStore.Snapshot()
+	if snap == nil {
+		return nil, "", cerr
+	}
+	return snap.Config, snap.Revision, cerr
+}
+
+// currentSnapshot returns the launch-resolution snapshot for games_start.
+func (s *Server) currentSnapshot() (*config.Snapshot, *config.ConfigError) {
+	if s.configStore == nil {
+		return &config.Snapshot{Config: s.gamesConfig, Revision: "startup", ConfigDir: s.configDir}, nil
+	}
+	return s.configStore.Snapshot()
+}
+
 // SetAPIKey sets the API key for HTTP authentication
 func (s *Server) SetAPIKey(apiKey string) {
 	s.apiKey = apiKey
@@ -514,10 +764,18 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.list",
 		Description: "List all configured game IDs",
 		InputSchema: map[string]interface{}{
-			"type":       "object",
-			"properties": map[string]interface{}{},
+			"additionalProperties": false,
+			"type":                 "object",
+			"properties":           map[string]interface{}{},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args); res != nil {
+			return res, nil
+		}
+		gamesConfig, configRevision, cfgErr := s.currentGamesConfig()
+		if gamesConfig == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
 		games := gamesConfig.ListGames()
 
 		var content strings.Builder
@@ -541,13 +799,22 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			if game.Description != "" {
 				item["description"] = game.Description
 			}
+			if len(game.Profiles) > 0 {
+				item["profiles"] = sortedProfileNames(game.Profiles)
+				item["defaultProfile"] = game.DefaultProfile
+			}
+			if n := len(gameConfigWarnings(gamesConfig, game.ID)); n > 0 {
+				item["warningCount"] = n
+			}
 			gameItems = append(gameItems, item)
 		}
 
 		structured := map[string]interface{}{
-			"count": len(games),
-			"games": gameItems,
+			"count":                 len(games),
+			"games":                 gameItems,
+			"currentConfigRevision": configRevision,
 		}
+		attachConfigHealth(structured, gamesConfig, cfgErr)
 		if len(games) == 0 {
 			structured["nextActions"] = []map[string]interface{}{
 				{
@@ -562,7 +829,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}
 
 		return &ToolResult{
-			Content:           []Content{{Type: "text", Text: content.String()}},
+			Content:           []Content{{Type: "text", Text: content.String() + configHealthTextNotice(cfgErr)}},
 			StructuredContent: structured,
 		}, nil
 	}, normalizationConfig)
@@ -572,7 +839,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.show",
 		Description: "Show detailed configuration and validation status for a specific game",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"additionalProperties": false,
+			"type":                 "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
@@ -582,6 +850,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			"required": []string{"gameId"},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args, "gameId"); res != nil {
+			return res, nil
+		}
+		gamesConfig, configRevision, cfgErr := s.currentGamesConfig()
+		if gamesConfig == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
 		gameIdOrTarget, ok := args["gameId"].(string)
 		if !ok {
 			return &ToolResult{
@@ -590,12 +865,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		game, exists := s.resolveGameId(gamesConfig, gameIdOrTarget)
-		if !exists {
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIdOrTarget)}},
-				IsError: true,
-			}, nil
+		game, resolveFail := resolveGameResult(gamesConfig, gameIdOrTarget)
+		if resolveFail != nil {
+			return resolveFail, nil
 		}
 
 		var content strings.Builder
@@ -608,17 +880,23 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			content.WriteString(fmt.Sprintf("  Working Directory: %s\n", game.WorkingDir))
 		}
 		if len(game.Args) > 0 {
-			content.WriteString(fmt.Sprintf("  Arguments: %s\n", strings.Join(game.Args, " ")))
+			content.WriteString(fmt.Sprintf("  %s: %s\n", config.ArgumentsLabel(*game), strings.Join(game.Args, " ")))
 		}
 
 		// Validation status for launcher-based games
 		if game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId" {
 			content.WriteString("\nGame Termination Configuration:\n")
-			if game.StopProcessName != "" {
+			switch {
+			case game.StopProcessName != "":
 				content.WriteString(fmt.Sprintf("  ✓ Configured for proper game termination (process: %s)\n", game.StopProcessName))
-			} else {
+			case game.HasURLHookAlternative():
+				// Hook-based lifecycle control is the validator-accepted
+				// alternative; telling the user to add stopProcessName here
+				// would direct them to change a working configuration.
+				content.WriteString("  ✓ Configured for proper game termination via lifecycle hooks (status + stop/kill)\n")
+			default:
 				content.WriteString(fmt.Sprintf("  ⚠️  Missing stopProcessName - GABS can start but cannot properly stop %s games\n", game.LaunchMode))
-				content.WriteString(fmt.Sprintf("     Add stopProcessName to your game configuration for proper termination.\n"))
+				content.WriteString("     Add stopProcessName — or a game-level status hook plus a stop or kill hook — for proper termination.\n")
 			}
 		} else if game.StopProcessName != "" {
 			content.WriteString(fmt.Sprintf("  Stop Process Name: %s\n", game.StopProcessName))
@@ -628,11 +906,25 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			content.WriteString(fmt.Sprintf("\nDescription: %s\n", game.Description))
 		}
 
+		// Profiles and launch inputs in the text block too: structuredContent
+		// alone is not enough, because not every MCP client surfaces it to a
+		// model, and games_start's own schema points callers here to discover
+		// them.
+		content.WriteString(config.DescribeLaunchContexts(*game))
+
 		status := s.checkGameStatus(game.ID)
 		validationWarnings := gameValidationWarnings(*game)
-		if len(validationWarnings) > 0 {
+		// Per-game load warnings (unknown keys like a typo'd "envv") join the
+		// validation warnings in TEXT: they are the only signal that the next
+		// launch will silently not use the intended context, and some MCP
+		// clients never surface structured content.
+		cfgWarns := gameConfigWarnings(gamesConfig, game.ID)
+		if len(validationWarnings) > 0 || len(cfgWarns) > 0 {
 			content.WriteString("\nConfiguration Warnings:\n")
 			for _, warning := range validationWarnings {
+				content.WriteString(fmt.Sprintf("  - %s\n", warning))
+			}
+			for _, warning := range cfgWarns {
 				content.WriteString(fmt.Sprintf("  - %s\n", warning))
 			}
 		}
@@ -643,9 +935,40 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			"validationWarnings": validationWarnings,
 			"nextActions":        s.nextActionsForGameStatus(*game, status, len(s.getGameSpecificTools(game.ID))),
 		}
+		structured["currentConfigRevision"] = configRevision
+		// activeConfigRevision: the revision the RUNNING launch was resolved
+		// from (persisted in the claim), distinct from what the next start
+		// would use (design/09). The same claim drives the source-aware next
+		// actions: an external snapshot must not advertise games_connect from
+		// any view.
+		if rs, rsErr := process.LoadRuntimeState(game.ID, s.configDir); rsErr == nil && rs != nil {
+			if rs.ConfigRevision != "" {
+				structured["activeConfigRevision"] = rs.ConfigRevision
+			}
+			applyRuntimeSourceGuidance(structured, game.ID, rs)
+		}
+		if len(game.Profiles) > 0 {
+			structured["profiles"] = profilesStructured(game.Profiles)
+			structured["defaultProfile"] = game.DefaultProfile
+		}
+		if len(game.LaunchInputs) > 0 {
+			structured["launchInputs"] = launchInputsStructured(game.LaunchInputs)
+		}
+		// Per-profile track record (design/08): proof and
+		// counters for each launchable context, with an edited context read
+		// as never-proven for the settings the next start would use.
+		if snap, snapErr := s.currentSnapshot(); snapErr == nil {
+			if tr := s.buildTrackRecordSummary(snap, *game); len(tr) > 0 {
+				structured["trackRecord"] = tr
+			}
+		}
+		if len(cfgWarns) > 0 {
+			structured["configWarnings"] = cfgWarns
+		}
+		attachConfigHealth(structured, gamesConfig, cfgErr)
 
 		return &ToolResult{
-			Content:           []Content{{Type: "text", Text: content.String()}},
+			Content:           []Content{{Type: "text", Text: content.String() + configHealthTextNotice(cfgErr)}},
 			StructuredContent: structured,
 		}, nil
 	}, normalizationConfig)
@@ -655,7 +978,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.status",
 		Description: "Check the status of one or more games using game ID or launch target",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"additionalProperties": false,
+			"type":                 "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
@@ -664,24 +988,61 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args, "gameId"); res != nil {
+			return res, nil
+		}
+		gamesConfig, configRevision, cfgErr := s.currentGamesConfig()
+		if gamesConfig == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
 		gameIdOrTarget, hasGameID := args["gameId"].(string)
 
 		var content strings.Builder
 		if hasGameID {
-			// Check specific game
-			game, exists := s.resolveGameId(gamesConfig, gameIdOrTarget)
-			if !exists {
+			// Check specific game; an exact runtime-claim ID outranks a
+			// configured target alias (resolveLifecycleGame).
+			game, runtimeOnly, resolveFail := s.resolveLifecycleGame(gamesConfig, gameIdOrTarget)
+			if resolveFail != nil {
+				return resolveFail, nil
+			}
+			if runtimeOnly {
+				// A game removed from config but still holding a runtime claim
+				// stays addressable by ID (design/07:62): report the claim's
+				// status instead of not-found, so a fresh agent can stop it.
+				item := s.runtimeOnlyStatusItem(game.ID)
+				item["currentConfigRevision"] = configRevision
+				// The active config error must not depend on which status form
+				// the agent used: a hot-invalid edit surfaces here exactly as
+				// it does on configured and aggregate status.
+				attachConfigHealth(item, gamesConfig, cfgErr)
+				text := fmt.Sprintf("**%s** (unconfigured): %v\n", game.ID, item["statusDescription"])
+				if diagnosticMessage := gameStateDiagnosticMessage(item); diagnosticMessage != "" {
+					text += fmt.Sprintf("\nDiagnosis: %s\n", diagnosticMessage)
+				}
+				text += configHealthTextNotice(cfgErr)
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIdOrTarget)}},
-					IsError: true,
+					Content:           []Content{{Type: "text", Text: text}},
+					StructuredContent: item,
 				}, nil
 			}
 
 			// Get status once to avoid double mutex lock
-			status := s.checkGameStatus(game.ID)
-			statusDesc := s.getStatusDescriptionFromStatus(status, game)
+			status, statusEv := s.checkGameStatusObserved(game.ID)
 			statusItem := s.gameStatusStructured(*game, status)
-			content.WriteString(fmt.Sprintf("**%s** (%s): %s\n", game.ID, game.Name, statusDesc))
+			statusItem["currentConfigRevision"] = configRevision
+			attachStatusEvidence(statusItem, statusEv)
+			if rs, rsErr := process.LoadRuntimeState(game.ID, s.configDir); rsErr == nil && rs != nil {
+				if rs.ConfigRevision != "" {
+					statusItem["activeConfigRevision"] = rs.ConfigRevision
+				}
+				attachRuntimeLifecycle(statusItem, rs)
+				applyRuntimeSourceGuidance(statusItem, game.ID, rs)
+			}
+			attachConfigHealth(statusItem, gamesConfig, cfgErr)
+			// Read the description from the item AFTER the source-aware
+			// guidance ran, so the text line agrees with the corrected
+			// structured content.
+			content.WriteString(fmt.Sprintf("**%s** (%s): %v\n", game.ID, game.Name, statusItem["statusDescription"]))
 			if diagnosticMessage := gameStateDiagnosticMessage(statusItem); diagnosticMessage != "" {
 				content.WriteString(fmt.Sprintf("\nDiagnosis: %s\n", diagnosticMessage))
 			}
@@ -692,39 +1053,114 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			// Add helpful info for launcher games ONLY when we cannot track them
 			if game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId" {
 				if status == "launcher-triggered" {
-					// Only show the warning if we don't have stopProcessName configured
-					if game.StopProcessName == "" {
-						content.WriteString(fmt.Sprintf("\nNote: %s game was launched, but GABS cannot track whether it's still running because no 'stopProcessName' is configured.\nCheck Steam/Epic or your system processes to verify the actual game status.\n", game.LaunchMode))
+					// Hook-based lifecycle control replaces stopProcessName;
+					// only warn when NEITHER is configured.
+					if game.StopProcessName == "" && !game.HasURLHookAlternative() {
+						content.WriteString(fmt.Sprintf("\nNote: %s game was launched, but GABS cannot track whether it's still running because neither 'stopProcessName' nor game-level lifecycle hooks are configured.\nCheck Steam/Epic or your system processes to verify the actual game status.\n", game.LaunchMode))
 					}
 				}
 			}
 			return &ToolResult{
-				Content:           []Content{{Type: "text", Text: content.String()}},
+				Content:           []Content{{Type: "text", Text: content.String() + configHealthTextNotice(cfgErr)}},
 				StructuredContent: statusItem,
 			}, nil
 		} else {
-			// Check all games
-			games := gamesConfig.ListGames()
+			// Check all games — configured entries UNIONED with persisted
+			// runtime-only claims whose config entry was edited away (design/07).
+			// EVERY row probes through ONE bounded worker pool (design/10): a
+			// removed claim's slow pinned status hook must not serialize the
+			// summary any more than a configured game's. checkGameStatus holds no
+			// server lock while probing, so workers are safe. A scan failure is
+			// non-fatal — the configured summary still returns.
 			content.WriteString("Game Status Summary:\n\n")
-			statusItems := make([]map[string]interface{}, 0, len(games))
-			for _, game := range games {
-				status := s.checkGameStatus(game.ID)
-				statusDesc := s.getStatusDescriptionFromStatus(status, &game)
-				statusItem := s.gameStatusStructured(game, status)
-				if diagnosticMessage := gameStateDiagnosticMessage(statusItem); diagnosticMessage != "" {
-					content.WriteString(fmt.Sprintf("• **%s**: %s — %s\n", game.ID, statusDesc, diagnosticMessage))
-				} else {
-					content.WriteString(fmt.Sprintf("• **%s**: %s\n", game.ID, statusDesc))
+			games := gamesConfig.ListGames()
+			type rowSpec struct {
+				gameID     string
+				configured *config.GameConfig // nil for a runtime-only claim
+			}
+			specs := make([]rowSpec, 0, len(games))
+			seen := map[string]bool{}
+			for i := range games {
+				specs = append(specs, rowSpec{gameID: games[i].ID, configured: &games[i]})
+				seen[games[i].ID] = true
+			}
+			claimScanError := ""
+			if claimIDs, scanErr := process.ListRuntimeClaimIDs(s.configDir); scanErr == nil {
+				for _, id := range claimIDs {
+					if !seen[id] {
+						specs = append(specs, rowSpec{gameID: id})
+					}
 				}
-				statusItems = append(statusItems, statusItem)
+			} else {
+				// An unreadable runtime root omits runtime-only claims: say so
+				// rather than presenting a falsely-complete summary (design/07).
+				claimScanError = scanErr.Error()
 			}
 
+			type gameStatusRow struct {
+				desc string
+				item map[string]interface{}
+			}
+			rows := make([]gameStatusRow, len(specs))
+			sem := make(chan struct{}, 8)
+			var wg sync.WaitGroup
+			for i := range specs {
+				wg.Add(1)
+				go func(i int, sp rowSpec) {
+					defer wg.Done()
+					sem <- struct{}{}
+					defer func() { <-sem }()
+					if sp.configured != nil {
+						game := *sp.configured
+						status, statusEv := s.checkGameStatusObserved(game.ID)
+						statusItem := s.gameStatusStructured(game, status)
+						statusItem["configured"] = true
+						attachStatusEvidence(statusItem, statusEv)
+						if rs, rsErr := process.LoadRuntimeState(game.ID, s.configDir); rsErr == nil && rs != nil {
+							if rs.ConfigRevision != "" {
+								statusItem["activeConfigRevision"] = rs.ConfigRevision
+							}
+							attachRuntimeLifecycle(statusItem, rs)
+							applyRuntimeSourceGuidance(statusItem, game.ID, rs)
+						}
+						// The item's description reflects the source-aware
+						// correction; the row text must agree with it.
+						rows[i] = gameStatusRow{desc: fmt.Sprintf("%v", statusItem["statusDescription"]), item: statusItem}
+						return
+					}
+					item := s.runtimeOnlyStatusItem(sp.gameID)
+					rows[i] = gameStatusRow{desc: fmt.Sprintf("%v", item["statusDescription"]), item: item}
+				}(i, specs[i])
+			}
+			wg.Wait()
+
+			statusItems := make([]map[string]interface{}, 0, len(specs))
+			for i, sp := range specs {
+				prefix := "• **" + sp.gameID + "**"
+				if sp.configured == nil {
+					prefix = "• **" + sp.gameID + "** (unconfigured)"
+				}
+				if diagnosticMessage := gameStateDiagnosticMessage(rows[i].item); diagnosticMessage != "" {
+					content.WriteString(fmt.Sprintf("%s: %s — %s\n", prefix, rows[i].desc, diagnosticMessage))
+				} else {
+					content.WriteString(fmt.Sprintf("%s: %s\n", prefix, rows[i].desc))
+				}
+				statusItems = append(statusItems, rows[i].item)
+			}
+
+			structuredAll := map[string]interface{}{
+				"count":                 len(statusItems),
+				"games":                 statusItems,
+				"currentConfigRevision": configRevision,
+			}
+			if claimScanError != "" {
+				content.WriteString(fmt.Sprintf("\n⚠ runtime claim scan incomplete: %s (runtime-only claims may be omitted)\n", claimScanError))
+				structuredAll["runtimeClaimScanError"] = claimScanError
+			}
+			attachConfigHealth(structuredAll, gamesConfig, cfgErr)
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: content.String()}},
-				StructuredContent: map[string]interface{}{
-					"count": len(statusItems),
-					"games": statusItems,
-				},
+				Content:           []Content{{Type: "text", Text: content.String() + configHealthTextNotice(cfgErr)}},
+				StructuredContent: structuredAll,
 			}, nil
 		}
 	}, normalizationConfig)
@@ -734,7 +1170,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.start",
 		Description: "Start a configured game using game ID or launch target (e.g., Steam App ID)",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"additionalProperties": false,
+			"type":                 "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
@@ -742,16 +1179,31 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				},
 				"timeout": map[string]interface{}{
 					"type":        "integer",
-					"description": "Optional total GABP startup connection budget in seconds. The MCP call waits only for a bounded initial slice, then GABS continues connecting in the background.",
+					"description": "Optional total GABP startup connection budget in seconds. On macOS SteamManaged launches it independently caps the pre-spawn Steam readiness wait; after readiness succeeds the full GABP budget still applies. The MCP call waits only for a bounded initial GABP slice, then GABS continues connecting in the background.",
 				},
 				"resetEndpoint": map[string]interface{}{
 					"type":        "boolean",
 					"description": "Rotate the GABS endpoint cache before launch. Use only after confirming the cached endpoint is not an already-running game-side bridge.",
 				},
+				"profile": map[string]interface{}{
+					"type":        "string",
+					"description": "Optional named launch profile. Omitted selects the configured defaultProfile. Discover profiles with games_show.",
+				},
+				"launchInputs": map[string]interface{}{
+					"type":        "object",
+					"description": "Declared launch inputs (boolean/string/integer values). Only inputs declared in the game's configuration are accepted; discover them with games_show. Not a substitute for GABP tools.",
+				},
 			},
 			"required": []string{"gameId"},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args, "gameId", "launchInputs", "profile", "resetEndpoint", "timeout"); res != nil {
+			return res, nil
+		}
+		snap, cfgErr := s.currentSnapshot()
+		if snap == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
 		gameIdOrTarget, ok := args["gameId"].(string)
 		if !ok {
 			return &ToolResult{
@@ -759,54 +1211,369 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				IsError: true,
 			}, nil
 		}
-
-		game, exists := s.resolveGameId(gamesConfig, gameIdOrTarget)
-		if !exists {
+		if cfgErr != nil {
+			// The stable outcome must not depend on whether the caller
+			// referenced the game by ID or target: resolve a target alias
+			// against the last-good snapshot before classifying, since the
+			// validation issues are pathed by game ID.
+			refID := gameIdOrTarget
+			if g, ok := s.resolveGameId(snap.Config, gameIdOrTarget); ok {
+				refID = g.ID
+			}
+			// A hot edit that gave a URL-mode game context fields is the
+			// specific, stable outcome — not a generic stale-config refusal.
+			if issues := modeIncompatibleIssues(cfgErr, refID); len(issues) > 0 {
+				structured := map[string]interface{}{"code": "launch_mode_incompatible", "issues": issues, "invalidRevision": cfgErr.Revision}
+				s.attachStructuredFailureAttribution(structured, config.GameConfig{ID: refID}, "launch_mode_incompatible", historyContext{})
+				return &ToolResult{
+					Content:           []Content{{Type: "text", Text: fmt.Sprintf("The launch mode of %q cannot deliver launch context; remove the incompatible fields or switch modes:\n  %s", refID, strings.Join(issues, "\n  "))}},
+					IsError:           true,
+					StructuredContent: structured,
+				}, nil
+			}
+			// Starts are refused on stale config: launching from an outdated
+			// snapshot is worse than failing with the exact error (design/09).
+			structured := map[string]interface{}{"code": "config_invalid", "lastGoodRevision": snap.Revision, "invalidRevision": cfgErr.Revision}
+			s.attachStructuredFailureAttribution(structured, config.GameConfig{ID: refID}, "config_invalid", historyContext{})
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIdOrTarget)}},
-				IsError: true,
+				Content:           []Content{{Type: "text", Text: fmt.Sprintf("Configuration on disk is invalid; refusing to start from a stale snapshot. Fix the config (it reloads automatically): %v", cfgErr.Err)}},
+				IsError:           true,
+				StructuredContent: structured,
 			}, nil
 		}
+		gamesConfig := snap.Config
 
-		startupGABPTimeout, invalidTimeout := parseOptionalTimeoutSecondsArg(args, "timeout", 0)
-		if invalidTimeout != nil {
-			return invalidTimeout, nil
+		game, resolveFail := resolveGameResult(gamesConfig, gameIdOrTarget)
+		if resolveFail != nil {
+			return resolveFail, nil
+		}
+
+		// timeout: integral 1..3600 (release-noted validation tightening).
+		var startupGABPTimeout time.Duration
+		if raw, exists := args["timeout"]; exists && raw != nil {
+			seconds, ok, invalidTimeout := parseOptionalPositiveIntValue(raw, "timeout")
+			if invalidTimeout != nil {
+				return invalidTimeout, nil
+			}
+			if !ok || seconds < 1 || seconds > 3600 {
+				structured := map[string]interface{}{
+					"code": "timeout_out_of_range", "minimum": 1, "maximum": 3600,
+				}
+				s.attachStructuredFailureAttribution(structured, *game, "timeout_out_of_range", historyContext{})
+				return &ToolResult{
+					Content:           []Content{{Type: "text", Text: "Argument 'timeout' must be an integer between 1 and 3600 seconds"}},
+					IsError:           true,
+					StructuredContent: structured,
+				}, nil
+			}
+			startupGABPTimeout = time.Duration(seconds) * time.Second
 		}
 		resetEndpoint, _, resetEndpointErr := parseOptionalBoolArg(args, "resetEndpoint")
 		if resetEndpointErr != nil {
 			return resetEndpointErr, nil
 		}
 
-		validationWarnings := gameValidationWarnings(*game)
-		startResult, err := s.startGame(*game, gamesConfig, backoffMin, backoffMax, startupGABPTimeout, resetEndpoint)
-		if err != nil {
-			var activeErr *gameAlreadyActiveError
-			if errors.As(err, &activeErr) {
-				status := activeErr.status
-				if status == "" {
-					status = s.checkGameStatus(game.ID)
-				}
-				toolCount := len(s.getGameSpecificTools(game.ID))
-				structured := map[string]interface{}{
-					"gameId":      game.ID,
-					"status":      status,
-					"toolCount":   toolCount,
-					"nextActions": s.nextActionsForGameStatus(*game, status, toolCount),
-				}
-				addValidationWarnings(structured, validationWarnings)
+		profileArg := ""
+		if raw, exists := args["profile"]; exists && raw != nil {
+			str, ok := raw.(string)
+			if !ok {
+				// A wrong-typed argument is a protocol-level invalid parameter,
+				// not a lifecycle outcome — it carries no stable code (the
+				// exhaustive list has none for it).
 				return &ToolResult{
-					Content:           []Content{{Type: "text", Text: activeErr.ToolMessage(*game)}},
+					Content: []Content{{Type: "text", Text: "Argument 'profile' must be a string"}},
+					IsError: true,
+				}, nil
+			}
+			profileArg = str
+		}
+		var inputsArg map[string]interface{}
+		if raw, exists := args["launchInputs"]; exists && raw != nil {
+			m, ok := raw.(map[string]interface{})
+			if !ok {
+				return &ToolResult{
+					Content: []Content{{Type: "text", Text: "Argument 'launchInputs' must be an object of declared input values"}},
+					IsError: true,
+				}, nil
+			}
+			inputsArg = m
+		}
+
+		resolved, rerr := launch.Resolve(snap, launch.Request{
+			GameID:  game.ID,
+			Profile: profileArg,
+			Inputs:  inputsArg,
+		}, launch.Options{
+			InheritedEnv:       os.Environ(),
+			CaseInsensitiveEnv: runtime.GOOS == "windows",
+		})
+		if rerr != nil {
+			structured := map[string]interface{}{"code": rerr.Code, "gameId": game.ID}
+			if len(rerr.Candidates) > 0 {
+				structured["candidates"] = rerr.Candidates
+			}
+			if rerr.Code == "profiles_not_configured" {
+				structured["requestedProfile"] = profileArg
+				structured["configPath"] = s.configFilePathHint()
+				structured["documentation"] = "docs/CONFIGURATION.md#profiles"
+				structured["note"] = "Config edits apply automatically; no GABS or client restart is needed."
+			}
+			// Mandatory attribution. Resolution failed, so
+			// there is no resolvable context: the class comes from the code
+			// alone (call/config) with no track-record line, and nothing is
+			// written to history.
+			s.attachStructuredFailureAttribution(structured, *game, rerr.Code, historyContext{})
+			return &ToolResult{
+				Content:           []Content{{Type: "text", Text: rerr.Message}},
+				IsError:           true,
+				StructuredContent: structured,
+			}, nil
+		}
+		if issues := launch.CheckResolvability(game, resolved); len(issues) > 0 {
+			lines := make([]string, 0, len(issues))
+			structuredIssues := make([]map[string]interface{}, 0, len(issues))
+			for _, is := range issues {
+				lines = append(lines, is.String())
+				structuredIssues = append(structuredIssues, map[string]interface{}{
+					"path": is.JSONPath, "fsPath": is.FSPath, "message": is.Message,
+				})
+			}
+			structured := map[string]interface{}{
+				"code":   "launch_spec_unresolvable",
+				"gameId": game.ID,
+				"issues": structuredIssues,
+			}
+			// Resolution SUCCEEDED (only the resolvability check failed), so
+			// the input-free context coordinates exist: classify proof-adjusted
+			// — a target that vanished after proven starts is environment ("it
+			// existed before"), a never-proven one is config ("probably a
+			// typo"). computeHistoryContext performs NO mutation.
+			unresolvedHC := s.computeHistoryContext(snap, *game, resolved, inputsArg)
+			s.attachStructuredFailureAttribution(structured, *game, "launch_spec_unresolvable", unresolvedHC)
+			return &ToolResult{
+				Content:           []Content{{Type: "text", Text: "Launch spec is unresolvable:\n" + strings.Join(lines, "\n")}},
+				IsError:           true,
+				StructuredContent: structured,
+			}, nil
+		}
+
+		validationWarnings := gameValidationWarnings(*game)
+		hctx := s.buildHistoryContext(snap, *game, resolved, inputsArg)
+		startResult, err := s.startGame(*game, backoffMin, backoffMax, startupGABPTimeout, resetEndpoint, resolved, hctx)
+		if err != nil {
+			// An accepted attempt that failed before the unobserved/exited
+			// branches carries its earned warnings in the wrapper; surface
+			// them on whichever classified outcome renders below.
+			var attemptWarnings []string
+			var attemptErr *lifecycle.StartAttemptError
+			if errors.As(err, &attemptErr) {
+				attemptWarnings = attemptErr.Warnings
+			}
+			addAttemptWarnings := func(structured map[string]interface{}) {
+				if len(attemptWarnings) > 0 {
+					structured["startWarnings"] = attemptWarnings
+				}
+			}
+			var refusalErr *lifecycle.StartRefusalError
+			if errors.As(err, &refusalErr) {
+				return s.startRefusalResult(*game, refusalErr, hctx, validationWarnings), nil
+			}
+			var unobsErr *lifecycle.UnobservedStartError
+			if errors.As(err, &unobsErr) {
+				structured := map[string]interface{}{
+					"code":   "unobserved",
+					"gameId": game.ID,
+					"nextActions": []map[string]interface{}{
+						mcpNextAction("games_status", map[string]interface{}{"gameId": game.ID}, "Re-check after the store launcher settles."),
+					},
+				}
+				if len(unobsErr.Warnings) > 0 {
+					structured["startWarnings"] = unobsErr.Warnings
+				}
+				s.finalizeStartFailure(structured, *game, hctx, "unobserved")
+				addValidationWarnings(structured, validationWarnings)
+				addResolvedContext(structured, resolved)
+				return &ToolResult{
+					Content:           []Content{{Type: "text", Text: appendWarningsText(fmt.Sprintf("Nothing observable for '%s' within the start budget — the store launcher may be updating the game or showing a dialog (login, EULA); check the desktop and re-check games_status. The claim is kept while the launch may still appear.", game.ID), unobsErr.Warnings)}},
 					StructuredContent: structured,
 				}, nil
 			}
+			var exitedErr *lifecycle.ExitedDuringStartError
+			if errors.As(err, &exitedErr) {
+				structured := map[string]interface{}{
+					"code":     "exited_during_start",
+					"gameId":   game.ID,
+					"exitCode": exitedErr.ExitCode,
+				}
+				if exitedErr.Tail != "" {
+					structured["outputTail"] = exitedErr.Tail
+				}
+				if exitedErr.HookEvidence != "" {
+					structured["hookEvidence"] = exitedErr.HookEvidence
+				}
+				if len(exitedErr.Warnings) > 0 {
+					structured["startWarnings"] = exitedErr.Warnings
+				}
+				// exited_during_start is game-class by the evidence-based
+				// default (design/05): GABS cannot tell a game crash from a
+				// wrapper/container exit at the first process it created, so the
+				// caller reads the captured output tail for the actual cause.
+				s.finalizeStartFailure(structured, *game, hctx, "exited_during_start")
+				addValidationWarnings(structured, validationWarnings)
+				addResolvedContext(structured, resolved)
+				return &ToolResult{
+					Content:           []Content{{Type: "text", Text: appendWarningsText(fmt.Sprintf("'%s' exited during start (exit code %d). This is attributed to the workload; read the output tail below for the exact cause — a game crash, missing/corrupt data or save, mod loader failure, DRM refusing to run outside its launcher, anti-cheat rejecting a modified process, a required online login, or (if this launch is a wrapper/container) the wrapper's own error. Output tail:\n%s", game.ID, exitedErr.ExitCode, exitedErr.Tail), exitedErr.Warnings)}},
+					IsError:           true,
+					StructuredContent: structured,
+				}, nil
+			}
+			var readinessErr *lifecycle.StoreClientNotReadyError
+			if errors.As(err, &readinessErr) {
+				structured := map[string]interface{}{
+					"code":           "store_client_not_ready",
+					"gameId":         game.ID,
+					"store":          readinessErr.Store,
+					"reason":         readinessErr.Reason,
+					"readinessStage": readinessErr.Stage,
+					"waitedMs":       readinessErr.Waited.Milliseconds(),
+					"timeoutMs":      readinessErr.Timeout.Milliseconds(),
+					"retryable":      readinessErr.Retryable,
+					"processStarted": false,
+				}
+				if readinessErr.Detail != "" {
+					structured["detail"] = readinessErr.Detail
+				}
+				addAttemptWarnings(structured)
+				s.finalizeStartFailure(structured, *game, hctx, "store_client_not_ready")
+				addValidationWarnings(structured, validationWarnings)
+				addResolvedContext(structured, resolved)
+				retryArgs := map[string]interface{}{"gameId": game.ID}
+				if resolved != nil && resolved.Profile != "" {
+					retryArgs["profile"] = resolved.Profile
+				}
+				retryAction := mcpNextAction("games_start", retryArgs, "Repeat the original start request with the same profile and launch inputs; launch-input values are intentionally not echoed. A longer timeout may help only for readiness_timeout.")
+				if resolved != nil && len(resolved.AppliedInputs) > 0 {
+					retryAction["preserveOriginalLaunchInputs"] = resolved.AppliedInputs
+				}
+				structured["nextActions"] = []map[string]interface{}{retryAction}
+				message := fmt.Sprintf("Steam readiness for '%s' could not be proven at stage %s (%s); no game process was started. Repeat the original games_start request unchanged after Steam settles", game.ID, readinessErr.Stage, readinessErr.Reason)
+				if readinessErr.Reason == string(steam.ReadinessReasonTimeout) {
+					message += "; a longer timeout may help if Steam is still starting or updating"
+				} else {
+					message += "; the installed Steam client library or readiness helper must become usable before retrying"
+				}
+				if readinessErr.Detail != "" {
+					message += ". Detail: " + readinessErr.Detail
+				}
+				return &ToolResult{
+					Content:           []Content{{Type: "text", Text: appendWarningsText(message+".", attemptWarnings)}},
+					IsError:           true,
+					StructuredContent: structured,
+				}, nil
+			}
+			var activeErr *lifecycle.GameAlreadyActiveError
+			if errors.As(err, &activeErr) {
+				status := activeErr.Status
+				if status == "" {
+					status = s.checkGameStatus(game.ID)
+				}
+				// The in-process fast path is still the already_running
+				// refusal: it must carry the stable code, causeClass, and
+				// track record the exhaustive-outcome contract requires,
+				// exactly like the claim-based refusal path renders them.
+				refErr := &lifecycle.StartRefusalError{
+					Refusal: &process.StartRefusal{
+						Code:    process.RefusalAlreadyRunning,
+						Message: activeErr.ToolMessage(*game),
+					},
+					Warnings: attemptWarnings,
+				}
+				res := s.startRefusalResult(*game, refErr, hctx, validationWarnings)
+				toolCount := len(s.getGameSpecificTools(game.ID))
+				res.StructuredContent["status"] = status
+				res.StructuredContent["toolCount"] = toolCount
+				res.StructuredContent["nextActions"] = s.nextActionsForGameStatus(*game, status, toolCount)
+				if profileArg != "" {
+					res.StructuredContent["requestedProfile"] = profileArg
+				}
+				return res, nil
+			}
 			var endpointErr *config.BridgeEndpointInUseError
 			if errors.As(err, &endpointErr) {
-				return bridgeEndpointInUseResult(*game, endpointErr), nil
+				// This special case returns before the generic endpoint
+				// branch, so it must attach the attempt's warnings itself.
+				res := bridgeEndpointInUseResult(*game, endpointErr)
+				addAttemptWarnings(res.StructuredContent)
+				if len(attemptWarnings) > 0 && len(res.Content) > 0 {
+					res.Content[0].Text = appendWarningsText(res.Content[0].Text, attemptWarnings)
+				}
+				return res, nil
+			}
+			var epErr *lifecycle.EndpointUnavailableError
+			if errors.As(err, &epErr) {
+				structured := map[string]interface{}{
+					"code": "endpoint_unavailable", "gameId": game.ID, "detail": epErr.Err.Error(),
+				}
+				addAttemptWarnings(structured)
+				s.finalizeStartFailure(structured, *game, hctx, "endpoint_unavailable")
+				return &ToolResult{
+					Content:           []Content{{Type: "text", Text: appendWarningsText(fmt.Sprintf("Cannot start %s: %v", game.ID, epErr), attemptWarnings)}},
+					IsError:           true,
+					StructuredContent: structured,
+				}, nil
+			}
+			var sizeIssue *launch.SpecSizeIssue
+			if errors.As(err, &sizeIssue) {
+				structured := map[string]interface{}{
+					"code": "spec_too_large", "part": sizeIssue.Part, "gameId": game.ID,
+				}
+				addAttemptWarnings(structured)
+				s.finalizeStartFailure(structured, *game, hctx, "spec_too_large")
+				return &ToolResult{
+					Content:           []Content{{Type: "text", Text: appendWarningsText(fmt.Sprintf("Refusing to start %s: %s", game.ID, sizeIssue.Message), attemptWarnings)}},
+					IsError:           true,
+					StructuredContent: structured,
+				}, nil
+			}
+			// A pre-spawn fencing loss aborts process creation deliberately;
+			// the controller surfaces it through ProcessError, which now
+			// Unwraps — map it to the stable supersession outcome, never
+			// spawn_failed.
+			if errors.Is(err, process.ErrFencingViolation) || errors.Is(err, process.ErrNoRuntimeClaim) {
+				if refErr, ok := s.supersededStartRefusal(game.ID).(*lifecycle.StartRefusalError); ok {
+					// The refusal is synthesized fresh here, so the warnings
+					// the wrapped attempt earned must be carried onto it.
+					refErr.Warnings = append(refErr.Warnings, attemptWarnings...)
+					return s.startRefusalResult(*game, refErr, hctx, validationWarnings), nil
+				}
+			}
+			var procErr *process.ProcessError
+			if errors.As(err, &procErr) && (procErr.Type == process.ProcessErrorTypeStart || procErr.Type == process.ProcessErrorTypeConfiguration) {
+				// OS process creation failed on a valid resolved spec:
+				// spawn_failed with the OS evidence (incl. elevation hint).
+				structured := map[string]interface{}{
+					"code": "spawn_failed", "gameId": game.ID, "osError": procErr.Err.Error(),
+				}
+				addAttemptWarnings(structured)
+				s.finalizeStartFailure(structured, *game, hctx, "spawn_failed")
+				return &ToolResult{
+					Content:           []Content{{Type: "text", Text: appendWarningsText(fmt.Sprintf("Failed to start %s: %v", game.ID, err), attemptWarnings)}},
+					IsError:           true,
+					StructuredContent: structured,
+				}, nil
 			}
 
+			// An unexpected internal error that matched no classified branch
+			// leaves GABS state unresolved — the authorized state code is
+			// blocked_unknown_state, and it carries attribution like every
+			// other stable start failure.
+			structured := map[string]interface{}{"code": "blocked_unknown_state", "gameId": game.ID}
+			addAttemptWarnings(structured)
+			s.attachStructuredFailureAttribution(structured, *game, "blocked_unknown_state", hctx)
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to start %s: %v", game.ID, err)}},
-				IsError: true,
+				Content:           []Content{{Type: "text", Text: appendWarningsText(fmt.Sprintf("Failed to start %s: %v", game.ID, err), attemptWarnings)}},
+				IsError:           true,
+				StructuredContent: structured,
 			}, nil
 		}
 
@@ -822,6 +1589,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}
 			message = appendValidationWarningText(message, validationWarnings)
 			structured := map[string]interface{}{
+				"code":              "started_bridge_pending",
 				"gameId":            game.ID,
 				"processStarted":    startResult.ProcessStarted,
 				"gabpConnected":     startResult.GABPConnected,
@@ -840,7 +1608,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 					mcpNextAction("games_connect", map[string]interface{}{"gameId": game.ID}, "Connect after the GABP bridge finishes loading."),
 				},
 			}
+			addStartAdoption(structured, &message, startResult)
 			addValidationWarnings(structured, validationWarnings)
+			addResolvedContext(structured, resolved)
 			return &ToolResult{
 				Content:           []Content{{Type: "text", Text: message}},
 				StructuredContent: structured,
@@ -850,6 +1620,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		message := fmt.Sprintf("Game '%s' (%s) started successfully and connected via GABP.", game.ID, game.Name)
 		message = appendValidationWarningText(message, validationWarnings)
 		structured := map[string]interface{}{
+			"code":             "started_connected",
 			"gameId":           game.ID,
 			"processStarted":   true,
 			"gabpConnected":    true,
@@ -858,7 +1629,10 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				mcpNextAction("games_tool_names", map[string]interface{}{"gameId": game.ID, "brief": true}, "Discover connected game-specific tools."),
 			},
 		}
+		addStartAdoption(structured, &message, startResult)
 		addValidationWarnings(structured, validationWarnings)
+		addResolvedContext(structured, resolved)
+		s.attachStartContextDelivery(structured, game.ID)
 		return &ToolResult{
 			Content:           []Content{{Type: "text", Text: message}},
 			StructuredContent: structured,
@@ -870,7 +1644,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.stop",
 		Description: "Gracefully stop a running game using game ID or launch target",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"additionalProperties": false,
+			"type":                 "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
@@ -880,6 +1655,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			"required": []string{"gameId"},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args, "gameId"); res != nil {
+			return res, nil
+		}
+		gamesConfig, configRevision, cfgErr := s.currentGamesConfig()
+		if gamesConfig == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
 		gameIdOrTarget, ok := args["gameId"].(string)
 		if !ok {
 			return &ToolResult{
@@ -888,12 +1670,20 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		game, exists := s.resolveGameId(gamesConfig, gameIdOrTarget)
-		if !exists {
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIdOrTarget)}},
-				IsError: true,
-			}, nil
+		// A removed-but-claimed game stays addressable for stop (design/07),
+		// and its exact claim ID outranks a configured target alias
+		// (resolveLifecycleGame); the synthetic entry drives the same
+		// claim-based pipeline below.
+		game, _, resolveFail := s.resolveLifecycleGame(gamesConfig, gameIdOrTarget)
+		if resolveFail != nil {
+			return resolveFail, nil
+		}
+
+		// Any persisted claim goes through the design/06 pipeline (legacy
+		// claims normalize first); the path below remains for
+		// in-memory-only tracking with no claim at all.
+		if res := s.lifecycleActionResult(*game, process.OperationActionStop, configRevision); res != nil {
+			return res, nil
 		}
 
 		err := s.stopGame(*game, false)
@@ -901,7 +1691,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			// Check if this is a launcher-specific configuration issue
 			if strings.Contains(err.Error(), "Configure 'stopProcessName'") {
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("⚠️ %s\n\nTo fix this, update your game configuration to include a 'stopProcessName'. Use: gabs games show %s", err.Error(), game.ID)}},
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("⚠️ %s\n\nTo fix this, update your game configuration to include a 'stopProcessName' (or a game-level status hook plus a stop or kill hook). Use: gabs games show %s", err.Error(), game.ID)}},
 					IsError: true,
 				}, nil
 			}
@@ -922,7 +1712,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.kill",
 		Description: "Force terminate a running game using game ID or launch target",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"additionalProperties": false,
+			"type":                 "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
@@ -932,6 +1723,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			"required": []string{"gameId"},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args, "gameId"); res != nil {
+			return res, nil
+		}
+		gamesConfig, configRevision, cfgErr := s.currentGamesConfig()
+		if gamesConfig == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
 		gameIdOrTarget, ok := args["gameId"].(string)
 		if !ok {
 			return &ToolResult{
@@ -940,12 +1738,16 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		game, exists := s.resolveGameId(gamesConfig, gameIdOrTarget)
-		if !exists {
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIdOrTarget)}},
-				IsError: true,
-			}, nil
+		// A removed-but-claimed game stays addressable for kill (design/07),
+		// and its exact claim ID outranks a configured target alias
+		// (resolveLifecycleGame).
+		game, _, resolveFail := s.resolveLifecycleGame(gamesConfig, gameIdOrTarget)
+		if resolveFail != nil {
+			return resolveFail, nil
+		}
+
+		if res := s.lifecycleActionResult(*game, process.OperationActionKill, configRevision); res != nil {
+			return res, nil
 		}
 
 		err := s.stopGame(*game, true)
@@ -953,7 +1755,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			// Check if this is a launcher-specific configuration issue
 			if strings.Contains(err.Error(), "Configure 'stopProcessName'") {
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("⚠️ %s\n\nTo fix this, update your game configuration to include a 'stopProcessName'. Use: gabs games show %s", err.Error(), game.ID)}},
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("⚠️ %s\n\nTo fix this, update your game configuration to include a 'stopProcessName' (or a game-level status hook plus a stop or kill hook). Use: gabs games show %s", err.Error(), game.ID)}},
 					IsError: true,
 				}, nil
 			}
@@ -1008,6 +1810,15 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 
 		var value int
 		switch typed := raw.(type) {
+		case json.Number:
+			parsed, err := strconv.ParseInt(typed.String(), 10, 0)
+			if err != nil {
+				return 0, false, &ToolResult{
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("Argument '%s' must be an integer", key)}},
+					IsError: true,
+				}
+			}
+			value = int(parsed)
 		case float64:
 			if typed != float64(int(typed)) {
 				return 0, false, &ToolResult{
@@ -1056,6 +1867,15 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 
 		var cursor int
 		switch typed := rawCursor.(type) {
+		case json.Number:
+			parsed, err := strconv.ParseInt(typed.String(), 10, 0)
+			if err != nil {
+				return 0, &ToolResult{
+					Content: []Content{{Type: "text", Text: "Argument 'cursor' must be an integer offset or string cursor"}},
+					IsError: true,
+				}
+			}
+			cursor = int(parsed)
 		case float64:
 			if typed != float64(int(typed)) {
 				return 0, &ToolResult{
@@ -1105,19 +1925,19 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		return cursor, nil
 	}
 
-	getSortedGames := func() []config.GameConfig {
-		games := gamesConfig.ListGames()
+	getSortedGames := func(cfg *config.GamesConfig) []config.GameConfig {
+		games := cfg.ListGames()
 		sort.Slice(games, func(i, j int) bool {
 			return games[i].ID < games[j].ID
 		})
 		return games
 	}
 
-	listToolsForDiscovery := func(gameID string, hasGameID bool, forceInitialSync bool) ([]listedGameTool, *config.GameConfig, *ToolResult) {
+	listToolsForDiscovery := func(cfg *config.GamesConfig, gameID string, hasGameID bool, forceInitialSync bool) ([]listedGameTool, *config.GameConfig, *ToolResult) {
 		entries := make([]listedGameTool, 0)
 
 		if hasGameID {
-			game, exists := s.resolveGameId(gamesConfig, gameID)
+			game, exists := s.resolveGameId(cfg, gameID)
 			if !exists {
 				return nil, nil, &ToolResult{
 					Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameID)}},
@@ -1150,7 +1970,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			return entries, game, nil
 		}
 
-		for _, game := range getSortedGames() {
+		for _, game := range getSortedGames(cfg) {
 			if forceInitialSync {
 				if err := s.ensureGameToolsMirrored(game.ID, 10*time.Second); err != nil {
 					s.log.Debugw("failed to sync GABP tools during discovery", "gameId", game.ID, "error", err)
@@ -1228,8 +2048,11 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			return entries[cursor:], ""
 		}
 
+		// cursor+limit can overflow int when limit is a native-width extreme
+		// (e.g. MaxInt): the sum wraps negative and would panic at
+		// entries[cursor:end]. end < cursor detects the wrap; clamp to the end.
 		end := cursor + limit
-		if end > len(entries) {
+		if end < cursor || end > len(entries) {
 			end = len(entries)
 		}
 
@@ -1398,7 +2221,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}
 
 		if hasGameID {
-			entries, game, listErr := listToolsForDiscovery(gameID, true, forceInitialSync)
+			entries, game, listErr := listToolsForDiscovery(gamesConfig, gameID, true, forceInitialSync)
 			if listErr != nil {
 				return listedGameTool{}, listErr
 			}
@@ -1412,7 +2235,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			return entry, nil
 		}
 
-		entries, _, listErr := listToolsForDiscovery("", false, forceInitialSync)
+		entries, _, listErr := listToolsForDiscovery(gamesConfig, "", false, forceInitialSync)
 		if listErr != nil {
 			return listedGameTool{}, listErr
 		}
@@ -1453,7 +2276,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.tool_names",
 		Description: "List compact game-specific tool names. Use this first for low-token discovery, then call games_tool_detail for one tool.",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"additionalProperties": false,
+			"type":                 "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
@@ -1482,6 +2306,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args, "brief", "cursor", "gameId", "limit", "prefix", "query"); res != nil {
+			return res, nil
+		}
+		gamesConfig, _, cfgErr := s.currentGamesConfig()
+		if gamesConfig == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
 		gameID, hasGameID, invalidArg := getOptionalStringArg(args, "gameId")
 		if invalidArg != nil {
 			return invalidArg, nil
@@ -1499,7 +2330,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			return invalidArg, nil
 		}
 
-		entries, game, listErr := listToolsForDiscovery(gameID, hasGameID, true)
+		entries, game, listErr := listToolsForDiscovery(gamesConfig, gameID, hasGameID, true)
 		if listErr != nil {
 			return listErr, nil
 		}
@@ -1589,7 +2420,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.tool_detail",
 		Description: "Show detailed metadata for one game-specific tool, including parameters and output schema.",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"additionalProperties": false,
+			"type":                 "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
@@ -1603,6 +2435,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			"required": []string{"tool"},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args, "gameId", "tool"); res != nil {
+			return res, nil
+		}
+		gamesConfig, _, cfgErr := s.currentGamesConfig()
+		if gamesConfig == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
 		gameID, hasGameID, invalidArg := getOptionalStringArg(args, "gameId")
 		if invalidArg != nil {
 			return invalidArg, nil
@@ -1660,7 +2499,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.tools",
 		Description: "List game-specific tools in detailed form for compatibility and human-readable inspection. Prefer games_tool_names for compact discovery and games_tool_detail for one tool.",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"additionalProperties": false,
+			"type":                 "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
@@ -1685,6 +2525,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args, "cursor", "gameId", "limit", "prefix", "query"); res != nil {
+			return res, nil
+		}
+		gamesConfig, _, cfgErr := s.currentGamesConfig()
+		if gamesConfig == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
 		gameID, hasGameID, invalidArg := getOptionalStringArg(args, "gameId")
 		if invalidArg != nil {
 			return invalidArg, nil
@@ -1698,7 +2545,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			return invalidArg, nil
 		}
 
-		entries, game, listErr := listToolsForDiscovery(gameID, hasGameID, true)
+		entries, game, listErr := listToolsForDiscovery(gamesConfig, gameID, hasGameID, true)
 		if listErr != nil {
 			return listErr, nil
 		}
@@ -1798,7 +2645,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.connect",
 		Description: "Connect to a running game's GABP server to discover and sync tools. Use this after the game has fully loaded.",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"additionalProperties": false,
+			"type":                 "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
@@ -1816,6 +2664,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			"required": []string{"gameId"},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args, "forceTakeover", "gameId", "timeout"); res != nil {
+			return res, nil
+		}
+		gamesConfig, configRevision, cfgErr := s.currentGamesConfig()
+		if gamesConfig == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
 		gameIdArg, ok := args["gameId"].(string)
 		if !ok || gameIdArg == "" {
 			return &ToolResult{
@@ -1824,12 +2679,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
-		game, exists := s.resolveGameId(gamesConfig, gameIdArg)
-		if !exists {
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIdArg)}},
-				IsError: true,
-			}, nil
+		game, resolveFail := resolveGameResult(gamesConfig, gameIdArg)
+		if resolveFail != nil {
+			return resolveFail, nil
 		}
 
 		forceTakeover, _, forceTakeoverErr := getOptionalBoolArg(args, "forceTakeover")
@@ -1841,32 +2693,6 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			return invalidTimeout, nil
 		}
 
-		// Check if already connected - re-sync tools.
-		s.mu.RLock()
-		existingClient, alreadyConnected := s.gabpClients[game.ID]
-		s.mu.RUnlock()
-
-		if alreadyConnected && existingClient.IsConnected() {
-			if err := s.syncGABPToolsWithTimeout(existingClient, game.ID, connectTimeout); err != nil {
-				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("Already connected to '%s' but failed to sync tools: %v", game.ID, err)}},
-					IsError: true,
-				}, nil
-			}
-			toolCount := len(s.getGameSpecificTools(game.ID))
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Already connected to '%s'. Re-synced %d tools.", game.ID, toolCount)}},
-				StructuredContent: map[string]interface{}{
-					"gameId":    game.ID,
-					"connected": true,
-					"toolCount": toolCount,
-					"nextActions": []map[string]interface{}{
-						mcpNextAction("games_tool_names", map[string]interface{}{"gameId": game.ID, "brief": true}, "Discover connected game-specific tools."),
-					},
-				},
-			}, nil
-		}
-
 		runtimeState, runtimeErr := process.LoadRuntimeState(game.ID, s.configDir)
 		if runtimeErr != nil {
 			return &ToolResult{
@@ -1875,6 +2701,39 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}, nil
 		}
 
+		// Already connected: only a claim-BOUND live client counts — a
+		// lingering client for an earlier launch can neither satisfy a
+		// connect nor be attributed to the current claim. Unbound clients
+		// are closed so the fresh attempt owns the slot cleanly.
+		if boundClient, boundClaim := s.claimBoundClient(game.ID); boundClient != nil &&
+			runtimeState != nil && boundClaim.LaunchID == runtimeState.LaunchID {
+			if err := s.syncGABPToolsWithTimeout(boundClient, game.ID, connectTimeout); err != nil {
+				return &ToolResult{
+					Content: []Content{{Type: "text", Text: fmt.Sprintf("Already connected to '%s' but failed to sync tools: %v", game.ID, err)}},
+					IsError: true,
+				}, nil
+			}
+			toolCount := len(s.getGameSpecificTools(game.ID))
+			structured := map[string]interface{}{
+				"gameId":    game.ID,
+				"connected": true,
+				"toolCount": toolCount,
+				"nextActions": []map[string]interface{}{
+					mcpNextAction("games_tool_names", map[string]interface{}{"gameId": game.ID, "brief": true}, "Discover connected game-specific tools."),
+				},
+			}
+			s.attachClaimIdentity(structured, game.ID)
+			return &ToolResult{
+				Content:           []Content{{Type: "text", Text: fmt.Sprintf("Already connected to '%s'. Re-synced %d tools.", game.ID, toolCount)}},
+				StructuredContent: structured,
+			}, nil
+		}
+		s.mu.RLock()
+		_, hasLingeringClient := s.gabpClients[game.ID]
+		s.mu.RUnlock()
+		if hasLingeringClient {
+			s.CleanupGABPConnection(game.ID)
+		}
 		hadForeignOwner := process.RuntimeStateOwnedByAnotherLiveOwner(runtimeState, os.Getpid(), s.instanceID)
 		foreignOwnerActive := process.RuntimeStateOwnedByAnotherActiveOwner(runtimeState, os.Getpid(), s.instanceID, s.runtimeOwnerLeaseDuration(), time.Now().UTC())
 		previousOwnerPID := 0
@@ -1902,14 +2761,48 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}
 		idleTakeover := hadForeignOwner && !foreignOwnerActive && !forceTakeover
 
+		// games_connect is a lifecycle touch — but only once it actually
+		// proceeds: a connect refused by the ownership gate above must not
+		// normalize the claim or burn the one-shot migration candidate.
+		var legacyEndpointCandidate *process.RuntimeEndpoint
+		if runtimeState != nil && runtimeState.SchemaVersion == 0 {
+			// The marker-absent claim normalizes fully before anything acts
+			// on it, and the one legacy bridge.json candidate is captured
+			// under that same transition lock (design/07: the sole
+			// live-attach read of the file, exactly once) — validated below
+			// by actually connecting, then persisted through the minted
+			// launch fence. Never reread.
+			normalized, candidate, nerr := process.NormalizeLegacyClaimCapturingEndpoint(game.ID, s.configDir, game.LaunchMode, configRevision)
+			if nerr != nil {
+				return &ToolResult{
+					Content:           []Content{{Type: "text", Text: fmt.Sprintf("The pre-upgrade runtime claim for '%s' could not be normalized: %v", game.ID, nerr)}},
+					IsError:           true,
+					StructuredContent: map[string]interface{}{"code": "blocked_unknown_state", "gameId": game.ID},
+				}, nil
+			}
+			runtimeState = normalized
+			legacyEndpointCandidate = candidate
+		}
+
 		status := s.checkGameStatus(game.ID)
 
-		endpoint, err := s.resolveConnectBridgeEndpoint(*game, runtimeState)
-		if err != nil {
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to resolve live GABP endpoint for '%s': %v", game.ID, err)}},
-				IsError: true,
-			}, nil
+		var endpoint bridgeEndpoint
+		if legacyEndpointCandidate != nil {
+			endpoint = bridgeEndpoint{Port: legacyEndpointCandidate.Port, Token: legacyEndpointCandidate.Token, Source: "legacy-bridge-file"}
+		} else {
+			var eerr error
+			endpoint, eerr = s.resolveConnectBridgeEndpoint(*game, runtimeState)
+			if eerr != nil {
+				var stale *errStaleConnectCredential
+				if errors.As(eerr, &stale) {
+					return staleBridgeCredentialResult(game.ID, stale.Error()), nil
+				}
+				return &ToolResult{
+					Content:           []Content{{Type: "text", Text: fmt.Sprintf("Failed to resolve live GABP endpoint for '%s': %v", game.ID, eerr)}},
+					IsError:           true,
+					StructuredContent: map[string]interface{}{"code": "endpoint_unavailable", "gameId": game.ID},
+				}, nil
+			}
 		}
 		port := endpoint.Port
 		token := endpoint.Token
@@ -1919,23 +2812,50 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			stateCopy := *runtimeState
 			runtimeStateBeforeClaim = &stateCopy
 		}
-		runtimeState, err = s.saveRuntimeOwnerLease(*game, runtimeState, connectTimeout)
+		runtimeState, err := s.saveRuntimeOwnerLease(*game, runtimeState, connectTimeout)
 		if err != nil {
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to claim runtime ownership for '%s': %v", game.ID, err)}},
-				IsError: true,
+				Content:           []Content{{Type: "text", Text: fmt.Sprintf("Failed to claim runtime ownership for '%s': %v", game.ID, err)}},
+				IsError:           true,
+				StructuredContent: map[string]interface{}{"code": "blocked_unknown_state", "gameId": game.ID},
 			}, nil
 		}
 
-		// Allow reattaching after a GABS restart. Prefer the running process
-		// environment; fall back to the internal bridge file only when no live
-		// environment is readable.
-		connector := NewServerGABPConnector(s, backoffMin, backoffMax)
+		// Reattach with the claim's own credential (or the captured legacy
+		// migration candidate) — never a substituted one. The migration
+		// attempt authenticates only: publication and mirroring follow the
+		// fenced endpoint persist, in that order (design/07).
+		var connector *ServerGABPConnector
+		if legacyEndpointCandidate != nil {
+			connector = NewLegacyMigrationConnector(s, backoffMin, backoffMax)
+		} else {
+			connector = NewServerGABPConnector(s, backoffMin, backoffMax)
+		}
 		connectCtx, connectCancel := context.WithTimeout(context.Background(), connectTimeout)
 		defer connectCancel()
 
 		err = connector.AttemptConnection(connectCtx, game.ID, port, token)
 		if err != nil {
+			var staleConn *staleBridgeCredentialError
+			if errors.As(err, &staleConn) {
+				s.restoreRuntimeOwnerAfterFailedConnect(game.ID, runtimeStateBeforeClaim)
+				return staleBridgeCredentialResult(game.ID, staleConn.Error()), nil
+			}
+			var superseded *supersededConnectionError
+			if errors.As(err, &superseded) {
+				s.restoreRuntimeOwnerAfterFailedConnect(game.ID, runtimeStateBeforeClaim)
+				return &ToolResult{
+					Content: []Content{{Type: "text", Text: superseded.Error()}},
+					StructuredContent: map[string]interface{}{
+						"code":   "operation_in_progress",
+						"gameId": game.ID,
+						"nextActions": []map[string]interface{}{
+							mcpNextAction("games_status", map[string]interface{}{"gameId": game.ID}, "The launch changed while connecting; inspect the current state."),
+						},
+					},
+					IsError: true,
+				}, nil
+			}
 			disconnectNote := s.describeLastGABPDisconnect(game.ID)
 			if status != "running" && status != "connected" {
 				if status == "running-disconnected" {
@@ -1946,8 +2866,9 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 				}
 				s.restoreRuntimeOwnerAfterFailedConnect(game.ID, runtimeStateBeforeClaim)
 				return &ToolResult{
-					Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to connect to GABP server for '%s' on port %d after %s: %v. GABS currently sees status '%s'. Make sure the game is still running and the GABP bridge is fully loaded.%s", game.ID, port, connectTimeout.Round(time.Second), err, status, disconnectNote)}},
-					IsError: true,
+					Content:           []Content{{Type: "text", Text: fmt.Sprintf("Failed to connect to GABP server for '%s' on port %d after %s: %v. GABS currently sees status '%s'. Make sure the game is still running and the GABP bridge is fully loaded.%s", game.ID, port, connectTimeout.Round(time.Second), err, status, disconnectNote)}},
+					IsError:           true,
+					StructuredContent: map[string]interface{}{"code": "blocked_unknown_state", "gameId": game.ID},
 				}, nil
 			}
 
@@ -1956,9 +2877,78 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			}
 			s.restoreRuntimeOwnerAfterFailedConnect(game.ID, runtimeStateBeforeClaim)
 			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Failed to connect to GABP server for '%s' on port %d after %s: %v. Make sure the GABP bridge is loaded.%s", game.ID, port, connectTimeout.Round(time.Second), err, disconnectNote)}},
-				IsError: true,
+				Content:           []Content{{Type: "text", Text: fmt.Sprintf("Failed to connect to GABP server for '%s' on port %d after %s: %v. Make sure the GABP bridge is loaded.%s", game.ID, port, connectTimeout.Round(time.Second), err, disconnectNote)}},
+				IsError:           true,
+				StructuredContent: map[string]interface{}{"code": "blocked_unknown_state", "gameId": game.ID},
 			}, nil
+		}
+
+		if legacyEndpointCandidate != nil {
+			// The pre-upgrade migration (design/07): persist the endpoint
+			// this live connection just validated through the minted launch
+			// fence, publish the attachment, and only then expose tools. Any
+			// failure is terminal — close the exact client, restore only the
+			// ownership fields, and report a structured failure; a legacy
+			// bridge is never exposed under a successor claim.
+			s.mu.RLock()
+			migratedClient := s.gabpClients[game.ID]
+			s.mu.RUnlock()
+			failMigration := func(code, text string) (*ToolResult, error) {
+				if migratedClient != nil {
+					s.mu.Lock()
+					if cur, exists := s.gabpClients[game.ID]; exists && cur == migratedClient {
+						delete(s.gabpClients, game.ID)
+					}
+					s.mu.Unlock()
+					_ = migratedClient.Close()
+				}
+				s.restoreRuntimeOwnerAfterFailedConnect(game.ID, runtimeStateBeforeClaim)
+				return &ToolResult{
+					Content: []Content{{Type: "text", Text: text}},
+					StructuredContent: map[string]interface{}{
+						"code":   code,
+						"gameId": game.ID,
+						"nextActions": []map[string]interface{}{
+							mcpNextAction("games_status", map[string]interface{}{"gameId": game.ID}, "Inspect the current launch state."),
+						},
+					},
+					IsError: true,
+				}, nil
+			}
+			if _, merr := process.FencedTransition(game.ID, s.configDir, runtimeState.LaunchID, "", func(st *process.RuntimeState) error {
+				if st.Endpoint != nil {
+					return process.ErrFencingViolation // already migrated meanwhile
+				}
+				st.Endpoint = &process.RuntimeEndpoint{Port: port, Token: token}
+				return nil
+			}); merr != nil {
+				if errors.Is(merr, process.ErrFencingViolation) || errors.Is(merr, process.ErrNoRuntimeClaim) {
+					return failMigration("operation_in_progress", fmt.Sprintf("The pre-upgrade claim for '%s' was replaced while its endpoint was being validated; the connection was closed — re-check games_status.", game.ID))
+				}
+				return failMigration("endpoint_unavailable", fmt.Sprintf("The validated legacy endpoint for '%s' could not be persisted: %v. The connection was closed; retry games_connect is not possible for this launch — the migration window is one-shot.", game.ID, merr))
+			}
+			migratedRef, perr := s.recordBridgeAttachment(game.ID, migratedClient, port, token, func() bool {
+				s.mu.RLock()
+				cur := s.gabpClients[game.ID]
+				s.mu.RUnlock()
+				return cur == migratedClient && migratedClient != nil && migratedClient.IsConnected()
+			})
+			if perr != nil {
+				return failMigration("operation_in_progress", fmt.Sprintf("The migrated bridge attachment for '%s' could not be published (%v); the connection was closed — re-check games_status.", game.ID, perr))
+			}
+			if migratedClient != nil {
+				s.recordContextDelivery(game.ID, migratedRef, migratedClient.TakeObservedContext())
+			}
+			if migratedClient != nil {
+				if merr := connector.MirrorConnectedClient(connectCtx, game.ID, migratedClient); merr != nil {
+					s.HandleUnexpectedGABPDisconnect(game.ID, migratedClient, merr)
+					s.restoreRuntimeOwnerAfterFailedConnect(game.ID, runtimeStateBeforeClaim)
+					return &ToolResult{
+						Content: []Content{{Type: "text", Text: fmt.Sprintf("Connected and migrated '%s', but tool mirroring failed: %v", game.ID, merr)}},
+						IsError: true,
+					}, nil
+				}
+			}
 		}
 
 		toolCount := len(s.getGameSpecificTools(game.ID))
@@ -1968,52 +2958,58 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		}
 
 		if hadForeignOwner && forceTakeover {
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Force-took ownership of '%s' from GABS pid %d and connected to the GABP server on port %d. Discovered %d tools.", game.ID, previousOwnerPID, port, toolCount)}},
-				StructuredContent: map[string]interface{}{
-					"gameId":        game.ID,
-					"connected":     true,
-					"forceTakeover": true,
-					"previousPID":   previousOwnerPID,
-					"previousOwner": previousOwnerInstance,
-					"port":          port,
-					"toolCount":     toolCount,
-					"nextActions": []map[string]interface{}{
-						mcpNextAction("games_tool_names", map[string]interface{}{"gameId": game.ID, "brief": true}, "Discover connected game-specific tools."),
-					},
+			structured := map[string]interface{}{
+				"gameId":        game.ID,
+				"connected":     true,
+				"forceTakeover": true,
+				"previousPID":   previousOwnerPID,
+				"previousOwner": previousOwnerInstance,
+				"port":          port,
+				"toolCount":     toolCount,
+				"nextActions": []map[string]interface{}{
+					mcpNextAction("games_tool_names", map[string]interface{}{"gameId": game.ID, "brief": true}, "Discover connected game-specific tools."),
 				},
+			}
+			s.attachClaimIdentity(structured, game.ID)
+			return &ToolResult{
+				Content:           []Content{{Type: "text", Text: fmt.Sprintf("Force-took ownership of '%s' from GABS pid %d and connected to the GABP server on port %d. Discovered %d tools.", game.ID, previousOwnerPID, port, toolCount)}},
+				StructuredContent: structured,
 			}, nil
 		}
 
 		if idleTakeover {
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Took ownership of idle GABS session for '%s' from pid %d and connected to the GABP server on port %d. Discovered %d tools.", game.ID, previousOwnerPID, port, toolCount)}},
-				StructuredContent: map[string]interface{}{
-					"gameId":        game.ID,
-					"connected":     true,
-					"idleTakeover":  true,
-					"previousPID":   previousOwnerPID,
-					"previousOwner": previousOwnerInstance,
-					"port":          port,
-					"toolCount":     toolCount,
-					"nextActions": []map[string]interface{}{
-						mcpNextAction("games_tool_names", map[string]interface{}{"gameId": game.ID, "brief": true}, "Discover connected game-specific tools."),
-					},
-				},
-			}, nil
-		}
-
-		return &ToolResult{
-			Content: []Content{{Type: "text", Text: fmt.Sprintf("Successfully connected to '%s' GABP server on port %d. Discovered %d tools.", game.ID, port, toolCount)}},
-			StructuredContent: map[string]interface{}{
-				"gameId":    game.ID,
-				"connected": true,
-				"port":      port,
-				"toolCount": toolCount,
+			structured := map[string]interface{}{
+				"gameId":        game.ID,
+				"connected":     true,
+				"idleTakeover":  true,
+				"previousPID":   previousOwnerPID,
+				"previousOwner": previousOwnerInstance,
+				"port":          port,
+				"toolCount":     toolCount,
 				"nextActions": []map[string]interface{}{
 					mcpNextAction("games_tool_names", map[string]interface{}{"gameId": game.ID, "brief": true}, "Discover connected game-specific tools."),
 				},
+			}
+			s.attachClaimIdentity(structured, game.ID)
+			return &ToolResult{
+				Content:           []Content{{Type: "text", Text: fmt.Sprintf("Took ownership of idle GABS session for '%s' from pid %d and connected to the GABP server on port %d. Discovered %d tools.", game.ID, previousOwnerPID, port, toolCount)}},
+				StructuredContent: structured,
+			}, nil
+		}
+
+		structured := map[string]interface{}{
+			"gameId":    game.ID,
+			"connected": true,
+			"port":      port,
+			"toolCount": toolCount,
+			"nextActions": []map[string]interface{}{
+				mcpNextAction("games_tool_names", map[string]interface{}{"gameId": game.ID, "brief": true}, "Discover connected game-specific tools."),
 			},
+		}
+		s.attachClaimIdentity(structured, game.ID)
+		return &ToolResult{
+			Content:           []Content{{Type: "text", Text: fmt.Sprintf("Successfully connected to '%s' GABP server on port %d. Discovered %d tools.", game.ID, port, toolCount)}},
+			StructuredContent: structured,
 		}, nil
 	}, normalizationConfig)
 
@@ -2022,7 +3018,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.get_attention",
 		Description: "Inspect the current attention item for a connected game. Use this when GABS blocks further game calls due to important async game information.",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"additionalProperties": false,
+			"type":                 "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
@@ -2035,6 +3032,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args, "gameId", "timeout"); res != nil {
+			return res, nil
+		}
+		gamesConfig, _, cfgErr := s.currentGamesConfig()
+		if gamesConfig == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
 		gameID, hasGameID, invalidArg := getOptionalStringArg(args, "gameId")
 		if invalidArg != nil {
 			return invalidArg, nil
@@ -2102,7 +3106,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.ack_attention",
 		Description: "Acknowledge a current attention item for a connected game so blocked game calls can resume once the game has no remaining blocking attention.",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"additionalProperties": false,
+			"type":                 "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
@@ -2120,6 +3125,13 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			"required": []string{"attentionId"},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args, "attentionId", "gameId", "timeout"); res != nil {
+			return res, nil
+		}
+		gamesConfig, _, cfgErr := s.currentGamesConfig()
+		if gamesConfig == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
 		gameID, hasGameID, invalidArg := getOptionalStringArg(args, "gameId")
 		if invalidArg != nil {
 			return invalidArg, nil
@@ -2196,7 +3208,8 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		Name:        "games.call_tool",
 		Description: "Call a game-specific tool on a running game via its GABP connection. Prefer games_tool_names for discovery and games_tool_detail for schema inspection before calling.",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"additionalProperties": false,
+			"type":                 "object",
 			"properties": map[string]interface{}{
 				"gameId": map[string]interface{}{
 					"type":        "string",
@@ -2218,16 +3231,22 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			"required": []string{"tool"},
 		},
 	}, func(args map[string]interface{}) (*ToolResult, error) {
+		if res := strictArgs(args, "arguments", "gameId", "timeout", "tool"); res != nil {
+			return res, nil
+		}
+		gamesConfig, _, cfgErr := s.currentGamesConfig()
+		if gamesConfig == nil {
+			return configUnavailableResult(cfgErr), nil
+		}
 		gameIdArg, hasGameID, invalidArg := getOptionalStringArg(args, "gameId")
 		if invalidArg != nil {
 			return invalidArg, nil
 		}
 		toolName, ok := args["tool"].(string)
 		if !ok || toolName == "" {
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: "Missing required argument: tool"}},
-				IsError: true,
-			}, nil
+			// A malformed/missing tool argument is a caller error:
+			// GABS-owned, attributed by class directly (no minted code).
+			return s.gabsCallToolFailure(gameIdArg, "Missing required argument: tool", process.CauseCall), nil
 		}
 
 		toolArgs, _ := args["arguments"].(map[string]interface{})
@@ -2253,20 +3272,20 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			return resolveErr, nil
 		}
 
-		// Get the GABP client for this game
-		s.mu.RLock()
-		client, connected := s.gabpClients[entry.GameID]
-		s.mu.RUnlock()
+		// Get the GABP client for this game — claim-bound only:
+		// a live client for an earlier launch must not service tools under
+		// the current claim's ownership.
+		client, _ := s.claimBoundClient(entry.GameID)
 
-		if !connected || !client.IsConnected() {
+		if client == nil {
 			disconnectNote := s.describeLastGABPDisconnect(entry.GameID)
 			if disconnectNote != "" {
 				disconnectNote = " " + disconnectNote
 			}
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' is not connected via GABP. Use games_status to verify whether it is still running, then use games_connect or games_start as appropriate.%s", entry.GameID, disconnectNote)}},
-				IsError: true,
-			}, nil
+			// No live GABP connection is a GABS-owned runtime-state situation to
+			// resolve (CauseState) — not a game payload.
+			msg := fmt.Sprintf("Game '%s' is not connected via GABP. Use games_status to verify whether it is still running, then use games_connect or games_start as appropriate.%s", entry.GameID, disconnectNote)
+			return s.gabsCallToolFailure(entry.GameID, msg, process.CauseState), nil
 		}
 
 		if blocked := s.ensureRuntimeOwnershipForGameCall(entry.GameID, fmt.Sprintf("tool '%s'", toolName), proxyTimeout); blocked != nil {
@@ -2287,41 +3306,24 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 
 		result, isError, err := client.CallToolWithTimeout(gabpToolName, toolArgs, proxyTimeout)
 		if err != nil {
-			disconnectNote := s.describeLastGABPDisconnect(entry.GameID)
-			if disconnectNote != "" {
-				disconnectNote = " " + disconnectNote
-			}
-			return &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("GABP tool call failed: %v.%s", err, disconnectNote)}},
-				IsError: true,
-			}, nil
+			// GABS-owned transport failure (CauseState) — shared helper.
+			return s.gabpCallErrorResult(entry.GameID, err), nil
 		}
 
 		if isError {
+			// A game-DEFINED error payload, forwarded verbatim and marked
+			// BridgePassthrough so GABS attribution never reads its keys as a
+			// GABS code.
 			return &ToolResult{
 				Content:           []Content{{Type: "text", Text: fmt.Sprintf("Tool error: %v", result)}},
 				StructuredContent: result,
 				IsError:           true,
+				BridgePassthrough: true,
 			}, nil
 		}
 
-		// Convert result to text content
-		content := []Content{}
-		if resultText, ok := result["text"].(string); ok {
-			content = append(content, Content{Type: "text", Text: resultText})
-		} else {
-			if jsonData, err := json.Marshal(result); err != nil {
-				content = append(content, Content{Type: "text", Text: fmt.Sprintf("%v", result)})
-			} else {
-				content = append(content, Content{Type: "text", Text: string(jsonData)})
-			}
-		}
-
-		return &ToolResult{
-			Content:           content,
-			StructuredContent: result,
-			IsError:           false,
-		}, nil
+		// A successful game payload, forwarded verbatim (BridgePassthrough).
+		return gabpCallSuccessResult(result), nil
 	}, normalizationConfig)
 }
 
@@ -2348,20 +3350,107 @@ func (s *Server) getGameFromController(controller process.ControllerInterface) *
 
 // resolveGameId tries to find a game by ID or by target (for better UX)
 // Returns the actual game config and whether it was found
-func (s *Server) resolveGameId(gamesConfig *config.GamesConfig, gameIdOrTarget string) (*config.GameConfig, bool) {
-	// First try direct lookup by game ID
-	if game, exists := gamesConfig.GetGame(gameIdOrTarget); exists {
-		return game, true
+// resolveGameReference resolves a game reference with full Stage 1
+// semantics: exact ID, unique target match, ambiguity, or absence.
+// code is "" on success, else game_not_found | ambiguous_game_reference
+// with sorted candidates (design/05-start-pipeline.md).
+func resolveGameReference(cfg *config.GamesConfig, ref string) (*config.GameConfig, string, []string) {
+	if game, exists := cfg.GetGame(ref); exists {
+		return game, "", nil
 	}
-
-	// If not found, try to find by target (Steam App ID, path, etc.)
-	for _, game := range gamesConfig.ListGames() {
-		if game.Target == gameIdOrTarget {
-			return &game, true
+	var matches []config.GameConfig
+	for _, game := range cfg.ListGames() {
+		if game.Target == ref {
+			matches = append(matches, game)
 		}
 	}
+	switch len(matches) {
+	case 1:
+		g := matches[0]
+		return &g, "", nil
+	case 0:
+		ids := make([]string, 0, len(cfg.Games))
+		for id := range cfg.Games {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		return nil, "game_not_found", ids
+	default:
+		ids := make([]string, 0, len(matches))
+		for _, g := range matches {
+			ids = append(ids, g.ID)
+		}
+		sort.Strings(ids)
+		return nil, "ambiguous_game_reference", ids
+	}
+}
 
-	return nil, false
+// resolveGameResult wraps resolveGameReference into a structured tool error.
+func resolveGameResult(cfg *config.GamesConfig, ref string) (*config.GameConfig, *ToolResult) {
+	game, code, candidates := resolveGameReference(cfg, ref)
+	if game != nil {
+		return game, nil
+	}
+	msg := fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", ref)
+	if code == "ambiguous_game_reference" {
+		msg = fmt.Sprintf("Game reference '%s' matches multiple configured games (%s). Use the exact game ID.", ref, strings.Join(candidates, ", "))
+	}
+	structured := map[string]interface{}{"code": code}
+	if len(candidates) > 0 {
+		structured["candidates"] = candidates
+	}
+	return nil, &ToolResult{
+		Content:           []Content{{Type: "text", Text: msg}},
+		IsError:           true,
+		StructuredContent: structured,
+	}
+}
+
+func (s *Server) resolveGameId(gamesConfig *config.GamesConfig, gameIdOrTarget string) (*config.GameConfig, bool) {
+	// Deterministic wrapper: an ambiguous target reference resolves to
+	// nothing rather than to a map-iteration-order pick.
+	game, _, _ := resolveGameReference(gamesConfig, gameIdOrTarget)
+	return game, game != nil
+}
+
+// resolveLifecycleGame resolves a specific status/stop/kill reference with
+// claim precedence: an exact configured ID wins, then an exact persisted
+// runtime claim — aggregate games_status advertises claim IDs, and a
+// removed-but-claimed game must stay addressable by exactly that ID
+// (design/07:62) — and only then a configured target alias. A target alias
+// must never capture a claim ID: it would route a destructive lifecycle
+// action to another configured game while the intended claim stays untouched.
+// runtimeOnly reports the synthetic unconfigured case; the claim carries the
+// pinned lifecycle, so the synthetic entry drives the same claim-based
+// pipeline as a configured game.
+func (s *Server) resolveLifecycleGame(gamesConfig *config.GamesConfig, ref string) (game *config.GameConfig, runtimeOnly bool, fail *ToolResult) {
+	if g, exists := gamesConfig.GetGame(ref); exists {
+		return g, false, nil
+	}
+	exists, cerr := process.CheckRuntimeClaim(ref, s.configDir)
+	if cerr != nil {
+		// Exact-claim absence could not be established: falling through to a
+		// target alias here could route a destructive action to another
+		// configured game while a claim sits unreadable at this exact ID.
+		// Uncertainty blocks (design/04) — never guesses a referent.
+		return nil, false, &ToolResult{
+			Content: []Content{{Type: "text", Text: fmt.Sprintf("Cannot determine whether %q addresses a runtime claim: %v. Refusing to resolve it as a target alias; inspect the claim path, or use 'gabs games repair %s --forget-runtime' if the claim is provably malformed.", ref, cerr, ref)}},
+			IsError: true,
+			StructuredContent: map[string]interface{}{
+				"code":   "blocked_unknown_state",
+				"gameId": ref,
+			},
+		}
+	}
+	if exists {
+		synthetic := config.GameConfig{ID: ref, Name: ref}
+		return &synthetic, true, nil
+	}
+	g, fail := resolveGameResult(gamesConfig, ref)
+	if fail != nil {
+		return nil, false, fail
+	}
+	return g, false, nil
 }
 
 func mcpNextAction(tool string, arguments map[string]interface{}, reason string) map[string]interface{} {
@@ -2403,8 +3492,8 @@ func gameConfigStructured(game config.GameConfig) map[string]interface{} {
 
 func gameValidationWarnings(game config.GameConfig) []string {
 	warnings := make([]string, 0, 2)
-	if (game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId") && game.StopProcessName == "" {
-		warnings = append(warnings, fmt.Sprintf("%s games need stopProcessName for reliable games_stop and games_kill.", game.LaunchMode))
+	if (game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId") && game.StopProcessName == "" && !game.HasURLHookAlternative() {
+		warnings = append(warnings, fmt.Sprintf("%s games need stopProcessName — or a game-level status hook plus a stop or kill hook — for reliable games_stop and games_kill.", game.LaunchMode))
 	}
 	if launcherModeIgnoresConfiguredArgs(game) {
 		if game.LaunchMode == "SteamAppId" {
@@ -2433,6 +3522,152 @@ func appendValidationWarningText(message string, warnings []string) string {
 	return fmt.Sprintf("%s Configuration warning: %s", message, strings.Join(warnings, " "))
 }
 
+// addResolvedContext reports the selected profile and applied launch-input
+// names (never values) on a start result.
+func addResolvedContext(structured map[string]interface{}, r *launch.Resolved) {
+	if r == nil {
+		return
+	}
+	if r.Profile != "" {
+		structured["activeProfile"] = r.Profile
+	}
+	if len(r.AppliedInputs) > 0 {
+		structured["appliedLaunchInputs"] = r.AppliedInputs
+	}
+	structured["configRevision"] = r.ConfigRevision
+}
+
+// configFilePathHint returns the actual config path for error guidance.
+func (s *Server) configFilePathHint() string {
+	if s.configStore != nil {
+		return s.configStore.Path()
+	}
+	if cp, err := config.NewConfigPaths(s.configDir); err == nil {
+		return cp.GetMainConfigPath()
+	}
+	return "config.json"
+}
+
+// sortedProfileNames returns the profile names in deterministic order.
+func sortedProfileNames(profiles map[string]config.ProfileConfig) []string {
+	return config.SortedProfileNames(profiles)
+}
+
+// profilesStructured renders profile discovery metadata: names and
+// descriptions only — arg/env templates are noise, not secret, and stay out
+// of results (design/10-mcp-surface.md).
+func profilesStructured(profiles map[string]config.ProfileConfig) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(profiles))
+	for _, name := range sortedProfileNames(profiles) {
+		item := map[string]interface{}{"name": name}
+		if d := profiles[name].Description; d != "" {
+			item["description"] = d
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+// launchInputsStructured renders the JSON-Schema-style input map with every
+// declared constraint, including the effective default maxLength, so an
+// agent can form a valid value without trial calls.
+func launchInputsStructured(inputs map[string]config.LaunchInputConfig) map[string]interface{} {
+	out := make(map[string]interface{}, len(inputs))
+	for name, in := range inputs {
+		item := map[string]interface{}{
+			"type":        in.Type,
+			"description": in.Description,
+		}
+		if len(in.Enum) > 0 {
+			item["enum"] = append([]string(nil), in.Enum...)
+		}
+		if in.Minimum != nil {
+			item["minimum"] = *in.Minimum
+		}
+		if in.Maximum != nil {
+			item["maximum"] = *in.Maximum
+		}
+		if in.Type == "string" {
+			maxLen := config.InputMaxLengthDefault
+			if in.MaxLength != nil {
+				maxLen = *in.MaxLength
+			}
+			item["maxLength"] = maxLen
+			if in.Pattern != "" {
+				// RE2 syntax, matched against the entire value.
+				item["pattern"] = in.Pattern
+				item["patternDialect"] = "re2-full-match"
+			}
+		}
+		if len(in.Profiles) > 0 {
+			item["profiles"] = append([]string(nil), in.Profiles...)
+		}
+		out[name] = item
+	}
+	return out
+}
+
+// escapeJSONPointerToken escapes one RFC 6901 token — warning paths are
+// emitted escaped, so unescaped prefixes would never match an ID containing
+// ~ or /.
+func escapeJSONPointerToken(s string) string {
+	s = strings.ReplaceAll(s, "~", "~0")
+	return strings.ReplaceAll(s, "/", "~1")
+}
+
+// gameConfigWarnings filters load warnings owned by one game.
+func gameConfigWarnings(cfg *config.GamesConfig, gameID string) []string {
+	prefix := "/games/" + escapeJSONPointerToken(gameID)
+	var out []string
+	for _, w := range cfg.Warnings {
+		if strings.HasPrefix(w.Path, prefix+"/") || w.Path == prefix {
+			out = append(out, w.String())
+		}
+	}
+	return out
+}
+
+// modeIncompatibleIssues returns the requested game's validation issues iff
+// they are all mode-incompatibility findings — the Stage 1 code
+// launch_mode_incompatible must be emitted for "mode rejects profiles/
+// inputs/env" instead of the generic config_invalid (design/05).
+func modeIncompatibleIssues(cfgErr *config.ConfigError, gameID string) []string {
+	return config.ModeIncompatibleIssues(cfgErr, gameID)
+}
+
+// attachConfigHealth adds global config warnings (those without an owning
+// game — MCP callers without a CLI must still see them) and any active
+// config error to a structured result.
+func attachConfigHealth(structured map[string]interface{}, cfg *config.GamesConfig, cfgErr *config.ConfigError) {
+	var global []string
+	for _, w := range cfg.Warnings {
+		if !strings.HasPrefix(w.Path, "/games/") {
+			global = append(global, w.String())
+		}
+	}
+	if len(global) > 0 {
+		if existing, ok := structured["configWarnings"].([]string); ok {
+			structured["configWarnings"] = append(existing, global...)
+		} else {
+			structured["configWarnings"] = global
+		}
+	}
+	if cfgErr != nil {
+		structured["configError"] = cfgErr.Err.Error()
+		structured["invalidRevision"] = cfgErr.Revision
+	}
+}
+
+// configHealthTextNotice renders the active config error for TEXT content:
+// clients that never surface structured content must not mistake the stale
+// last-good values for the current configuration.
+func configHealthTextNotice(cfgErr *config.ConfigError) string {
+	if cfgErr == nil {
+		return ""
+	}
+	return fmt.Sprintf("\n\n⚠️ The configuration file on disk is INVALID (revision %s); values shown come from the last-good configuration and edits are NOT active. Error: %v", cfgErr.Revision, cfgErr.Err)
+}
+
 func (s *Server) gameStatusStructured(game config.GameConfig, status string) map[string]interface{} {
 	toolCount := len(s.getGameSpecificTools(game.ID))
 	diagnostics := s.gameStateDiagnostics(game, status)
@@ -2454,6 +3689,51 @@ func (s *Server) gameStatusStructured(game config.GameConfig, status string) map
 	}
 	if warnings := gameValidationWarnings(game); len(warnings) > 0 {
 		item["validationWarnings"] = warnings
+	}
+	return item
+}
+
+// runtimeOnlyStatusItem builds a games_status item for a game that holds a
+// persisted runtime claim but is no longer in config (design/07): configured:
+// false, the persisted phase, and stop/kill next actions so a fresh agent can
+// end a launch whose config entry was edited away. Status is resolved from the
+// claim + liveness, never from config (there is none).
+func (s *Server) runtimeOnlyStatusItem(gameID string) map[string]interface{} {
+	synthetic := config.GameConfig{ID: gameID, Name: gameID}
+	item := map[string]interface{}{
+		"gameId":     gameID,
+		"name":       gameID,
+		"configured": false,
+	}
+
+	rs, loadErr := process.LoadRuntimeState(gameID, s.configDir)
+	if loadErr != nil {
+		// Corrupt/unreadable claim: T-RT requires unknown + the repair path.
+		// stop/kill would only return blocked_unknown_state, so surface the CLI
+		// forget command and the unreadable evidence directly instead.
+		item["status"] = "unknown"
+		item["statusDescription"] = "unreadable runtime claim (corrupt); resolve with repair --forget-runtime if the launch is provably gone"
+		item["unreadable"] = loadErr.Error()
+		item["repairCommand"] = fmt.Sprintf("gabs games repair %s --forget-runtime", gameID)
+		item["nextActions"] = []map[string]interface{}{
+			mcpNextAction("games_status", map[string]interface{}{"gameId": gameID}, "Re-read; a transient read error may clear. If it persists, the claim is corrupt — use the repair command above."),
+		}
+		return item
+	}
+
+	status, ev := s.checkGameStatusObserved(gameID)
+	item["status"] = status
+	item["statusDescription"] = s.getStatusDescriptionFromStatus(status, &synthetic)
+	item["nextActions"] = []map[string]interface{}{
+		mcpNextAction("games_stop", map[string]interface{}{"gameId": gameID}, "Stop this launch; its config entry was removed but the runtime claim persists."),
+		mcpNextAction("games_kill", map[string]interface{}{"gameId": gameID}, "Force terminate if stop does not end it."),
+	}
+	attachStatusEvidence(item, ev)
+	if rs != nil {
+		if rs.ConfigRevision != "" {
+			item["activeConfigRevision"] = rs.ConfigRevision
+		}
+		attachRuntimeLifecycle(item, rs)
 	}
 	return item
 }
@@ -2705,15 +3985,12 @@ func (s *Server) callDirectGABPTool(gamesConfig *config.GamesConfig, gameIDArg s
 		return nil, false
 	}
 
-	s.mu.RLock()
-	client, connected := s.gabpClients[gameID]
-	s.mu.RUnlock()
-
-	if !connected || !client.IsConnected() {
+	client, _ := s.claimBoundClient(gameID)
+	if client == nil {
 		return nil, false
 	}
 
-	if blocked := s.ensureRuntimeOwnershipForGameCall(gameID, fmt.Sprintf("direct tool '%s'", requested), timeout); blocked != nil {
+	if blocked := s.ensureRuntimeOwnershipForGameCall(gameID, fmt.Sprintf("direct tool %q", requested), timeout); blocked != nil {
 		return blocked, true
 	}
 
@@ -2771,10 +4048,14 @@ func (s *Server) callDirectGABPTool(gamesConfig *config.GamesConfig, gameIDArg s
 		}
 
 		if isError {
+			// A game-DEFINED error payload, forwarded verbatim and marked
+			// BridgePassthrough so GABS attribution never reads its keys as a
+			// GABS code.
 			return &ToolResult{
 				Content:           []Content{{Type: "text", Text: fmt.Sprintf("Tool error: %v", callResult)}},
 				StructuredContent: callResult,
 				IsError:           true,
+				BridgePassthrough: true,
 			}, true
 		}
 
@@ -2794,10 +4075,8 @@ func (s *Server) resolveDirectGABPToolGame(gamesConfig *config.GamesConfig, game
 	if hasGameID {
 		game, exists := s.resolveGameId(gamesConfig, gameIDArg)
 		if !exists {
-			return "", &ToolResult{
-				Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIDArg)}},
-				IsError: true,
-			}, true
+			// GABS-owned caller error (CauseCall).
+			return "", s.gabsCallToolFailure(gameIDArg, fmt.Sprintf("Game '%s' not found. Use games_list to see available games.", gameIDArg), process.CauseCall), true
 		}
 		return game.ID, nil, false
 	}
@@ -2811,10 +4090,7 @@ func (s *Server) resolveDirectGABPToolGame(gamesConfig *config.GamesConfig, game
 
 	connectedGameIDs := make([]string, 0)
 	for _, game := range gamesConfig.ListGames() {
-		s.mu.RLock()
-		client, connected := s.gabpClients[game.ID]
-		s.mu.RUnlock()
-		if connected && client.IsConnected() {
+		if client, _ := s.claimBoundClient(game.ID); client != nil {
 			connectedGameIDs = append(connectedGameIDs, game.ID)
 		}
 	}
@@ -2831,10 +4107,8 @@ func (s *Server) resolveDirectGABPToolGame(gamesConfig *config.GamesConfig, game
 	}
 	if len(matches) > 1 {
 		sort.Strings(matches)
-		return "", &ToolResult{
-			Content: []Content{{Type: "text", Text: fmt.Sprintf("Tool '%s' matched multiple connected games (%s). Include gameId.", requested, strings.Join(matches, ", "))}},
-			IsError: true,
-		}, true
+		// GABS-owned caller error: ambiguous tool reference (CauseCall).
+		return "", s.gabsCallToolFailure("", fmt.Sprintf("Tool %q matched multiple connected games (%s). Include gameId.", requested, strings.Join(matches, ", ")), process.CauseCall), true
 	}
 
 	if len(connectedGameIDs) == 1 {
@@ -2844,17 +4118,20 @@ func (s *Server) resolveDirectGABPToolGame(gamesConfig *config.GamesConfig, game
 	return "", nil, false
 }
 
+// gabpCallErrorResult is a GABS-owned GABP transport failure (the connection
+// dropped or the RPC errored): a runtime-state situation to resolve
+// (CauseState), attributed directly with no minted code.
 func (s *Server) gabpCallErrorResult(gameID string, err error) *ToolResult {
 	disconnectNote := s.describeLastGABPDisconnect(gameID)
 	if disconnectNote != "" {
 		disconnectNote = " " + disconnectNote
 	}
-	return &ToolResult{
-		Content: []Content{{Type: "text", Text: fmt.Sprintf("GABP tool call failed: %v.%s", err, disconnectNote)}},
-		IsError: true,
-	}
+	return s.gabsCallToolFailure(gameID, fmt.Sprintf("GABP tool call failed: %v.%s", err, disconnectNote), process.CauseState)
 }
 
+// gabpCallSuccessResult forwards a game's successful GABP payload verbatim as
+// the games_call_tool result, marked BridgePassthrough so GABS attribution
+// never rewrites it — its keys are game-defined.
 func gabpCallSuccessResult(result map[string]interface{}) *ToolResult {
 	content := []Content{}
 	if resultText, ok := result["text"].(string); ok {
@@ -2871,6 +4148,7 @@ func gabpCallSuccessResult(result map[string]interface{}) *ToolResult {
 		Content:           content,
 		StructuredContent: result,
 		IsError:           false,
+		BridgePassthrough: true,
 	}
 }
 
@@ -3112,10 +4390,8 @@ func (s *Server) ensureGameToolsMirrored(gameID string, timeout time.Duration) e
 		return nil
 	}
 
-	s.mu.RLock()
-	client := s.gabpClients[gameID]
-	s.mu.RUnlock()
-	if client == nil || !client.IsConnected() {
+	client, _ := s.claimBoundClient(gameID)
+	if client == nil {
 		return nil
 	}
 
@@ -3163,12 +4439,16 @@ func (s *Server) getStatusDescriptionFromStatus(status string, gameConfig *confi
 		return "GABP disconnected (the game may have crashed or closed the bridge)"
 	case "stale-runtime-cleaned":
 		return "stopped (stale runtime state was removed)"
+	case process.PhaseStopping:
+		return "stopping (a bounded stop operation is in progress)"
+	case process.PhaseKilling:
+		return "killing (a bounded force-termination operation is in progress)"
 	case "stopped":
 		return "stopped"
 	case "launcher-running":
 		return fmt.Sprintf("launcher active (game may be starting via %s)", gameConfig.LaunchMode)
 	case "launcher-triggered":
-		return fmt.Sprintf("launched via %s (GABS cannot track the game process - no stopProcessName configured)", gameConfig.LaunchMode)
+		return fmt.Sprintf("launched via %s (GABS cannot track the game process - configure stopProcessName or game-level lifecycle hooks)", gameConfig.LaunchMode)
 	default:
 		return status
 	}
@@ -3205,6 +4485,25 @@ func (s *Server) clearGABPDisconnectLocked(gameID string) {
 	delete(s.gabpDisconnects, gameID)
 }
 
+// dispatchGABPDisconnect runs the peer-close handler under Shutdown's join.
+// The shutdownCh check and disconnectWG.Add happen together under s.mu,
+// atomic with Shutdown closing shutdownCh under the same lock, so no handler
+// can start a clearBridgeAttachment write after Shutdown begins waiting —
+// the fix for the disconnect writer racing TempDir teardown.
+func (s *Server) dispatchGABPDisconnect(gameID string, client *gabp.Client, err error) {
+	s.mu.Lock()
+	select {
+	case <-s.shutdownCh:
+		s.mu.Unlock()
+		return
+	default:
+	}
+	s.disconnectWG.Add(1)
+	s.mu.Unlock()
+	defer s.disconnectWG.Done()
+	s.HandleUnexpectedGABPDisconnect(gameID, client, err)
+}
+
 // HandleUnexpectedGABPDisconnect records bridge loss and removes mirrored tools immediately.
 func (s *Server) HandleUnexpectedGABPDisconnect(gameID string, client *gabp.Client, err error) {
 	s.mu.Lock()
@@ -3218,8 +4517,14 @@ func (s *Server) HandleUnexpectedGABPDisconnect(gameID string, client *gabp.Clie
 	resourcesChanged := len(s.gameResources[gameID]) > 0
 	s.clearGameAttentionStateLocked(gameID)
 	s.cleanupGameResourcesInternal(gameID)
+	attachmentRef, hadAttachment := s.takeBridgeAttachmentRefLocked(gameID)
 	s.mu.Unlock()
 
+	if hadAttachment {
+		// A matching disconnect clears the persisted attachment record;
+		// the connection identity fences out stale callbacks (design/06).
+		s.clearBridgeAttachment(gameID, attachmentRef.launchID, attachmentRef.connectionID)
+	}
 	if resourcesChanged {
 		s.SendResourcesListChangedNotification()
 	}
@@ -3227,7 +4532,34 @@ func (s *Server) HandleUnexpectedGABPDisconnect(gameID string, client *gabp.Clie
 	s.log.Warnw("unexpected GABP disconnect", "gameId", gameID, "error", err)
 }
 
-func (s *Server) resolveSharedRuntimeStatus(gameID string) string {
+// resolveClaimStatusByLiveness judges a current-schema claim by the one
+// liveness rule over its pinned context (design/04) — never the legacy
+// PID/name-only resolver, which would delete a hook-only external snapshot
+// as stale without ever running its pinned status hook. unknown never
+// cleans state; absence never clears a completed-unobserved claim.
+func (s *Server) resolveClaimStatusByLiveness(gameID string, claim *process.RuntimeState, gabpLive bool) string {
+	status, _ := s.resolveClaimStatusObserved(gameID, claim, gabpLive)
+	return status
+}
+
+// resolveClaimStatusObserved is resolveClaimStatusByLiveness plus the
+// observation itself: verdict, source, detail, hook facts, and warnings —
+// unknown says what was observed, and contradictions carry their warning
+// (design/04). When a fenced write loses to a successor
+// mid-evaluation, it reloads the CURRENT claim and re-runs the full
+// claim-first evaluation (never maps phase to status) — phase is not
+// liveness evidence and an active successor can itself be stopped or
+// unknown.
+func (s *Server) resolveClaimStatusObserved(gameID string, claim *process.RuntimeState, gabpLive bool) (string, *process.LivenessEvidence) {
+	// The claim-status state machine lives in the shared lifecycle manager
+	// (design/11): both frontends drive ONE implementation. The server supplies
+	// its live-bridge evidence — the initial gabpLive plus the bridgeBound
+	// callback that re-derives it for a claim reloaded after a lost fence; a CLI
+	// passes false + nil.
+	return s.lifecycle().ObserveClaimStatus(gameID, claim, gabpLive, s.bridgeBound(gameID))
+}
+
+func (s *Server) resolveSharedRuntimeStatus(gameID string, gabpLive bool) string {
 	runtimeState, err := process.LoadRuntimeState(gameID, s.configDir)
 	if err != nil {
 		s.log.Warnw("failed to read shared runtime state", "gameId", gameID, "error", err)
@@ -3235,6 +4567,13 @@ func (s *Server) resolveSharedRuntimeStatus(gameID string) string {
 	}
 	if runtimeState == nil {
 		return ""
+	}
+
+	if runtimeState.SchemaVersion >= process.RuntimeSchemaVersion {
+		// checkGameStatus snapshots the in-memory state first and calls
+		// this with s.mu released: evidence probes (status hooks, process
+		// scans) never run under the server mutex.
+		return s.resolveClaimStatusByLiveness(gameID, runtimeState, gabpLive)
 	}
 
 	status := process.ResolveRuntimeStateStatus(runtimeState)
@@ -3252,38 +4591,182 @@ func (s *Server) resolveSharedRuntimeStatus(gameID string) string {
 	return ""
 }
 
-func (s *Server) claimSharedRuntimeState(game config.GameConfig, spec process.LaunchSpec) (process.RuntimeState, error) {
-	state := process.NewRuntimeState(spec, process.RuntimeStateStatusStarting)
-	state.OwnerInstanceID = s.instanceID
+// applyRuntimeSourceGuidance overrides the pre-claim next actions whenever
+// the runtime source is external: such a snapshot has no bridge endpoint, so
+// the generic games_connect recommendation would always answer
+// attachment-unavailable, and only the actions the pinned lifecycle can
+// actually execute may be advertised. Shared by every status surface so the
+// same runtime state never advertises different capabilities per view.
+func applyRuntimeSourceGuidance(item map[string]interface{}, gameID string, rs *process.RuntimeState) {
+	if rs == nil || rs.Source != process.SourceExternal {
+		return
+	}
+	item["source"] = process.SourceExternal
+	// The generic descriptions for a live shared claim suggest games_connect;
+	// for an external snapshot that suggestion is impossible, so the text
+	// surface must agree with the corrected next actions below.
+	if st, _ := item["status"].(string); st == "shared-running" || st == "running" || st == "running-disconnected" {
+		item["statusDescription"] = "running (externally started; observed by ID — status/stop/kill work, attachment is unavailable)"
+	}
+	gameArg := map[string]interface{}{"gameId": gameID}
+	next := []map[string]interface{}{
+		mcpNextAction("games_status", gameArg, "Re-check the externally observed instance."),
+	}
+	if process.ClaimActionSupported(rs, process.OperationActionStop) {
+		next = append(next, mcpNextAction("games_stop", gameArg, "Stop the external instance to free the game."))
+	}
+	if process.ClaimActionSupported(rs, process.OperationActionKill) {
+		next = append(next, mcpNextAction("games_kill", gameArg, "Force-terminate it if a graceful stop fails."))
+	}
+	item["nextActions"] = next
+}
 
-	for attempt := 0; attempt < 2; attempt++ {
-		err := process.ClaimRuntimeState(game.ID, s.configDir, state)
-		if err == nil {
-			return state, nil
-		}
-		if !errors.Is(err, process.ErrRuntimeStateExists) {
-			return process.RuntimeState{}, err
-		}
+// appendWarningsText renders warnings into a textual result so clients that
+// surface only MCP text content — a limitation games_show explicitly accounts
+// for — still see them alongside the primary outcome.
+func appendWarningsText(text string, warnings []string) string {
+	if len(warnings) == 0 {
+		return text
+	}
+	var b strings.Builder
+	b.WriteString(text)
+	b.WriteString("\n\nWarnings:")
+	for _, w := range warnings {
+		b.WriteString("\n  - ")
+		b.WriteString(w)
+	}
+	return b.String()
+}
 
-		existingState, loadErr := process.LoadRuntimeState(game.ID, s.configDir)
-		if loadErr != nil {
-			return process.RuntimeState{}, loadErr
-		}
-		if status := process.ResolveRuntimeStateStatus(existingState); status != "" {
-			return process.RuntimeState{}, &gameAlreadyActiveError{status: status}
-		}
+// addStartAdoption renders the Stage 4 adoption verdict and Stage 2 probe
+// warnings into a start result (design/05): adoption means the injected
+// context may not have survived a launcher re-exec.
+func addStartAdoption(structured map[string]interface{}, message *string, r *process.ProcessStartResult) {
+	if r == nil {
+		return
+	}
+	if r.Adopted {
+		structured["adopted"] = true
+		*message += " Note: the launch was adopted — the direct child exited and the workload was observed by name; injected args/env (including GABS_PROFILE) may not have survived a launcher re-exec. A bridge connection proves the managed environment survived; a verified delivery report proves the full context did."
+	}
+	if len(r.StartWarnings) > 0 {
+		structured["startWarnings"] = r.StartWarnings
+	}
+}
 
-		if removeErr := process.RemoveRuntimeState(game.ID, s.configDir); removeErr != nil {
-			return process.RuntimeState{}, removeErr
+// startRefusalResult renders a Stage 2 refusal with its stable code and
+// per-code next actions.
+func (s *Server) startRefusalResult(game config.GameConfig, e *lifecycle.StartRefusalError, hc historyContext, validationWarnings []string) *ToolResult {
+	ref := e.Refusal
+	structured := map[string]interface{}{
+		"code":   ref.Code,
+		"gameId": game.ID,
+	}
+	// Every failure result carries a causeClass + track record (design/08).
+	// Refusals are pre-accept (no history WRITE) — render only. The
+	// gating-refusal next actions below stay (all state-class, no config
+	// edit); attribution adds the class, track line, and edit notice.
+	cls := process.Classify(ref.Code, process.ClassifyContext{})
+	structured["causeClass"] = cls.Class
+	var entry *process.HistoryEntry
+	if h, herr := process.LoadHistory(game.ID, s.configDir); herr == nil {
+		if en := h.Profiles[hc.Profile]; en != nil && en.ContextHash == hc.ContextHash && hc.ContextHash != "" {
+			entry = en
 		}
-
-		s.log.Infow("removed stale shared runtime state before retrying launch", "gameId", game.ID)
+	}
+	structured["trackRecord"] = process.TrackRecordLine(entry)
+	if hc.ContextHash != "" {
+		if notice := s.editNoticeFor(game.ID, hc); notice != "" {
+			structured["editNotice"] = notice
+		}
+	}
+	if ref.ActiveProfile != "" || ref.Code == process.RefusalAlreadyRunning {
+		structured["activeProfile"] = ref.ActiveProfile
+	}
+	if ref.RequestedProfile != "" {
+		structured["requestedProfile"] = ref.RequestedProfile
+	}
+	if len(ref.Candidates) > 0 {
+		structured["candidates"] = ref.Candidates
+	}
+	if ref.SnapshotPersisted {
+		structured["externalSnapshotPersisted"] = true
+	}
+	if ref.Evidence != nil {
+		structured["evidence"] = map[string]interface{}{
+			"verdict": ref.Evidence.Verdict,
+			"source":  ref.Evidence.Source,
+			"detail":  ref.Evidence.Detail,
+		}
+	}
+	if ref.Phase != "" {
+		structured["phase"] = ref.Phase
+	}
+	if op := ref.Operation; op != nil {
+		structured["operation"] = map[string]interface{}{
+			"action":           op.Action,
+			"attemptStartedAt": op.AttemptStartedAt.Format(time.RFC3339),
+			"deadline":         op.Deadline.Format(time.RFC3339),
+		}
+	}
+	if len(e.Warnings) > 0 {
+		structured["startWarnings"] = e.Warnings
 	}
 
-	return process.RuntimeState{}, fmt.Errorf("failed to claim shared runtime state for %s", game.ID)
+	var next []map[string]interface{}
+	switch ref.Code {
+	case process.RefusalAlreadyRunning:
+		next = append(next,
+			mcpNextAction("games_status", map[string]interface{}{"gameId": game.ID}, "Inspect the active instance."),
+			mcpNextAction("games_stop", map[string]interface{}{"gameId": game.ID}, "Stop it first if the other profile is needed."))
+	case process.RefusalExternalInstance:
+		if ref.SnapshotPersisted {
+			next = append(next,
+				mcpNextAction("games_status", map[string]interface{}{"gameId": game.ID}, "The external instance is tracked by ID."),
+				mcpNextAction("games_stop", map[string]interface{}{"gameId": game.ID}, "Stop the external instance to free the game."))
+		} else if len(ref.Candidates) > 0 {
+			// No claim was persisted, so games_status would rerun no probes
+			// and simply report stopped — a loop, not a resolution. Surface
+			// the candidate evidence; the fix is manual and outside GABS.
+			structured["candidates"] = ref.Candidates
+		}
+	case process.RefusalOperationInFlight:
+		next = append(next, mcpNextAction("games_status", map[string]interface{}{"gameId": game.ID}, "Re-check once the in-flight operation finishes."))
+	case process.RefusalBlockedUnknown:
+		next = append(next, mcpNextAction("games_status", map[string]interface{}{"gameId": game.ID}, "Gather evidence; use repair --forget-runtime only if the instance is provably gone."))
+	}
+	if len(next) > 0 {
+		structured["nextActions"] = next
+	}
+	addValidationWarnings(structured, validationWarnings)
+
+	text := ref.Message
+	if ref.Code == process.RefusalExternalInstance && !ref.SnapshotPersisted && len(ref.Candidates) > 0 {
+		text += "\nResolve manually: stop the surplus instance(s) with OS tools (GABS deliberately tracks none of them), or narrow profiles/stopProcessName so exactly one candidate matches; then start again. games_status will not help here — no claim was persisted, so it reports the game stopped."
+	}
+
+	// already_running and operation_in_progress are informational: the game
+	// is (or is becoming) available, which is what the caller wanted.
+	isError := ref.Code != process.RefusalAlreadyRunning && ref.Code != process.RefusalOperationInFlight
+	return &ToolResult{
+		Content:           []Content{{Type: "text", Text: appendWarningsText(text, e.Warnings)}},
+		IsError:           isError,
+		StructuredContent: structured,
+	}
 }
 
 func (s *Server) cleanupRuntimeStateInternal(gameId string) {
+	// Never remove a claim that still carries pending history credits: those
+	// are reconciled under the transition lock by the status funnel
+	// (RemoveRuntimeStateIfCurrent) and the process deleters, which must not
+	// be acquired here — this runs under s.mu. This legacy/controller cleanup
+	// path does not reach a current-schema pending-event claim, so the
+	// read-only guard is normally a no-op; it makes the removal surface
+	// provably closed rather than argued.
+	if cur, err := process.LoadRuntimeState(gameId, s.configDir); err == nil && cur != nil &&
+		(len(cur.PendingCleanStops) > 0 || len(cur.PendingDeliveries) > 0) {
+		return
+	}
 	if err := process.RemoveRuntimeState(gameId, s.configDir); err != nil {
 		s.log.Warnw("failed to cleanup runtime state", "gameId", gameId, "error", err)
 	}
@@ -3326,25 +4809,59 @@ func (s *Server) adoptProcessBridgeEndpointFromDiagnostic(game config.GameConfig
 	}, true
 }
 
+// errStaleConnectCredential marks a connect refusal where the observed
+// process environment carries a previous launch's credentials — the stable
+// stale_bridge_credential outcome (design/10).
+type errStaleConnectCredential struct {
+	gameID string
+	pid    int
+}
+
+func (e *errStaleConnectCredential) Error() string {
+	return fmt.Sprintf("stale bridge credential: the running process (pid %d) carries bridge credentials from a previous launch of '%s'; it cannot serve this launch's bridge — restart the game to pick up the new environment", e.pid, e.gameID)
+}
+
+// resolveConnectBridgeEndpoint resolves the ONLY credential games_connect
+// may attach with: the current claim's per-launch endpoint (design/03,
+// design/07). Process-environment inspection corroborates that exact
+// credential or exposes a stale one — it never replaces it. bridge.json is
+// never read here: the sole live-attach read of that file is the legacy
+// migration candidate captured under the transition lock during
+// normalization (design/07), which the connect handler passes explicitly.
 func (s *Server) resolveConnectBridgeEndpoint(game config.GameConfig, runtimeState *process.RuntimeState) (bridgeEndpoint, error) {
-	processEnv := s.inspectGameBridgeEnvironment(game, runtimeState)
-	endpoint, _ := s.adoptProcessBridgeEndpointFromDiagnostic(game, processEnv, bridgeEndpoint{})
-	if endpoint.Port > 0 && strings.TrimSpace(endpoint.Token) != "" {
-		return endpoint, nil
+	if runtimeState == nil {
+		return bridgeEndpoint{}, fmt.Errorf("no runtime claim exists for '%s'; nothing is attachable — start the game, or check games_status", game.ID)
+	}
+	if runtimeState.Source == process.SourceExternal {
+		return bridgeEndpoint{}, fmt.Errorf("attachment unavailable: '%s' is an externally started instance and never received this GABS's bridge environment; status/stop/kill remain available", game.ID)
+	}
+	if runtimeState.Endpoint == nil || runtimeState.Endpoint.Port <= 0 || strings.TrimSpace(runtimeState.Endpoint.Token) == "" {
+		return bridgeEndpoint{}, fmt.Errorf("the runtime claim for '%s' carries no attachable endpoint yet; if a start is in flight, re-check games_status", game.ID)
 	}
 
-	if readableProcessEnvLacksAttachableBridgeEndpoint(game, processEnv) {
+	endpoint := bridgeEndpoint{
+		Port:   runtimeState.Endpoint.Port,
+		Token:  runtimeState.Endpoint.Token,
+		Source: "runtime-claim",
+		PID:    runtimeState.GamePID,
+	}
+	processEnv := s.inspectGameBridgeEnvironment(game, runtimeState)
+	switch {
+	case processEnv.Present && processEnv.Port == endpoint.Port && processEnv.Token == endpoint.Token:
+		endpoint.Source = "process-environment"
+		endpoint.PID = processEnv.PID
+	case processEnv.Present && processEnv.Port > 0 && strings.TrimSpace(processEnv.Token) != "":
+		// The workload demonstrably runs with another launch's
+		// credentials: connecting with either credential would be a stale
+		// attach — fail with the stable code instead of a timeout.
+		return bridgeEndpoint{}, &errStaleConnectCredential{gameID: game.ID, pid: processEnv.PID}
+	case readableProcessEnvLacksAttachableBridgeEndpoint(game, processEnv):
+		// The workload's environment is readable and provably lacks the
+		// bridge variables: it never received a GABS environment, so no
+		// dial can succeed — diagnose instead of timing out.
 		return bridgeEndpoint{}, fmt.Errorf("%s", processBridgeEnvironmentMissingMessage(game, processEnv))
 	}
-
-	_, port, token, err := config.ReadBridgeJSON(game.ID, s.configDir)
-	if err != nil {
-		return bridgeEndpoint{}, fmt.Errorf("no readable live process environment and internal bridge endpoint was unavailable: %w", err)
-	}
-	if port <= 0 || strings.TrimSpace(token) == "" {
-		return bridgeEndpoint{}, fmt.Errorf("internal bridge endpoint is incomplete")
-	}
-	return bridgeEndpoint{Port: port, Token: token, Source: "internal-bridge-file"}, nil
+	return endpoint, nil
 }
 
 func (s *Server) attemptStartupGABPConnection(
@@ -3362,7 +4879,7 @@ func (s *Server) attemptStartupGABPConnection(
 		}
 	}
 
-	ctx, cancel := context.WithCancelCause(context.Background())
+	ctx, cancel := context.WithCancelCause(s.shutdownCtx)
 	defer cancel(nil)
 
 	timeoutCtx, timeoutCancel := context.WithTimeoutCause(ctx, timeout,
@@ -3417,11 +4934,12 @@ func (s *Server) continueStartupGABPConnection(
 		return
 	}
 
+	if !s.admitBackgroundTask() {
+		return // shutting down
+	}
 	go func() {
-		s.mu.RLock()
-		existingClient, alreadyConnected := s.gabpClients[game.ID]
-		s.mu.RUnlock()
-		if alreadyConnected && existingClient.IsConnected() {
+		defer s.bgWG.Done()
+		if client, _ := s.claimBoundClient(game.ID); client != nil {
 			return
 		}
 
@@ -3464,42 +4982,85 @@ func controllerLooksAliveForMCP(controller process.ControllerInterface) bool {
 	}
 }
 
-func resolveRuntimeGamePID(game config.GameConfig, controller process.ControllerInterface) int {
-	if controller == nil {
-		return 0
-	}
-	if game.LaunchMode == "SteamAppId" || game.LaunchMode == "EpicAppId" {
-		if game.StopProcessName != "" {
-			pids, err := process.FindProcessesByName(game.StopProcessName)
-			if err == nil && len(pids) > 0 {
-				return pids[0]
-			}
-		}
-		return 0
-	}
-	return controller.GetPID()
+// checkGameStatus snapshots the in-memory state under s.mu, then evaluates
+// evidence — including pinned status hooks that may run for seconds — with
+// the lock released, so concurrent status calls never serialize behind one
+// another's probes (design/10).
+//
+// A current-schema claim is the FIRST status authority (design/04): its
+// pinned context is evaluated through the unified liveness rule before any
+// in-memory shortcut — a live wrapper PID cannot hide a pinned hook's
+// stopped verdict, a lingering client cannot masquerade as evidence, and
+// restart recovery is reachable regardless of controller state. GABP evidence
+// comes only from a credential-bound live client: one this server attached
+// under this claim's launch identity.
+func (s *Server) checkGameStatus(gameID string) string {
+	status, _ := s.checkGameStatusObserved(gameID)
+	return status
 }
 
-func (s *Server) checkGameStatus(gameID string) string {
+// checkGameStatusObserved is checkGameStatus plus the liveness observation
+// backing the verdict, for the status handlers to render (design/04).
+func (s *Server) checkGameStatusObserved(gameID string) (string, *process.LivenessEvidence) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	controller, exists := s.games[gameID]
 	client, clientConnected := s.gabpClients[gameID]
+	attachRef, hasAttachRef := s.bridgeAttachments[gameID]
+	s.mu.Unlock()
+
+	gabpLive := clientConnected && client != nil && client.IsConnected()
+
+	claim, err := process.LoadRuntimeState(gameID, s.configDir)
+	if err != nil {
+		s.log.Warnw("failed to read runtime claim for status", "gameId", gameID, "error", err)
+		return "unknown", nil // uncertainty never cleans state
+	}
+	if claim != nil && claim.SchemaVersion >= process.RuntimeSchemaVersion {
+		boundGABP := gabpLive && hasAttachRef && attachRef.launchID == claim.LaunchID
+		status, ev := s.resolveClaimStatusObserved(gameID, claim, boundGABP)
+		switch status {
+		case process.RuntimeStateStatusRunning:
+			// Preserve the existing rendering vocabulary on top of the
+			// claim verdict.
+			if boundGABP {
+				if exists {
+					return "running", ev
+				}
+				return "connected", ev
+			}
+			if clientConnected && !gabpLive {
+				return "running-disconnected", ev
+			}
+			if exists {
+				return "running", ev
+			}
+			return "shared-running", ev
+		case "stale-runtime-cleaned":
+			// The fenced removal accepted the stopped verdict: release
+			// exactly the in-memory artifacts observed for that launch.
+			s.releaseGameArtifacts(gameID, controller, client)
+			return status, ev
+		default:
+			return status, ev // starting/stopping/killing/unknown
+		}
+	}
+
+	// Legacy flows only from here: no claim, or a pre-profile claim that no
+	// lifecycle touch has normalized yet.
 	if !exists {
 		if clientConnected {
-			if client.IsConnected() {
-				return "connected"
+			if gabpLive {
+				return "connected", nil
 			}
-			return "disconnected"
+			return "disconnected", nil
 		}
-		if status := s.resolveSharedRuntimeStatus(gameID); status != "" {
+		if status := s.resolveSharedRuntimeStatus(gameID, gabpLive); status != "" {
 			if status == process.RuntimeStateStatusRunning {
-				return "shared-running"
+				return "shared-running", nil
 			}
-			return status
+			return status, nil
 		}
-		return "stopped"
+		return "stopped", nil
 	}
 
 	// Simple stateless approach: directly query the system state
@@ -3508,137 +5069,188 @@ func (s *Server) checkGameStatus(gameID string) string {
 	// For Steam/Epic launcher games, check the actual game process
 	if launchMode == "SteamAppId" || launchMode == "EpicAppId" {
 		if controller.IsRunning() {
-			if clientConnected && !client.IsConnected() {
-				return "running-disconnected"
+			if clientConnected && !gabpLive {
+				return "running-disconnected", nil
 			}
-			return "running" // We can track it and it's running
-		} else {
-			// Check if the launcher process is still active
-			if controller.IsLauncherProcessRunning() {
-				return "launcher-running" // Launcher process is still active
-			}
-
-			// Launcher has exited - determine if we have tracking capability
-			game := s.getGameFromController(controller)
-			if game != nil && game.StopProcessName != "" {
-				// We have tracking capability but game is not running
-				s.cleanupStoppedGameLocked(gameID)
-				return "stopped"
-			} else {
-				// We don't have tracking capability, so we can't know the real status
-				return "launcher-triggered" // We started the launcher, but can't track the game
-			}
+			return "running", nil // We can track it and it's running
 		}
+		// Check if the launcher process is still active
+		if controller.IsLauncherProcessRunning() {
+			return "launcher-running", nil // Launcher process is still active
+		}
+
+		game := s.getGameFromController(controller)
+		if game != nil && game.StopProcessName != "" {
+			// We have tracking capability but game is not running
+			s.cleanupStoppedGame(gameID)
+			return "stopped", nil
+		}
+		// We don't have tracking capability, so we can't know the real status
+		return "launcher-triggered", nil // We started the launcher, but can't track the game
 	}
 
 	// For direct processes, check if the process is actually running
 	if controller.IsRunning() {
-		if clientConnected && !client.IsConnected() {
-			return "running-disconnected"
+		if clientConnected && !gabpLive {
+			return "running-disconnected", nil
 		}
-		return "running"
+		return "running", nil
 	}
 
-	// Process is dead, clean up
-	s.cleanupStoppedGameLocked(gameID)
-	return "stopped"
+	// Process is dead, clean up (legacy tracking only — a current-schema
+	// claim never reaches here).
+	s.cleanupStoppedGame(gameID)
+	return "stopped", nil
 }
 
 // cleanupStoppedGameLocked centralizes cleanup when s.mu is already held.
-func (s *Server) cleanupStoppedGameLocked(gameID string) {
+// It returns the popped attachment reference for the caller to clear after
+// releasing s.mu (no transition-lock acquisition under s.mu).
+func (s *Server) cleanupStoppedGameLocked(gameID string) (bridgeAttachmentRef, bool) {
 	// Remove from games map - no need for complex cleanup in stateless approach
 	delete(s.games, gameID)
 
 	// Note: The mutex is already held when this is called from checkGameStatus
 	// So we call internal cleanup methods that don't acquire locks
-	s.cleanupGABPConnectionInternal(gameID)
+	ref, hadRef := s.cleanupGABPConnectionInternal(gameID)
 	s.cleanupGameResourcesInternal(gameID)
 	s.cleanupRuntimeStateInternal(gameID)
 	s.log.Debugw("cleaned up dead game process and resources", "gameId", gameID)
+	return ref, hadRef
 }
 
 func (s *Server) cleanupStoppedGame(gameID string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.cleanupStoppedGameLocked(gameID)
+	ref, hadRef := s.cleanupStoppedGameLocked(gameID)
+	s.mu.Unlock()
+	if hadRef {
+		s.clearBridgeAttachment(gameID, ref.launchID, ref.connectionID)
+	}
 }
 
-// startGame starts a game process using the serialized starter approach
-// This implements @pardeike's requirements for serialized, verified process starting
-func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConfig, backoffMin, backoffMax time.Duration, startupGABPTimeout time.Duration, resetEndpoint bool) (*process.ProcessStartResult, error) {
-	launchSpec := launchSpecFromGame(game)
+func (s *Server) hasLiveGABPClient(gameID string) bool {
+	// GABP evidence requires a claim-bound client: a live
+	// socket alone — possibly belonging to an earlier launch — is never
+	// proof about the CURRENT claim.
+	client, _ := s.claimBoundClient(gameID)
+	return client != nil
+}
 
-	controller := process.NewController()
-	if err := controller.Configure(launchSpec); err != nil {
-		return nil, fmt.Errorf("failed to configure game launcher for '%s' (mode: %s, target: %s): %w",
-			game.ID, game.LaunchMode, game.Target, err)
-	}
-
-	runtimeState, err := s.claimSharedRuntimeState(game, launchSpec)
+func (s *Server) startGame(game config.GameConfig, backoffMin, backoffMax time.Duration, startupGABPTimeout time.Duration, resetEndpoint bool, resolved *launch.Resolved, hc historyContext) (*process.ProcessStartResult, error) {
+	// Stages 1–4 run in the shared lifecycle manager (design/05, design/11).
+	// The server frontend supplies its live-bridge evidence and in-process
+	// registry policy, then continues to Stage 5 (bridge attach) below; a CLI
+	// frontend stops after Stage 4 with started_attachment_deferred.
+	launchSpec := s.launchSpecWithRuntimeDir(launchSpecFromResolved(game, resolved))
+	sr, err := s.lifecycle().Start(lifecycle.StartRequest{
+		Game:                  game,
+		LaunchSpec:            launchSpec,
+		Resolved:              resolved,
+		ResetEndpoint:         resetEndpoint,
+		StartupGABPTimeout:    startupGABPTimeout,
+		StoreReadinessTimeout: startupGABPTimeout,
+		HistoryContext:        hc,
+		BridgeBound:           s.bridgeBound(game.ID),
+		CheckInProcessActive: func() (lifecycle.InProcessFacts, bool) {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if tracked, ok := s.games[game.ID]; ok && tracked != nil && tracked.IsRunning() {
+				// Report the CONTROLLER's facts, not this request's. The PID
+				// is the fingerprint pinned at spawn — never a fresh lookup,
+				// which after a wrapper exit could identify an unrelated
+				// reuse of the number — and it is suppressed entirely once
+				// the direct child is known exited. The stop name is the one
+				// pinned in the controller's launch spec; the current config
+				// may have been hot-edited to a name that does not describe
+				// the old workload.
+				pid, pidStart := tracked.SpawnFingerprint()
+				if tracked.DirectChildExited() {
+					pid, pidStart = 0, 0
+				}
+				return lifecycle.InProcessFacts{
+					Status:          "running",
+					PID:             pid,
+					PIDStartTime:    pidStart,
+					StopProcessName: tracked.GetStopProcessName(),
+				}, true
+			}
+			// Clean up any stale controller reference.
+			delete(s.games, game.ID)
+			return lifecycle.InProcessFacts{}, false
+		},
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	cleanupRuntimeState := true
-	defer func() {
-		if cleanupRuntimeState {
-			s.cleanupRuntimeStateInternal(game.ID)
+	controller := sr.Controller
+	port, token := sr.Port, sr.Token
+	runtimeState := sr.RuntimeState
+	launchID := runtimeState.LaunchID
+	result := sr.Result
+	startWarnings := sr.Warnings
+	totalGABPTimeout := sr.TotalGABPTimeout
+
+	// The Stage-5 death recheck below reuses the Stage-4 liveness rule over the
+	// pinned status hook, and records the exited failure fenced to this launch.
+	var statusHook *launch.ResolvedHook
+	if launchSpec.Lifecycle != nil {
+		statusHook = launchSpec.Lifecycle.Status
+	}
+	assessWorkload := func() process.LivenessEvidence {
+		claim, _ := process.LoadRuntimeState(game.ID, s.configDir)
+		if claim == nil {
+			claim = &runtimeState
 		}
-	}()
-
-	s.mu.Lock()
-	if trackedController, exists := s.games[game.ID]; exists && trackedController != nil && trackedController.IsRunning() {
-		s.mu.Unlock()
-		return nil, &gameAlreadyActiveError{status: "running"}
+		return process.EvaluateLiveness(process.LivenessInput{
+			CallerInstanceID: s.instanceID,
+			Claim:            claim,
+			StatusHook:       statusHook,
+			GameID:           game.ID,
+			Profile:          launchSpec.Profile,
+		})
 	}
-
-	// Clean up any stale controller reference
-	delete(s.games, game.ID)
-	s.mu.Unlock()
-
-	port, token, bridgePath, reusedBridge, err := config.PrepareBridgeEndpointForStart(game.ID, s.configDir, gamesConfig, resetEndpoint)
-	if err != nil {
-		return nil, fmt.Errorf("failed to prepare GABS endpoint cache for game '%s': %w", game.ID, err)
+	exitedFailure := func(ev *process.LivenessEvidence) (*process.ProcessStartResult, error) {
+		hcRec := hc
+		hcRec.LaunchID = launchID
+		s.lifecycle().RecordTerminalStartFailure(game, hcRec, "exited_during_start")
+		hookStopped := ev != nil && ev.Source == process.LivenessSourceStatusHook
+		e := &lifecycle.ExitedDuringStartError{
+			ExitCode:            controller.ExitCode(),
+			Tail:                controller.LaunchLogTail(16 * 1024),
+			Warnings:            startWarnings,
+			HookReportedStopped: hookStopped,
+		}
+		if hookStopped {
+			e.HookEvidence = ev.Detail
+		}
+		return result, e
 	}
-
-	if reusedBridge {
-		s.log.Infow("reusing GABS endpoint cache", "gameId", game.ID, "port", port, "host", "127.0.0.1", "configPath", bridgePath)
-	} else {
-		s.log.Infow("created GABS endpoint cache", "gameId", game.ID, "port", port, "host", "127.0.0.1", "configPath", bridgePath, "resetEndpoint", resetEndpoint)
-	}
-
-	controller.SetBridgeInfo(port, token)
-
-	result := s.starter.StartWithVerificationWithTimeouts(controller, nil, game.ID, port, token, 0, 0)
-	if result.Error != nil {
-		return result, fmt.Errorf("failed to start game '%s' (mode: %s, target: %s): %w",
-			game.ID, game.LaunchMode, game.Target, result.Error)
-	}
-	if !result.GameStillRunning {
-		return result, fmt.Errorf("game '%s' exited during startup", game.ID)
-	}
-
-	runtimeState.Status = process.RuntimeStateStatusRunning
-	runtimeState.GamePID = resolveRuntimeGamePID(game, controller)
-	_, defaultGABPTimeout := s.starter.GetTimeouts()
-	totalGABPTimeout := startupGABPTimeout
-	if totalGABPTimeout <= 0 {
-		totalGABPTimeout = defaultGABPTimeout
-	}
-	runtimeState = process.RefreshRuntimeOwnerLease(runtimeState, os.Getpid(), s.instanceID, s.runtimeOwnerLeaseForOperation(totalGABPTimeout), time.Now().UTC())
-	if err := process.SaveRuntimeState(game.ID, s.configDir, runtimeState); err != nil {
-		s.log.Warnw("failed to persist running runtime state", "gameId", game.ID, "error", err)
-	}
-	cleanupRuntimeState = false
 
 	s.mu.Lock()
 	s.games[game.ID] = controller
 	s.mu.Unlock()
 
-	endpoint := bridgeEndpoint{Port: port, Token: token, Source: "bridge.json"}
-	endpoint, adoptedProcessEnv := s.adoptProcessBridgeEndpoint(game, &runtimeState, endpoint)
-	port = endpoint.Port
-	token = endpoint.Token
+	// The claim's per-launch credential is the ONLY credential this launch
+	// may attach with (design/03). Process-environment inspection can
+	// corroborate it — or expose that the observed workload still carries a
+	// previous launch's environment (an adopted process that never received
+	// this launch's context): that is stale_bridge_credential, surfaced as
+	// a warning, never adopted as an attach credential.
+	endpoint := bridgeEndpoint{Port: port, Token: token, Source: "runtime-claim"}
+	adoptedProcessEnv := false
+	if processEnv := s.inspectGameBridgeEnvironment(game, &runtimeState); processEnv.Present {
+		switch {
+		case processEnv.Port == port && processEnv.Token == token:
+			endpoint.Source = "process-environment"
+			endpoint.PID = processEnv.PID
+		case processEnv.Port > 0 && strings.TrimSpace(processEnv.Token) != "":
+			startWarnings = append(startWarnings, fmt.Sprintf(
+				"stale_bridge_credential: the running workload (pid %d) carries bridge credentials from a previous launch environment; this launch's bridge cannot attach to it — restart the game to pick up the new environment",
+				processEnv.PID))
+			result.StartWarnings = startWarnings
+		}
+	}
 
 	synchronousGABPTimeout := boundedStartupGABPWait(totalGABPTimeout)
 	connector := NewAsyncServerGABPConnector(s, backoffMin, backoffMax)
@@ -3648,12 +5260,38 @@ func (s *Server) startGame(game config.GameConfig, gamesConfig *config.GamesConf
 	result.GABPConnectWait = connectResult.Wait
 	result.GameStillRunning = connectResult.GameStillRunning
 	result.ProcessExitedDuringGABP = connectResult.ProcessExitedDuringGABP
+	// bridgeConnects++ is recorded at credential-bound attachment
+	// publication (recordBridgeAttachment), covering the synchronous,
+	// background, reconnect, and migration paths exactly once — not here.
 
 	if !result.GameStillRunning {
-		if result.GABPConnectError != nil {
-			return result, fmt.Errorf("game '%s' exited during startup before GABP became available: %w", game.ID, result.GABPConnectError)
+		// Stage 5: the workload looks dead while waiting for the bridge —
+		// judged by the pinned liveness rule: proven death fails with exit
+		// evidence and clears the claim; unknown keeps the claim and falls
+		// through as bridge-pending (design/05).
+		ev := assessWorkload()
+		switch ev.Verdict {
+		case process.StatusRunning:
+			result.GameStillRunning = true
+			result.Adopted = result.Adopted || controller.DirectChildExited()
+		case process.StatusStopped:
+			// Record the terminal failure while the claim is still ours, THEN
+			// remove it: the fenced write must see our launchID.
+			res, ferr := exitedFailure(&ev)
+			// The promote transition already cleared our operation, so this
+			// completion makes its own fully fenced decision (design/06):
+			// same launch, still no operation, no removal-blocking
+			// attachment — never the generic operation-fenced defer.
+			if rerr := process.RemoveRuntimeStateIfCurrent(game.ID, s.configDir, s.instanceID, launchID, s.selfConnectionFor(game.ID, launchID)); rerr != nil {
+				if !errors.Is(rerr, process.ErrFencingViolation) {
+					s.log.Warnw("failed to release exited launch claim", "gameId", game.ID, "error", rerr)
+				}
+				result.StartWarnings = append(result.StartWarnings, "the exited launch's claim was superseded or held and was left in place")
+			}
+			return res, ferr
+		default:
+			// unknown never cleans state; status/connect will resolve it
 		}
-		return result, fmt.Errorf("game '%s' exited during startup", game.ID)
 	}
 
 	if !result.GABPConnected {
@@ -3796,14 +5434,26 @@ func (s *Server) syncGABPToolsWithTimeout(client *gabp.Client, gameID string, ti
 					return blocked, nil
 				}
 
+				// Resolve the CURRENT claim-bound client at invocation
+				// time: handlers must never retain the discovery-time
+				// client — a reconnect replaces the connection while the
+				// mirrored tools remain installed.
+				liveClient, _ := s.claimBoundClient(gameID)
+				if liveClient == nil {
+					return &ToolResult{
+						Content: []Content{{Type: "text", Text: fmt.Sprintf("Game '%s' is not connected via GABP. Use games_status to verify whether it is still running, then use games_connect or games_start as appropriate.", gameID)}},
+						IsError: true,
+					}, nil
+				}
+
 				if !shouldBypassAttentionGateForTool(mcpTool, exposedName, toolName) {
-					if blocked := s.enforceAttentionGate(gameID, exposedName, client); blocked != nil {
+					if blocked := s.enforceAttentionGate(gameID, exposedName, liveClient); blocked != nil {
 						return blocked, nil
 					}
 				}
 
 				// Call GABP with original tool name (without game prefix)
-				result, isError, err := client.CallToolWithTimeout(toolName, args, proxyTimeout)
+				result, isError, err := liveClient.CallToolWithTimeout(toolName, args, proxyTimeout)
 				if err != nil {
 					return &ToolResult{
 						Content: []Content{{Type: "text", Text: err.Error()}},
@@ -3908,15 +5558,19 @@ func (s *Server) exposeGABPResources(client *gabp.Client, gameID string) error {
 	return nil
 }
 
+// launchSpecFromGame / launchSpecFromResolved / launchSpecWithRuntimeDir
+// forward to the shared spec builders so both frontends materialize identical
+// launch specs.
 func launchSpecFromGame(game config.GameConfig) process.LaunchSpec {
-	return process.LaunchSpec{
-		GameId:          game.ID,
-		Mode:            game.LaunchMode,
-		PathOrId:        game.Target,
-		Args:            game.Args,
-		WorkingDir:      game.WorkingDir,
-		StopProcessName: game.StopProcessName,
-	}
+	return lifecycle.LaunchSpecFromGame(game)
+}
+
+func (s *Server) launchSpecWithRuntimeDir(spec process.LaunchSpec) process.LaunchSpec {
+	return s.lifecycle().LaunchSpecWithRuntimeDir(spec)
+}
+
+func launchSpecFromResolved(game config.GameConfig, r *launch.Resolved) process.LaunchSpec {
+	return lifecycle.LaunchSpecFromResolved(game, r)
 }
 
 // stopGame stops a game process gracefully or by force
@@ -4133,8 +5787,6 @@ func (s *Server) CleanupGameResources(gameId string) {
 // CleanupGABPConnection closes the GABP connection for a game
 func (s *Server) CleanupGABPConnection(gameId string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	// Clean up GABP client connection
 	if client, exists := s.gabpClients[gameId]; exists {
 		if err := client.Close(); err != nil {
@@ -4143,9 +5795,20 @@ func (s *Server) CleanupGABPConnection(gameId string) {
 		delete(s.gabpClients, gameId)
 		s.log.Debugw("cleaned up GABP client connection", "gameId", gameId)
 	}
+	// Pop the attachment reference under s.mu, but clear the PERSISTED
+	// record only after releasing it — clearBridgeAttachment takes the
+	// per-game transition lock, and holding s.mu across it inverts the
+	// lock order that status/removal paths use (transition lock, then
+	// s.mu via bridgeBound), an ABBA cycle.
+	ref, hadRef := s.takeBridgeAttachmentRefLocked(gameId)
 	s.clearGameAttentionStateLocked(gameId)
 	delete(s.gabpDisconnects, gameId)
 	s.deleteGameToolAliasesLocked(gameId)
+	s.mu.Unlock()
+
+	if hadRef {
+		s.clearBridgeAttachment(gameId, ref.launchID, ref.connectionID)
+	}
 }
 
 // CleanupBridgeConfig removes the bridge configuration file for a game
@@ -4205,8 +5868,12 @@ func (s *Server) cleanupGameResourcesInternal(gameId string) {
 	}
 }
 
-// cleanupGABPConnectionInternal cleans up GABP connection without acquiring mutex
-func (s *Server) cleanupGABPConnectionInternal(gameId string) {
+// cleanupGABPConnectionInternal cleans up GABP connection without acquiring
+// mutex. It returns the popped attachment reference (if any) so the caller
+// clears the PERSISTED record AFTER releasing s.mu — clearBridgeAttachment
+// takes the transition lock, and clearing it under s.mu would invert the
+// lock order.
+func (s *Server) cleanupGABPConnectionInternal(gameId string) (bridgeAttachmentRef, bool) {
 	// Clean up GABP client connection
 	if client, exists := s.gabpClients[gameId]; exists {
 		if err := client.Close(); err != nil {
@@ -4215,8 +5882,10 @@ func (s *Server) cleanupGABPConnectionInternal(gameId string) {
 		delete(s.gabpClients, gameId)
 		s.log.Debugw("cleaned up GABP client connection", "gameId", gameId)
 	}
+	ref, ok := s.takeBridgeAttachmentRefLocked(gameId)
 	s.clearGameAttentionStateLocked(gameId)
 	delete(s.gabpDisconnects, gameId)
+	return ref, ok
 }
 
 // cleanupBridgeConfigInternal removes bridge config without acquiring mutex
@@ -4405,7 +6074,9 @@ func (s *Server) handleToolsCall(msg *Message) *Message {
 		return NewError(msg.ID, -32602, "Invalid params", err.Error())
 	}
 
-	if err := json.Unmarshal(paramsBytes, &params); err != nil {
+	// Numbers must survive the round trip exactly: json.Number marshals as
+	// the original literal, and the re-decode preserves it (design/03).
+	if err := util.UnmarshalPreservingNumbers(paramsBytes, &params); err != nil {
 		return NewError(msg.ID, -32602, "Invalid params", err.Error())
 	}
 
@@ -4424,6 +6095,10 @@ func (s *Server) handleToolsCall(msg *Message) *Message {
 	if err != nil {
 		return NewError(msg.ID, -32603, "Tool execution failed", err.Error())
 	}
+
+	// Central completion: every core-management stable failure carries
+	// causeClass + track record + next actions, filled independently.
+	s.completeFailureAttribution(params.Name, result)
 
 	return NewResponse(msg.ID, result)
 }
@@ -4461,7 +6136,7 @@ func (s *Server) handleResourcesRead(msg *Message) *Message {
 		return NewError(msg.ID, -32602, "Invalid params", err.Error())
 	}
 
-	if err := json.Unmarshal(paramsBytes, &params); err != nil {
+	if err := util.UnmarshalPreservingNumbers(paramsBytes, &params); err != nil {
 		return NewError(msg.ID, -32602, "Invalid params", err.Error())
 	}
 

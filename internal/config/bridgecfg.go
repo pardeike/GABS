@@ -12,10 +12,45 @@ import (
 	"sync"
 )
 
+// The bridge.json read-modify-write for a game must be atomic against a
+// concurrent endpoint rotation — otherwise endpoint preparation (read/reuse/
+// rotate) and the spawn-boundary diagnostics stamp are three separate steps
+// (read, compare, rewrite) that an interleaving rotation can defeat, restoring a
+// superseded launch's token/diagnostics over the successor's rotated endpoint.
+// An earlier fix used a process-local sync.Map of mutexes, which
+// cannot serialize a superseded GABS process against a successor GABS process:
+// endpoint rotation and the async stamp run OUTSIDE any held transition lock
+// (GateStart releases its lock internally, see withBridgeLock), so the fence
+// MUST cross process boundaries. The dedicated cross-process bridge.lock
+// (withBridgeLock) is held across the whole read-compare-write.
+
+// bridgeStampAfterReadHook is a test-only barrier fired inside
+// StampBridgeDiagnostics after the read, while the bridge lock is held.
+var bridgeStampAfterReadHook func()
+
 type BridgeJSON struct {
 	Port   int    `json:"port"`
 	Token  string `json:"token"`
 	GameId string `json:"gameId"`
+	// Diagnostic-only fields (design/03 §"Files are diagnostic, never live
+	// handoff"): the selected profile, the config revision the launch was
+	// resolved from, and the launch start time — for doctor output only.
+	// The live bridge contract stays env-only; nothing reads these to make a
+	// liveness, attach, or attribution decision.
+	Profile        string `json:"profile,omitempty"`
+	ConfigRevision string `json:"configRevision,omitempty"`
+	// StartedAt is the binding key name (design/20-implementation-map.md:235),
+	// RFC3339. Diagnostic-only.
+	StartedAt string `json:"startedAt,omitempty"`
+}
+
+// BridgeDiagnostics carries the diagnostic-only fields stamped into
+// bridge.json at spawn (design/03, design/20). A zero value stamps nothing —
+// the non-start writers (Ensure/WriteBridgeJSON, all test-only) pass it.
+type BridgeDiagnostics struct {
+	Profile        string
+	ConfigRevision string
+	StartedAt      string
 }
 
 type BridgeEndpointInUseError struct {
@@ -84,7 +119,33 @@ func EnsureBridgeJSONWithConfig(gameID, configDir string, gamesConfig *GamesConf
 	return port, token, path, false, nil
 }
 
+// PrepareBridgeEndpointForStart allocates or reuses the endpoint (port +
+// per-launch token) at endpoint-preparation time. It writes NO diagnostic
+// fields — those are stamped later, at the spawn boundary, by
+// StampBridgeDiagnostics (design/20: "written at spawn"). Rewriting with an
+// empty BridgeDiagnostics also CLEARS any stale diagnostics a reused file
+// carried, so a pre-spawn failure never leaves a profile/revision/startedAt
+// for a process that was never spawned.
 func PrepareBridgeEndpointForStart(gameID, configDir string, gamesConfig *GamesConfig, resetEndpoint bool) (int, string, string, bool, error) {
+	// Hold the cross-process bridge lock across the entire read/reuse/rotate so
+	// a concurrent stamp or preparation — in this process or a successor GABS
+	// process — cannot interleave and restore a superseded endpoint.
+	// A business error (e.g. port-in-use) is returned verbatim via opErr,
+	// not the lock error, so callers still see the exact endpoint diagnostics.
+	var port int
+	var token, path string
+	var reused bool
+	var opErr error
+	if lerr := withBridgeLock(configDir, gameID, func() error {
+		port, token, path, reused, opErr = prepareBridgeEndpointForStartLocked(gameID, configDir, gamesConfig, resetEndpoint)
+		return nil
+	}); lerr != nil {
+		return 0, "", "", false, lerr
+	}
+	return port, token, path, reused, opErr
+}
+
+func prepareBridgeEndpointForStartLocked(gameID, configDir string, gamesConfig *GamesConfig, resetEndpoint bool) (int, string, string, bool, error) {
 	if resetEndpoint {
 		port, token, path, err := WriteBridgeJSONWithConfig(gameID, configDir, gamesConfig)
 		return port, token, path, false, err
@@ -108,7 +169,19 @@ func PrepareBridgeEndpointForStart(gameID, configDir string, gamesConfig *GamesC
 				ConfigPath: cfgPath,
 			}
 		}
-		return bridge.Port, bridge.Token, cfgPath, true, nil
+		// The port may be reused; the token is per-launch and always
+		// rotates, so a superseded process's credentials can never attach
+		// to a newer claim (design/03). Writing with no diagnostics clears
+		// the previous launch's stale profile/revision until the spawn
+		// boundary restamps this launch's values.
+		token, err := generateToken()
+		if err != nil {
+			return 0, "", "", false, fmt.Errorf("failed to generate token: %w", err)
+		}
+		if _, err := WriteBridgeJSONWithEndpoint(gameID, configDir, bridge.Port, token); err != nil {
+			return 0, "", "", false, err
+		}
+		return bridge.Port, token, cfgPath, true, nil
 	}
 
 	port, token, path, err := WriteBridgeJSONWithConfig(gameID, configDir, gamesConfig)
@@ -118,7 +191,56 @@ func PrepareBridgeEndpointForStart(gameID, configDir string, gamesConfig *GamesC
 	return port, token, path, false, nil
 }
 
-// WriteBridgeJSONWithEndpoint writes a specific bridge endpoint atomically.
+// StampBridgeDiagnostics rewrites bridge.json with the diagnostic-only fields
+// (profile, configRevision, startedAt) at the spawn boundary (design/20),
+// preserving the endpoint (port/token) written at preparation time. It is
+// FENCED to this launch's endpoint generation: it refuses to
+// stamp unless bridge.json still carries the expected port AND token, so a
+// launch whose claim/endpoint was superseded between spawn and stamp can never
+// write its profile/revision onto the successor's rotated token. Returns
+// ErrBridgeEndpointRotated in that case; a missing file returns its read error.
+// Diagnostics never influence a read decision.
+func StampBridgeDiagnostics(gameID, configDir string, expectedPort int, expectedToken string, diag BridgeDiagnostics) error {
+	// The read → compare → rewrite must be atomic with respect to any endpoint
+	// rotation — in this process OR a successor GABS process — or a successor's
+	// token published between the read and the write would be overwritten by
+	// this stale launch. The cross-process bridge lock provides
+	// that fence.
+	return withBridgeLock(configDir, gameID, func() error {
+		cp, err := NewConfigPaths(configDir)
+		if err != nil {
+			return fmt.Errorf("failed to create config paths: %w", err)
+		}
+		cfgPath := cp.GetBridgeConfigPath(gameID)
+		bridge, err := readBridgeJSONFile(cfgPath)
+		if err != nil {
+			return err
+		}
+		// Test barrier: a hook fired after the read (still under the lock) lets
+		// a deterministic test attempt a rotation and prove it CANNOT land until
+		// the stamp completes.
+		if bridgeStampAfterReadHook != nil {
+			bridgeStampAfterReadHook()
+		}
+		if bridge.Port != expectedPort || bridge.Token != expectedToken {
+			return ErrBridgeEndpointRotated
+		}
+		bridge.Profile = diag.Profile
+		bridge.ConfigRevision = diag.ConfigRevision
+		bridge.StartedAt = diag.StartedAt
+		return writeBridgeJSONFile(cfgPath, bridge)
+	})
+}
+
+// ErrBridgeEndpointRotated reports that bridge.json no longer carries the
+// launch's endpoint (a successor rotated the token), so its diagnostics must
+// not be stamped.
+var ErrBridgeEndpointRotated = fmt.Errorf("bridge endpoint rotated; refusing to stamp stale diagnostics")
+
+// WriteBridgeJSONWithEndpoint writes a specific bridge endpoint atomically,
+// with NO diagnostic fields — the endpoint (port/token) is the only thing the
+// env-only live contract needs. Diagnostics are stamped separately at spawn
+// (StampBridgeDiagnostics).
 func WriteBridgeJSONWithEndpoint(gameID, configDir string, port int, token string) (string, error) {
 	if port <= 0 || port > 65535 {
 		return "", fmt.Errorf("invalid bridge port %d", port)

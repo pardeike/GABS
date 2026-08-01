@@ -58,7 +58,7 @@ func TestGameStopFix(t *testing.T) {
 	}
 
 	logger := util.NewLogger("info")
-	server := NewServerForTesting(logger)
+	server := NewServerForTesting(t, logger)
 	server.RegisterGameManagementTools(loadedConfig, 0, 0)
 
 	t.Run("DirectGameStopWorksCorrectly", func(t *testing.T) {
@@ -149,10 +149,12 @@ func TestGameStopFix(t *testing.T) {
 		}
 
 		// Should contain warning about missing configuration OR indicate process not tracked
-		if strings.Contains(responseStr, "Configure 'stopProcessName'") {
+		if strings.Contains(responseStr, "Configure 'stopProcessName'") || strings.Contains(responseStr, "'stopProcessName'") {
 			t.Log("✓ Shows proper stopProcessName configuration warning")
 		} else if strings.Contains(responseStr, "no process tracked") {
 			t.Log("✓ Shows that process is not tracked (equivalent message)")
+		} else if strings.Contains(responseStr, "stop_unsupported") {
+			t.Log("✓ stop_unsupported with configuration guidance (design/06)")
 		} else {
 			t.Error("Should warn about missing stopProcessName configuration or indicate no tracking")
 		}
@@ -213,9 +215,15 @@ func TestGameStopFix(t *testing.T) {
 			t.Log("✓ Steam game status shows expected limitation message")
 		} else if strings.Contains(responseStr, "stopped") {
 			t.Log("✓ Steam game status shows stopped (acceptable with stateless approach)")
+		} else if strings.Contains(responseStr, "starting") {
+			// An unresolved URL launch keeps its claim in phase starting
+			// (the unobserved policy, design/05): absence of evidence is
+			// not stopped, and only positive observation, supersession, or
+			// repair resolves it.
+			t.Log("✓ Steam game status shows the unresolved launch as starting (unobserved claim kept)")
 		} else {
 			t.Logf("Got status: %s", responseStr)
-			t.Error("Steam game status should show launcher active, tracking limitation, or stopped")
+			t.Error("Steam game status should show launcher active, tracking limitation, starting, or stopped")
 		}
 	})
 
@@ -310,7 +318,7 @@ func TestGameStopFix(t *testing.T) {
 			},
 		}
 
-		serverWithTracking := NewServerForTesting(logger)
+		serverWithTracking := NewServerForTesting(t, logger)
 		serverWithTracking.RegisterGameManagementTools(gamesConfigWithProcessName, 0, 0)
 
 		// Start the game
@@ -403,7 +411,7 @@ func TestStopUntrackedGameUsesStopProcessName(t *testing.T) {
 	}
 
 	logger := util.NewLogger("info")
-	server := NewServerForTesting(logger)
+	server := NewServerForTesting(t, logger)
 	game := config.GameConfig{
 		ID:              "untracked-steam-game",
 		Name:            "Untracked Steam Game",
@@ -431,7 +439,7 @@ func TestStopUntrackedGameUsesStopProcessName(t *testing.T) {
 // TestImprovedStatusReporting verifies the enhanced status descriptions
 func TestImprovedStatusReporting(t *testing.T) {
 	logger := util.NewLogger("info")
-	server := NewServerForTesting(logger)
+	server := NewServerForTesting(t, logger)
 
 	// Test the status description logic by checking actual behavior
 	// rather than trying to mock internal state

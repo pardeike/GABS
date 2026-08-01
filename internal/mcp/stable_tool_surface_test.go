@@ -12,7 +12,7 @@ import (
 
 func TestToolsListHidesTrackedGameToolsButKeepsDiscoveryAndCalls(t *testing.T) {
 	logger := util.NewLogger("error")
-	server := NewServerForTesting(logger)
+	server := NewServerForTesting(t, logger)
 
 	gamesConfig := &config.GamesConfig{}
 	if err := gamesConfig.AddGame(config.GameConfig{

@@ -4,8 +4,10 @@
 *.dll
 *.so
 *.dylib
-gabs
-gabs-*
+# Root build binaries only — anchored so the cmd/gabs source directory (and any
+# other path component named "gabs") is NOT ignored.
+/gabs
+/gabs-*
 !skills/
 !skills/gabs-mcp/
 !skills/gabs-mcp/**

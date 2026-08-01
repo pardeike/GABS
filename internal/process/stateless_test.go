@@ -2,6 +2,7 @@ package process
 
 import (
 	"context"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +26,7 @@ func (successfulTestConnector) AttemptConnection(ctx context.Context, gameID str
 
 // TestControllerStateless verifies the controller is truly stateless
 func TestControllerStateless(t *testing.T) {
+	skipWithoutUnixTools(t)
 	t.Run("DirectProcessStatelessCheck", func(t *testing.T) {
 		controller := NewController().(*Controller)
 
@@ -104,6 +106,7 @@ func TestControllerStateless(t *testing.T) {
 
 // TestStatelessApproach demonstrates the stateless approach
 func TestStatelessApproach(t *testing.T) {
+	skipWithoutUnixTools(t)
 	t.Log("=== Demonstrating Stateless Approach ===")
 
 	t.Log("NEW APPROACH: Simple stateless queries")
@@ -132,6 +135,7 @@ func TestStatelessApproach(t *testing.T) {
 }
 
 func TestSerializedStarterReturnsPromptlyAfterGABPConnects(t *testing.T) {
+	skipWithoutUnixTools(t)
 	starter := NewSerializedStarter()
 	starter.SetTimeouts(2*time.Second, 5*time.Second)
 
@@ -167,6 +171,7 @@ func TestSerializedStarterReturnsPromptlyAfterGABPConnects(t *testing.T) {
 }
 
 func TestSerializedStarterUsesPerCallGABPTimeoutOverride(t *testing.T) {
+	skipWithoutUnixTools(t)
 	starter := NewSerializedStarter()
 	starter.SetTimeouts(2*time.Second, 5*time.Second)
 
@@ -208,6 +213,7 @@ func TestSerializedStarterUsesPerCallGABPTimeoutOverride(t *testing.T) {
 }
 
 func TestSerializedStarterStopsWaitingWhenProcessExitsDuringGABPConnect(t *testing.T) {
+	skipWithoutUnixTools(t)
 	starter := NewSerializedStarter()
 	starter.SetTimeouts(2*time.Second, 10*time.Second)
 
@@ -259,5 +265,15 @@ func TestSerializedStarterDefaultTimeouts(t *testing.T) {
 	}
 	if gabpConnectTimeout != 60*time.Second {
 		t.Fatalf("expected default GABP connect timeout 60s, got %v", gabpConnectTimeout)
+	}
+}
+
+// skipWithoutUnixTools gates tests that spawn unix binaries (/bin/sleep,
+// /bin/sh); the Windows CI lane runs the portable and Windows-specific
+// cells instead.
+func skipWithoutUnixTools(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("test spawns unix binaries")
 	}
 }

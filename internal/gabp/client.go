@@ -26,6 +26,8 @@ type Client struct {
 	reader         *util.LSPFrameReader
 	token          string
 	agentId        string
+	authenticated  bool
+	observed       *ObservedContext
 	capabilities   Capabilities
 	pendingReqs    map[string]chan *util.GABPMessage
 	mu             sync.RWMutex
@@ -194,11 +196,77 @@ func (c *Client) handshakeWithTimeout(timeout time.Duration) error {
 		return fmt.Errorf("failed to parse welcome: %w", err)
 	}
 
+	agentID, methodCount, haveReport := c.publishWelcome(welcome, result)
+	c.log.Infow("GABP handshake complete", "agentId", agentID, "methods", methodCount, "deliveryReport", haveReport)
+	return nil
+}
+
+// publishWelcome commits the handshake result in ONE locked step and returns the
+// log fields captured atomically. authenticated and the raw observed environment
+// values are teardown-sensitive: markDisconnected (fired once via disconnectOnce)
+// clears them and they must "never outlive the connection". If the peer sent
+// welcome and immediately closed, that teardown can run BEFORE this publish;
+// restoring authenticated/observed here would strand post-teardown state no
+// later Close can clear. So they are set ONLY while still connected.
+// agentId/capabilities are not cleared on disconnect, so they publish
+// unconditionally. Reading the log fields inside the lock keeps c.observed from
+// being read without it.
+func (c *Client) publishWelcome(welcome SessionWelcomeResult, result interface{}) (agentID string, methodCount int, haveReport bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.agentId = welcome.AgentID
 	c.capabilities = welcome.Capabilities
+	if c.connected {
+		c.observed = parseObservedContext(result)
+		c.authenticated = true
+	}
+	return c.agentId, len(c.capabilities.Methods), c.observed != nil
+}
 
-	c.log.Infow("GABP handshake complete", "agentId", c.agentId, "methods", len(c.capabilities.Methods))
-	return nil
+// ObservedContext is the optional, backward-compatible welcome-time
+// delivery report in the binding wire shape (design/20):
+// observed: {argv, cwd, envValues: {name: value}, envAbsent: [name]}.
+// A name in envValues was observed with that value; a name in envAbsent
+// was checked and is absent; a name in neither list was not reported.
+// GABS hashes locally, compares, and discards — the raw values never
+// persist.
+type ObservedContext struct {
+	Argv      []string          `json:"argv,omitempty"`
+	Cwd       string            `json:"cwd,omitempty"`
+	EnvValues map[string]string `json:"envValues,omitempty"`
+	EnvAbsent []string          `json:"envAbsent,omitempty"`
+}
+
+// parseObservedContext extracts the optional `observed` field from the raw
+// welcome result. Older bridges omit it entirely — nil, never an empty
+// report (the aggregation matrix distinguishes the two, design/03).
+func parseObservedContext(result interface{}) *ObservedContext {
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	raw, exists := resultMap["observed"]
+	if !exists || raw == nil {
+		return nil
+	}
+	var obs ObservedContext
+	if err := mapToStruct(raw, &obs); err != nil {
+		return nil
+	}
+	return &obs
+}
+
+// TakeObservedContext atomically removes and returns the welcome-time
+// delivery report (nil when the bridge reported none, or when it was
+// already consumed). The design promise is hash-compare-DISCARD: the raw
+// observed values — which can include sensitive configured env values —
+// must not stay reachable for the connection lifetime.
+func (c *Client) TakeObservedContext() *ObservedContext {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	obs := c.observed
+	c.observed = nil
+	return obs
 }
 
 func timeoutFromContextOrDefault(ctx context.Context, fallback time.Duration) time.Duration {
@@ -221,9 +289,13 @@ func timeoutFromContextOrDefault(ctx context.Context, fallback time.Duration) ti
 
 func (c *Client) messageHandler() {
 	var loopErr error
-	defer c.markDisconnected(loopErr, true)
+	defer func() {
+		_ = c.markDisconnected(loopErr, true)
+	}()
 
-	for c.IsConnected() {
+	// The read loop runs on the TRANSPORT flag: it must serve the
+	// handshake itself, before the client counts as authenticated.
+	for c.transportUp() {
 		data, err := c.reader.ReadMessage()
 		if err != nil {
 			if !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.EOF) {
@@ -315,14 +387,27 @@ func (c *Client) sendRequestWithTimeout(method string, params interface{}, timeo
 	// Wait for response
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
-
-	select {
-	case resp := <-respCh:
+	responseResult := func(resp *util.GABPMessage) (interface{}, error) {
 		if resp.Error != nil {
 			return nil, fmt.Errorf("GABP error %d: %s", resp.Error.Code, resp.Error.Message)
 		}
 		return resp.Result, nil
+	}
+
+	select {
+	case resp := <-respCh:
+		return responseResult(resp)
 	case <-disconnected:
+		// messageHandler delivers each complete response before it can observe
+		// the following EOF. If both signals are ready, select may choose the
+		// disconnect arbitrarily; preserve the response already received from
+		// the peer rather than converting a successful final reply into a
+		// connection error.
+		select {
+		case resp := <-respCh:
+			return responseResult(resp)
+		default:
+		}
 		return nil, c.connectionUnavailableError()
 	case <-timer.C:
 		return nil, fmt.Errorf("request timeout after %s", timeout)
@@ -520,8 +605,17 @@ func (c *Client) GetCapabilities() Capabilities {
 	return c.capabilities
 }
 
-// IsConnected reports whether the underlying GABP transport is still active.
+// IsConnected reports a usable connection: the transport is up AND the
+// session handshake authenticated. A dialed-but-unauthenticated client is
+// never "connected" to consumers — internal request
+// plumbing uses the transport flag directly.
 func (c *Client) IsConnected() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.connected && c.authenticated
+}
+
+func (c *Client) transportUp() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.connected
@@ -590,6 +684,8 @@ func (c *Client) markDisconnected(err error, notify bool) error {
 	c.disconnectOnce.Do(func() {
 		c.mu.Lock()
 		c.connected = false
+		c.authenticated = false
+		c.observed = nil // raw observed values never outlive the connection
 		c.disconnectErr = disconnectErr
 		callback = c.onDisconnect
 		conn := c.conn

@@ -83,6 +83,22 @@ concurrent profiles ✗ (separate IDs; reserved extension).
 
 ## Decisions and rejected alternatives (do not re-add)
 
+- **`exited_during_start` cause class: no launch-mode heuristic, no
+  classification-only config flag.** A post-spawn exit is `game` by the
+  evidence-based default (05-start-pipeline.md §"Why exited_during_start is
+  always game"). GABS observes only the first process it creates and cannot
+  distinguish a game binary from a user-owned wrapper/container launcher.
+  Two signals were considered and **rejected**: (1) a launch-mode heuristic
+  (`CustomCommand`/`SteamManaged` → environment) would misclassify the common
+  case — a real game crash under those modes — as an environment problem,
+  sending agents to "fix the environment" for a game-side bug; false
+  attribution is worse than the honest default. (2) A classification-only
+  config flag (`launchKind: container`) would push a cause GABS cannot observe
+  onto the user to declare, and would drift the moment the same command is
+  reused for a non-container target. The wrapper's own stderr — which says what
+  actually failed — is preserved in `outputTail`, and the guidance tells the
+  caller to read it. (An OS process-**creation** failure stays `spawn_failed` /
+  environment.)
 - **No public operation IDs, journal, or background operation model.**
   Operations are bounded by configured hook timeouts plus the verify
   window; progress is observable via the persisted `phase`, and the
@@ -126,8 +142,14 @@ concurrent profiles ✗ (separate IDs; reserved extension).
   where it has no legacy blast radius.
 - **No new MCP tools** (`reload_config`, `doctor`, `recover` rejected);
   value folded into existing results, the CLI, or automatic behavior.
-- **No start auto-retry and no launcher-UI automation.** GABS reports
-  evidence and next actions; the operator (or agent) decides.
+- **No workload auto-retry and no launcher-UI automation.** GABS reports
+  evidence and next actions; the operator (or agent) decides whether to make
+  another game-start attempt. The macOS SteamManaged pre-spawn readiness gate
+  is not a workload retry: one accepted start operation may open Steam once and
+  poll its low-level client, prove a process-local Steamworks API init for the
+  declared App ID, query read-only app state, and shut the API down, until the
+  caller's bounded readiness deadline. It never creates a workload
+  process before the app-specific proof.
 - **Required `defaultProfile`** eliminates the `profile_required` error
   path; the "explicit profile always" mode was considered again and
   rejected — callers wanting that discipline pass a profile explicitly.

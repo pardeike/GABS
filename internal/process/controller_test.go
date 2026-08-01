@@ -1,6 +1,7 @@
 package process
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -208,6 +209,7 @@ func TestSteamClientStartHelper(t *testing.T) {
 }
 
 func TestLauncherWaitForProcessStartUsesStopProcessName(t *testing.T) {
+	skipWithoutUnixTools(t)
 	controller := &Controller{}
 	spec := LaunchSpec{
 		GameId:          "steam-test",
@@ -223,18 +225,15 @@ func TestLauncherWaitForProcessStartUsesStopProcessName(t *testing.T) {
 	controller.waitDone = make(chan struct{})
 	close(controller.waitDone)
 
-	originalFinder := findProcessesByNameFunc
 	findCalls := 0
-	findProcessesByNameFunc = func(name string) ([]int, error) {
+	restoreFinder := SetFindProcessesByNameContextForTesting(func(ctx context.Context, name string) ([]int, error) {
 		findCalls++
 		if name != spec.StopProcessName {
 			t.Fatalf("expected lookup for %q, got %q", spec.StopProcessName, name)
 		}
 		return []int{1234}, nil
-	}
-	t.Cleanup(func() {
-		findProcessesByNameFunc = originalFinder
 	})
+	t.Cleanup(restoreFinder)
 
 	if err := controller.WaitForProcessStart(2 * time.Second); err != nil {
 		t.Fatalf("WaitForProcessStart failed: %v", err)
@@ -291,7 +290,7 @@ func TestFindProcessesByNameMatchesLinuxLongExecutableBasename(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		pids, err := findProcessesByName(processName)
+		pids, err := findProcessesByName(context.Background(), processName)
 		if err != nil {
 			t.Fatalf("findProcessesByName failed: %v", err)
 		}

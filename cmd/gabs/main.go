@@ -9,8 +9,10 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -21,6 +23,7 @@ import (
 
 	"github.com/pardeike/gabs/internal/config"
 	"github.com/pardeike/gabs/internal/mcp"
+	"github.com/pardeike/gabs/internal/process"
 	"github.com/pardeike/gabs/internal/steam"
 	"github.com/pardeike/gabs/internal/util"
 	"github.com/pardeike/gabs/internal/version"
@@ -46,6 +49,10 @@ type options struct {
 }
 
 func main() {
+	if handled, exitCode := steam.RunReadinessProbeChild(os.Args[1:], os.Stdout); handled {
+		os.Exit(exitCode)
+	}
+
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	if len(os.Args) < 2 {
@@ -96,7 +103,17 @@ func main() {
 		grace        = fs.Duration("grace", 3*time.Second, "Graceful stop timeout before kill")
 	)
 
-	if err := fs.Parse(remainingArgs); err != nil {
+	// Hoist process-wide flags out of the argument vector first: the flag
+	// package stops at the first positional, so a flag written after the
+	// subcommand (`gabs games list --configDir /path`) would otherwise be
+	// silently ignored and run against the default config directory.
+	globalArgs, subcmdArgs, hoistErr := hoistGlobalFlags(remainingArgs)
+	if hoistErr != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", hoistErr)
+		os.Exit(2)
+	}
+
+	if err := fs.Parse(globalArgs); err != nil {
 		os.Exit(2)
 	}
 
@@ -149,7 +166,7 @@ func main() {
 	case "server":
 		exitCode = runServer(ctx, log, opts)
 	case "games":
-		exitCode = manageGames(ctx, log, opts, fs.Args())
+		exitCode = manageGames(ctx, log, opts, subcmdArgs)
 	case "version":
 		fmt.Printf("%s %s (%s)\n", "gabs", version.Get(), version.GetCommit())
 		return
@@ -193,6 +210,10 @@ Game management:
   gabs games show <id>          Show details for a game
   gabs games doctor <id>        Diagnose one game configuration
   gabs games repair <id>        Apply safe repairs for one game configuration
+  gabs games start <id>         Launch a game (attachment deferred to games_connect)
+  gabs games status [<id>]      Show runtime status from the persisted claim
+  gabs games stop <id>          Stop a running game
+  gabs games kill <id>          Force terminate a running game
 
 Examples:
   # Start GABS MCP server (stdio)
@@ -217,23 +238,86 @@ API Key Configuration:
   HTTP authentication. Clients must include: Authorization: Bearer your-secret-key
 
 Once the server is running, use MCP tools to manage games:
-  games.list        List configured game IDs (simplified for AI)
-  games.status      Check status of specific games
-  games.start       Start a game
-  games.stop        Gracefully stop a game  
-  games.kill        Force terminate a game
+  games_list        List configured game IDs (simplified for AI)
+  games_status      Check status of specific games
+  games_start       Start a game
+  games_stop        Gracefully stop a game
+  games_kill        Force terminate a game
 `, version.Get(), defaultBackoff)
 }
 
 // === Server Command ===
 
+// configuredMCPServer is the production lifecycle surface runServer owns. The
+// narrow interface keeps exit orchestration independently testable: main calls
+// os.Exit immediately after runServer, so cleanup must complete here rather
+// than relying on deferred work above main.
+type configuredMCPServer interface {
+	ServeStdio(context.Context) error
+	ServeHTTP(context.Context, string) error
+	Shutdown()
+}
+
+// serveConfiguredMCP runs the selected transport and closes the MCP/GABP
+// runtime on every exit path. HTTP observes ctx and performs its own graceful
+// net/http shutdown, so cancellation waits for that serving goroutine. Stdio's
+// reader can be blocked in an OS stdin read that context cancellation cannot
+// interrupt; after Server.Shutdown has joined all owned background work, the
+// process may return without waiting for that reader goroutine (main exits next).
+func serveConfiguredMCP(ctx context.Context, log util.Logger, opts options, server configuredMCPServer) int {
+	errCh := make(chan error, 1)
+	go func() {
+		if opts.transport == "stdio" || (opts.transport == "" && opts.httpAddr == "") {
+			log.Infow("starting MCP server", "transport", "stdio")
+			errCh <- server.ServeStdio(ctx)
+			return
+		}
+		log.Infow("starting MCP server", "transport", "http", "addr", opts.httpAddr)
+		errCh <- server.ServeHTTP(ctx, opts.httpAddr)
+	}()
+
+	select {
+	case <-ctx.Done():
+		log.Infow("shutdown signal received")
+		server.Shutdown()
+		if opts.transport == "http" {
+			// ServeHTTP owns the listener and request drain. Its context path is
+			// bounded by the transport's graceful-shutdown timeout.
+			if err := <-errCh; err != nil {
+				log.Errorw("server graceful shutdown failed", "error", err)
+				return 1
+			}
+		}
+		return 0
+	case err := <-errCh:
+		server.Shutdown()
+		if err != nil {
+			log.Errorw("server exited with error", "error", err)
+			return 1
+		}
+		return 0
+	}
+}
+
 func runServer(ctx context.Context, log util.Logger, opts options) int {
-	// Load games configuration
-	gamesConfig, err := config.LoadGamesConfigFromDir(opts.configDir)
+	// One load: the seeded store's initial snapshot IS the validated
+	// startup configuration (design/09 — startup with an invalid config
+	// fails; no empty-config fallback that would drop an apiKey).
+	cp, err := config.NewConfigPaths(opts.configDir)
 	if err != nil {
-		log.Errorw("failed to load games config", "error", err)
+		log.Errorw("failed to resolve config path", "error", err)
 		return 1
 	}
+	store, snap, cfgErr := config.NewSeededStore(cp.GetMainConfigPath())
+	if snap == nil {
+		log.Errorw("failed to load games config", "error", cfgErr)
+		return 1
+	}
+	if cfgErr != nil {
+		log.Errorw("failed to load games config", "error", cfgErr)
+		return 1
+	}
+	gamesConfig := snap.Config
 
 	log.Debugw("starting per-session GABS server", "transport", opts.transport, "configDir", opts.configDir)
 	log.Infow("loaded games configuration", "gameCount", len(gamesConfig.Games))
@@ -248,32 +332,15 @@ func runServer(ctx context.Context, log util.Logger, opts options) int {
 		log.Infow("API key authentication enabled for HTTP server")
 	}
 
-	// Register game management tools
+	// Register game management tools (startup-only settings come from the
+	// initial load; per-call config comes from the hot-reload store below)
 	server.RegisterGameManagementTools(gamesConfig, opts.backoffMin, opts.backoffMax)
 
-	// Start serving MCP according to transport
-	errCh := make(chan error, 1)
-	go func() {
-		if opts.transport == "stdio" || (opts.transport == "" && opts.httpAddr == "") {
-			log.Infow("starting MCP server", "transport", "stdio")
-			errCh <- server.ServeStdio(ctx)
-		} else {
-			log.Infow("starting MCP server", "transport", "http", "addr", opts.httpAddr)
-			errCh <- server.ServeHTTP(ctx, opts.httpAddr)
-		}
-	}()
+	// Hot config reload: handlers fetch a fresh snapshot per call; the
+	// store already holds the validated startup snapshot as last-known-good.
+	server.SetConfigStore(store)
 
-	select {
-	case <-ctx.Done():
-		log.Infow("shutdown signal received")
-		return 0
-	case err := <-errCh:
-		if err != nil {
-			log.Errorw("server exited with error", "error", err)
-			return 1
-		}
-		return 0
-	}
+	return serveConfiguredMCP(ctx, log, opts, server)
 }
 
 // === Games Configuration Management ===
@@ -285,7 +352,52 @@ func manageGames(ctx context.Context, log util.Logger, opts options, args []stri
 		return 2
 	}
 
-	action := args[0]
+	// A literal "--" ends flag interpretation: every later token is a
+	// positional, so a canonical dash-prefixed game ID (e.g. "-dash") stays
+	// addressable by every action. The marker is removed before dispatch —
+	// actions read fixed argument indexes.
+	tokens := args
+	var escaped []string
+	for i, a := range tokens {
+		if a == "--" {
+			escaped = append([]string{}, tokens[i+1:]...)
+			tokens = tokens[:i]
+			break
+		}
+	}
+	if len(tokens) == 0 {
+		// The "--" preceded even the action; an action name is an operand,
+		// so take it from the escaped tokens (`gabs games -- stop -dash`).
+		if len(escaped) == 0 {
+			fmt.Fprintf(os.Stderr, "Please specify what you'd like to do with games.\n\n")
+			showGamesUsage()
+			return 2
+		}
+		tokens, escaped = escaped[:1], escaped[1:]
+	}
+	action := tokens[0]
+	rest := tokens[1:]
+
+	// Reject positionals beyond the action's arity. Actions read a fixed index
+	// and previously ignored the remainder, so a misplaced token disappeared
+	// without a word.
+	if err := checkNoTrailingArgs(action, rest, escaped, trailingAllowanceFor(action)); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 2
+	}
+	if trailingAllowanceFor(action) < 0 && len(escaped) > 1 {
+		// Self-parsing actions read exactly one positional (the game ID) and
+		// then flags. Every token after "--" is a positional, so surplus
+		// escaped tokens must never fall back into the flag parser — a
+		// re-interpreted "--forget-runtime" would follow the destructive path.
+		fmt.Fprintf(os.Stderr, "games %s takes only the game ID after \"--\"; place flags before it (unexpected: %s)\n",
+			action, strings.Join(escaped[1:], " "))
+		return 2
+	}
+	// Escaped tokens are positionals: they fill the positional slots FIRST so
+	// an action's own flag parser, which reads everything after the game ID,
+	// can never re-interpret them as options.
+	args = append(append([]string{action}, escaped...), rest...)
 
 	switch action {
 	case "list":
@@ -313,13 +425,67 @@ func manageGames(ctx context.Context, log util.Logger, opts options, args []stri
 			fmt.Fprintf(os.Stderr, "games doctor requires a game ID\n")
 			return 2
 		}
-		return doctorGame(log, args[1], opts.configDir)
+		showLastGood := false
+		for _, a := range args[2:] {
+			switch a {
+			case "--show-last-good":
+				showLastGood = true
+			default:
+				fmt.Fprintf(os.Stderr, "unknown doctor flag: %s\n", a)
+				return 2
+			}
+		}
+		return runDoctor(log, args[1], opts.configDir, showLastGood)
 	case "repair":
 		if len(args) < 2 {
 			fmt.Fprintf(os.Stderr, "games repair requires a game ID\n")
 			return 2
 		}
+		forgetRuntime, assumeYes := false, false
+		for _, a := range args[2:] {
+			switch a {
+			case "--forget-runtime":
+				forgetRuntime = true
+			case "--yes", "-y":
+				assumeYes = true
+			default:
+				fmt.Fprintf(os.Stderr, "unknown repair flag: %s\n", a)
+				return 2
+			}
+		}
+		if forgetRuntime {
+			return forgetRuntimeClaim(args[1], opts.configDir, assumeYes, os.Stdin, os.Stdout)
+		}
 		return repairGame(log, args[1], opts.configDir)
+	case "start":
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "games start requires a game ID\n")
+			return 2
+		}
+		profile, rawInputs, perr := parseStartFlags(args[2:])
+		if perr != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", perr)
+			return 2
+		}
+		return startGameCLI(log, args[1], opts.configDir, profile, rawInputs)
+	case "status":
+		id := ""
+		if len(args) >= 2 {
+			id = args[1]
+		}
+		return statusGameCLI(log, id, opts.configDir)
+	case "stop":
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "games stop requires a game ID\n")
+			return 2
+		}
+		return stopGameCLI(log, args[1], opts.configDir, process.OperationActionStop)
+	case "kill":
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "games kill requires a game ID\n")
+			return 2
+		}
+		return stopGameCLI(log, args[1], opts.configDir, process.OperationActionKill)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown games action: %s\n", action)
 		return 2
@@ -499,7 +665,7 @@ func showGame(log util.Logger, gameID string, configDir string) int {
 		fmt.Printf("  Working Directory: %s\n", game.WorkingDir)
 	}
 	if len(game.Args) > 0 {
-		fmt.Printf("  Arguments: %s\n", strings.Join(game.Args, " "))
+		fmt.Printf("  %s: %s\n", config.ArgumentsLabel(*game), strings.Join(game.Args, " "))
 	}
 	if game.StopProcessName != "" {
 		fmt.Printf("  Stop Process Name: %s\n", game.StopProcessName)
@@ -510,79 +676,106 @@ func showGame(log util.Logger, gameID string, configDir string) int {
 	if game.Description != "" {
 		fmt.Printf("  Description: %s\n", game.Description)
 	}
+	// The CLI renders the same launch-context text as games_show so the two
+	// frontends agree on what is discoverable.
+	fmt.Print(config.DescribeLaunchContexts(*game))
 
 	return 0
 }
 
-func doctorGame(log util.Logger, gameID string, configDir string) int {
-	gamesConfig, err := config.LoadGamesConfigFromDir(configDir)
+// forgetRuntimeClaim is the `repair <id> --forget-runtime` escape hatch
+// (design/07:99): it prints the claim's evidence and removes it after
+// confirmation, WITHOUT verifying the process is gone — the human is the gate.
+// It operates on the claim, not config, so a game already edited out of config
+// (and a corrupt/unreadable claim) is still forgettable. It is CLI-only (no MCP
+// tool can forget state, design/07:100). Removal takes the cross-process
+// transition lock but deliberately bypasses liveness/fencing and does NOT
+// reconcile pending history credits — forget exists precisely to clear a claim
+// that fenced removal will not, and a corrupt claim cannot be reconciled.
+func forgetRuntimeClaim(gameID, configDir string, assumeYes bool, in io.Reader, out io.Writer) int {
+	// Read the exact bytes ONCE: the evidence shown and the identity confirmed
+	// are the same bytes, so a successor published mid-prompt cannot be deleted
+	// unseen.
+	data, digest, found, err := process.ReadRuntimeClaim(gameID, configDir)
 	if err != nil {
-		log.Errorw("failed to load games config", "error", err)
+		fmt.Fprintf(out, "Cannot access a runtime claim for '%s': %v\n", gameID, err)
 		return 1
 	}
-
-	game, exists := gamesConfig.GetGame(gameID)
-	if !exists {
-		fmt.Printf("Game '%s' not found.\n", gameID)
-		return 1
+	if !found {
+		fmt.Fprintf(out, "No runtime claim for '%s'; nothing to forget.\n", gameID)
+		return 0
 	}
 
-	fmt.Printf("Game: %s\n", game.ID)
-	fmt.Printf("Launch Mode: %s\n", game.LaunchMode)
-	if game.Target != "" {
-		fmt.Printf("Target: %s\n", game.Target)
-	}
-
-	if err := game.Validate(); err != nil {
-		fmt.Printf("Configuration: invalid (%v)\n", err)
+	claim, parseErr := process.ParseRuntimeClaim(data)
+	fmt.Fprintf(out, "Runtime claim for '%s':\n", gameID)
+	if parseErr != nil || claim == nil {
+		fmt.Fprintf(out, "  (unreadable/corrupt claim: %v)\n", parseErr)
 	} else {
-		fmt.Println("Configuration: valid")
+		fmt.Fprintf(out, "  phase:       %s\n", claim.Phase)
+		fmt.Fprintf(out, "  status:      %s\n", claim.Status)
+		fmt.Fprintf(out, "  launchID:    %s\n", claim.LaunchID)
+		if claim.GamePID > 0 {
+			fmt.Fprintf(out, "  workloadPID: %d\n", claim.GamePID)
+		}
+		if claim.Attachment != nil && claim.Attachment.OwnerPID > 0 {
+			fmt.Fprintf(out, "  ownerPID:    %d\n", claim.Attachment.OwnerPID)
+		}
+		if op := claim.Operation; op != nil {
+			fmt.Fprintf(out, "  operation:   %s (in progress)\n", op.Action)
+		}
+	}
+	fmt.Fprintf(out, "\nForgetting removes the claim WITHOUT verifying the process is gone.\n")
+	fmt.Fprintf(out, "Only do this if the launch is provably gone.\n")
+
+	reader := bufio.NewReader(in)
+	if !assumeYes {
+		fmt.Fprintf(out, "Forget this runtime claim? [y/N] ")
+		if !readYes(reader) {
+			fmt.Fprintf(out, "Aborted; the runtime claim was not removed.\n")
+			return 1
+		}
 	}
 
-	switch game.LaunchMode {
-	case "SteamAppId":
-		fmt.Println("Steam launch: launcher URL mode")
-		fmt.Println("Bridge environment: not guaranteed on the real game process")
-		app, err := steam.ResolveApp(game.Target)
-		if err != nil {
-			fmt.Printf("Managed Steam readiness: failed (%v)\n", err)
-			return 1
-		}
-		printSteamAppResolution(app)
-		fmt.Printf("Recommended repair: gabs games repair %s\n", game.ID)
-	case "SteamManaged":
-		fmt.Println("Steam launch: managed executable mode")
-		app, err := steam.ResolveApp(game.Target)
-		if err != nil {
-			fmt.Printf("Managed Steam readiness: failed (%v)\n", err)
-			return 1
-		}
-		printSteamAppResolution(app)
-		ok, content, err := steam.CheckAppIDFile(app)
-		if err != nil {
-			fmt.Printf("Steam app id file: unreadable (%v)\n", err)
-			return 1
-		}
-		if ok {
-			fmt.Printf("Steam app id file: ready (%s)\n", app.AppIDFilePath)
-		} else if content == "" {
-			fmt.Printf("Steam app id file: missing (%s)\n", app.AppIDFilePath)
-			fmt.Printf("Recommended repair: gabs games repair %s\n", game.ID)
-		} else {
-			fmt.Printf("Steam app id file: wrong id %q at %s\n", content, app.AppIDFilePath)
-			return 1
-		}
-	default:
-		if game.Target != "" {
-			if _, err := os.Stat(game.Target); err != nil {
-				fmt.Printf("Target path: not found (%v)\n", err)
+	// The primitive takes the transition lock, verifies the digest still matches,
+	// and reconciles pending credits before removal.
+	err = process.ForceForgetRuntimeClaim(gameID, configDir, digest, false)
+	switch {
+	case err == nil:
+		fmt.Fprintf(out, "Removed the runtime claim for '%s'.\n", gameID)
+		return 0
+	case errors.Is(err, process.ErrForgetClaimChanged):
+		fmt.Fprintf(out, "The runtime claim changed since its evidence was shown (a new launch was published). Re-run to review the current claim.\n")
+		return 1
+	case errors.Is(err, process.ErrForgetPendingUnreconciled), errors.Is(err, process.ErrForgetCorruptClaim):
+		fmt.Fprintf(out, "\nWARNING: %v.\n", err)
+		fmt.Fprintf(out, "Removing now DISCARDS any pending history credits (clean stops / verified deliveries) for this claim.\n")
+		if !assumeYes {
+			fmt.Fprintf(out, "Discard pending credits and remove anyway? [y/N] ")
+			if !readYes(reader) {
+				fmt.Fprintf(out, "Aborted; the runtime claim was not removed.\n")
 				return 1
 			}
-			fmt.Println("Target path: found")
 		}
+		if derr := process.ForceForgetRuntimeClaim(gameID, configDir, digest, true); derr != nil {
+			if errors.Is(derr, process.ErrForgetClaimChanged) {
+				fmt.Fprintf(out, "The runtime claim changed again; re-run to review it.\n")
+				return 1
+			}
+			fmt.Fprintf(out, "Failed to remove the runtime claim for '%s': %v\n", gameID, derr)
+			return 1
+		}
+		fmt.Fprintf(out, "Removed the runtime claim for '%s' (pending credits discarded).\n", gameID)
+		return 0
+	default:
+		fmt.Fprintf(out, "Failed to remove the runtime claim for '%s': %v\n", gameID, err)
+		return 1
 	}
+}
 
-	return 0
+func readYes(r *bufio.Reader) bool {
+	line, _ := r.ReadString('\n')
+	resp := strings.ToLower(strings.TrimSpace(line))
+	return resp == "y" || resp == "yes"
 }
 
 func repairGame(log util.Logger, gameID string, configDir string) int {
@@ -639,8 +832,19 @@ func showGamesUsage() {
   gabs games add <id>           Add a new game configuration (interactive)
   gabs games remove <id>        Remove a game configuration
   gabs games show <id>          Show details for a game
-  gabs games doctor <id>        Diagnose one game configuration
+  gabs games doctor <id> [--show-last-good]
+                                Diagnose one game (profile-aware): config +
+                                launch target, resolved hooks + conflation
+                                lint, broadly-readable-file warnings, and the
+                                full track record; --show-last-good prints the
+                                last-known-good context for an edited game
   gabs games repair <id>        Apply safe repairs for one game configuration
+  gabs games start <id> [--profile NAME] [--input NAME=VALUE]...
+                                Launch a game and verify it started; attachment
+                                is deferred to a later server games_connect
+  gabs games status [<id>]      Show runtime status from the persisted claim
+  gabs games stop <id>          Stop a running game via its stop mechanism
+  gabs games kill <id>          Force terminate a running game
 
 Examples:
   gabs games list               # See game IDs only (AI-friendly)
@@ -649,6 +853,9 @@ Examples:
   gabs games doctor factory   # Diagnose launch configuration
   gabs games repair factory   # Apply safe launch repairs
   gabs games remove factory   # Remove the 'factory' configuration
+  gabs games start factory --profile fast --input seed=42
+  gabs games status factory   # Is it running?
+  gabs games stop factory     # Stop it
 `)
 }
 

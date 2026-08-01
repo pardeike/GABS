@@ -100,14 +100,46 @@ OS process creation — never for resolvability.
   claim is released. The fully resolved spec is also checked against
   platform argv/env-block size limits here — a structured error naming the
   oversized part beats an opaque `E2BIG` at exec.
-- Store-launcher advisory: for Steam modes, if no Steam client process is
-  observable, the result carries a warning ("Steam does not appear to be
-  running; the launch may stall at login/startup or the game may relaunch
-  itself through Steam"). Advisory only — `steam://` starts Steam itself,
-  so this must not block. Any pre-start store-client assistance GABS
-  performs (such as the existing ensure-Steam-is-running step for
-  SteamManaged) is best-effort and bounded: its failure becomes this
-  warning, never a start failure.
+- Store-client readiness is launch-mode and platform specific. URL modes keep
+  the process-presence advisory because `steam://` starts the client itself.
+  SteamManaged on macOS is stricter: before the direct executable spawn, GABS
+  must prove that the installed Steam client library can create an IPC pipe,
+  connect a global user, complete a process-local Steamworks API initialization
+  for the explicit App ID, and through that initialized API observe the
+  configured app as both subscribed and installed. A running
+  `steam_osx` process or connected global user alone is not proof — both can
+  exist before Steam has loaded the user's app/library state, which makes a
+  direct game process start without usable Steam identity and breaks
+  integrations that depend on Steam. GABS probes immediately, asks macOS to
+  open Steam once when needed, then retries fresh probes until the independent
+  caller readiness deadline. Each native probe runs in a short-lived hidden
+  GABS child so a client-library hang, assertion, or crash cannot take down the
+  lifecycle owner. It uses Steam's installed `steamclient.dylib`, passes the
+  declared `SteamManaged` target to the helper as explicit non-secret probe
+  data, sets the helper's process-local App-ID variables from that validated
+  value before loading Steam libraries, calls the low-level client interface,
+  and performs `SteamAPI_InitFlat`, read-only app-state queries, then
+  `SteamAPI_Shutdown` using Steam's bundled API library. It
+  never derives identity from ambient App-ID variables, launches the workload,
+  or requires online/logged-on state. The game is not spawned until this
+  app-specific initialization proof succeeds.
+
+  A readiness timeout returns `store_client_not_ready` with
+  `reason: readiness_timeout`, the furthest readiness stage, elapsed/deadline
+  evidence, `retryable: true`, and `processStarted: false`. If no probe ever
+  loads and invokes the required client interface, the same code uses
+  `reason: probe_unavailable` and `retryable: false`. Both are
+  `causeClass: environment`, release the fresh preflight claim, create no
+  unobserved runtime, and do not mutate launch history because no workload was
+  attempted. On success the operation/process-start deadline is restamped
+  under the original fencing identity with a fresh normal Stage 3/4 budget.
+  The completed readiness proof is authoritative for the readiness timeout:
+  the restamp does not reject the same fenced operation merely because
+  transition/persistence overhead carries wall-clock time past the old
+  readiness deadline. A successor that changed the launch or operation
+  identity first still wins and cannot be overwritten. `timeout` therefore
+  caps readiness independently, then retains its existing full GABP-wait
+  meaning. Windows/Linux SteamManaged behavior is unchanged.
 
 ## Stage 3 — Spawn
 
@@ -163,7 +195,17 @@ Outcomes:
   `exited_during_start` with exit code and output tail; claim released.
   Typical causes surfaced in the hint: crash, missing/corrupt data or
   save, mod loader failure, DRM refusing to start outside its launcher,
-  anti-cheat rejecting a modified process, online login required.
+  anti-cheat rejecting a modified process, online login required. **Cause
+  class is `game` by the evidence-based default** (08-track-record.md): a
+  process GABS created and then observed exit is attributed to the workload.
+  GABS observes only the *first* process it creates and cannot reliably tell
+  a game binary from a user-owned wrapper/container launcher, so a
+  post-spawn exit is never re-attributed to the environment on the basis of
+  launch mode, target shape, or the status hook — none of those is cause
+  evidence. The wrapper/container stderr that would say *what* failed is
+  preserved verbatim in `outputTail`; the guidance tells the caller to read
+  it. (An OS **process-creation** failure — the child never started — is a
+  different outcome, `spawn_failed`, and stays `environment`.)
 - **Unobserved** — nothing observable when the budget expires (mostly URL
   modes: wrong app ID, game not installed, store updating the game first,
   a login/EULA dialog waiting on the desktop). Outcome `unobserved`: the
@@ -182,7 +224,10 @@ Outcomes:
   background poller.
 - **Stopped by hook** — status hook definitively reports stopped after
   spawn (e.g. container exited immediately): treated as
-  exited-during-start, with hook evidence plus captured output.
+  exited-during-start, with hook evidence plus captured output. The hook is
+  **liveness** evidence, not **cause** evidence, so this stays `game` by the
+  evidence-based default — the caller reads the captured output to see what
+  the wrapper reported.
 
 ## Stage 5 — Bridge attach
 
@@ -210,11 +255,36 @@ Existing `timeout`/`resetEndpoint` semantics preserved. Outcomes:
 | Claim exists, evidence unclear | hook unknown/timeout | `blocked_unknown_state` + evidence | state | check hook/stderr; `repair --forget-runtime` if truly stale |
 | Lost claim, workload alive | pre-start probes (all profiles) | `external_instance_detected` + external snapshot | state | stop it by ID — the snapshot enables it |
 | Executable broken (arch, deps, Gatekeeper) | spawn error | `spawn_failed` + OS error | environment | fix binary/permissions |
-| Crash / bad save / mod failure | early exit | `exited_during_start` + exit code + output tail | game | read output; fix game state |
+| Crash / bad save / add-on failure | early exit | `exited_during_start` + exit code + output tail | game | read output; fix game state |
 | Anti-cheat kills modified process | early exit or no bridge | `exited_during_start` / `started_bridge_pending` | game | hint lists anti-cheat as cause |
-| Steam not running (SteamManaged) | advisory + adoption/exit | warning; then normal outcomes | environment | start Steam; see adoption note |
+| Steam not functionally ready (macOS SteamManaged) | installed client-library pipe/global-user/app-state/API-init probe | `store_client_not_ready`, no process spawned | environment | retry the same start (optionally with a longer timeout); investigate Steam only if the non-timeout failure persists |
 | Steam re-exec drops context | adoption, delivery not verified | `adopted` warning, `started_bridge_pending` | environment | `steam_appid.txt`, Steam launch options, or wrapper |
 | Steam/Epic updating or dialog (URL modes) | nothing observable | `unobserved`, claim kept `starting` | environment | check desktop; re-check status |
 | Wrong app ID / not installed | nothing observable | `unobserved` | config; environment when proven | verify target in store |
-| Online server down | runs, no bridge or exits | `started_bridge_pending` / `exited_during_start` | environment | game-side issue; evidence attached |
-| Container image missing / name conflict | wrapper exits fast | `exited_during_start` + wrapper stderr | environment | stderr says exactly what |
+| Online server down | runs, no bridge or exits | `started_bridge_pending` / `exited_during_start` | pending / `game` on exit | game-side issue; read output tail |
+| Container image missing / name conflict | wrapper exits fast | `exited_during_start` + wrapper stderr in `outputTail` | `game` (evidence-based default) | stderr in output tail says exactly what; GABS cannot tell a wrapper exit from a game crash |
+
+### Why `exited_during_start` is always `game`, not a launch-mode guess
+
+A post-spawn `exited_during_start` is classified `game` whenever no stronger
+producer evidence exists, and no such evidence exists at the process boundary
+GABS controls. GABS observes only the *first* process it creates; it cannot
+reliably distinguish a game binary from a user-owned wrapper or container
+launcher, and neither the launch **mode** (`CustomCommand`, `SteamManaged`),
+the **target** shape, nor a **status-hook** "stopped" result is cause evidence
+— a `SteamManaged` or `CustomCommand` game that genuinely crashes exits exactly
+like a wrapper that failed. Two tempting signals were **rejected**:
+
+- A **launch-mode heuristic** (`CustomCommand`/`SteamManaged` → environment)
+  would misclassify the common case — a real game crash under those modes — as
+  an environment problem, sending agents to "fix the environment" for a bug
+  that is game-side. False attribution is worse than the honest default.
+- A **classification-only config flag** (e.g. `launchKind: container`) would
+  push a cause GABS cannot observe onto the user to declare, and drift from
+  reality the moment the same command is reused for a non-container target.
+
+The honest contract is the evidence-based default: attribute the exit to the
+workload, and surface the wrapper/container's own stderr verbatim in
+`outputTail` so the caller can read what actually failed. An OS
+process-**creation** failure — where the child never ran — is a distinct
+outcome (`spawn_failed`, `environment`) and is unaffected.

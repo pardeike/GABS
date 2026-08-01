@@ -8,7 +8,9 @@ offending path, and the sorted allowed names.
   (values boolean/string/integer; the handler validates names, types,
   constraints, and applicability against the pinned snapshot). Existing
   `gameId`, `timeout`, `resetEndpoint` keep their meaning; `timeout`
-  validated 1–3600. Results carry: outcome (per the start pipeline),
+  validated 1–3600. For macOS SteamManaged starts the same value also caps
+  a separate, pre-spawn Steam readiness wait; after readiness succeeds the
+  full existing GABP wait begins. Results carry: outcome (per the start pipeline),
   `activeProfile`, applied input names (never values), `adopted` and
   `contextDelivery` when applicable, warnings, evidence (exit code /
   output tail where relevant), `causeClass` plus a one-line track record
@@ -41,7 +43,7 @@ offending path, and the sorted allowed names.
 `launch_spec_unresolvable`, `profiles_not_configured`,
 `profile_not_found`, `launch_input_not_declared`, `launch_input_invalid`,
 `launch_mode_incompatible`, `already_running`, `blocked_unknown_state`,
-`external_instance_detected`, `spawn_failed`, `exited_during_start`,
+`external_instance_detected`, `store_client_not_ready`, `spawn_failed`, `exited_during_start`,
 `unobserved`, `started_bridge_pending`, `started_connected`,
 `operation_in_progress`, `kill_unsupported`, `stop_unsupported`,
 `termination_unverified`, `stale_bridge_credential`,

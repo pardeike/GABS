@@ -92,7 +92,13 @@ Examples of `stopProcessName`:
 - Java-based FactorySim setups: `java`
 
 For Steam bridge games, prefer `SteamManaged`; it resolves the Steam app
-manifest to the installed executable and starts Steam if needed. Still verify
+manifest to the installed executable and starts Steam if needed. On macOS it
+also waits until Steam's IPC/global-user interface reports the configured app
+both subscribed and installed and a process-local Steamworks API initialization
+succeeds before spawning the game. If `games_start`
+returns `store_client_not_ready`, no game
+process was created: repeat the same call after Steam settles; only
+`readiness_timeout` is expected to benefit from a larger `timeout`. Still verify
 `games_status`: if it reports `process-bridge-environment-missing`, the final
 game process did not inherit the bridge environment and the config should use
 `DirectPath` or `CustomCommand`. For launcher URL modes such as `SteamAppId`
@@ -248,7 +254,7 @@ active lease is idle. To override an actively owned game immediately, use:
 }
 ```
 
-with `games.connect`.
+with `games_connect`.
 
 ## Where GABS Stores Files
 

@@ -380,8 +380,179 @@ func TestCallToolFailsFastWhenConnectionDrops(t *testing.T) {
 	if !strings.Contains(err.Error(), "connection unavailable") {
 		t.Fatalf("expected disconnect error, got: %v", err)
 	}
+	if !strings.Contains(err.Error(), "failed to read message") {
+		t.Fatalf("expected the transport read failure to be preserved, got: %v", err)
+	}
 
 	if err := <-serverDone; err != nil {
 		t.Fatalf("server goroutine failed: %v", err)
+	}
+}
+
+// waitForDisconnectAfterWriteConn makes the response and disconnect signals
+// ready before sendRequestWithTimeout starts waiting. That deterministically
+// exercises the case where a bridge writes its final response and then closes.
+type waitForDisconnectAfterWriteConn struct {
+	net.Conn
+	disconnected <-chan struct{}
+}
+
+func (c *waitForDisconnectAfterWriteConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	if err == nil {
+		<-c.disconnected
+	}
+	return n, err
+}
+
+func TestSendRequestReturnsFinalResponseBeforePeerClose(t *testing.T) {
+	for attempt := 0; attempt < 32; attempt++ {
+		log := util.NewLogger("error")
+		client := NewClient(log)
+		clientConn, serverConn := net.Pipe()
+		blockingConn := &waitForDisconnectAfterWriteConn{
+			Conn:         clientConn,
+			disconnected: client.disconnected,
+		}
+		client.conn = blockingConn
+		client.writer = util.NewLSPFrameWriter(blockingConn)
+		client.reader = util.NewLSPFrameReader(blockingConn)
+		client.connected = true
+
+		serverDone := make(chan error, 1)
+		go func() {
+			defer serverConn.Close()
+			reader := util.NewLSPFrameReader(serverConn)
+			writer := util.NewLSPFrameWriter(serverConn)
+
+			data, err := reader.ReadMessage()
+			if err != nil {
+				serverDone <- err
+				return
+			}
+			var request util.GABPMessage
+			if err := json.Unmarshal(data, &request); err != nil {
+				serverDone <- err
+				return
+			}
+			serverDone <- writer.WriteJSON(util.NewGABPResponse(request.ID, map[string]interface{}{
+				"message": "pong",
+			}))
+		}()
+
+		go client.messageHandler()
+		result, err := client.sendRequestWithTimeout("tools/call", map[string]interface{}{}, time.Second)
+		if err != nil {
+			t.Fatalf("attempt %d: expected the final response, got %v", attempt, err)
+		}
+		if resultMap, ok := result.(map[string]interface{}); !ok || resultMap["message"] != "pong" {
+			t.Fatalf("attempt %d: unexpected response: %#v", attempt, result)
+		}
+		if err := <-serverDone; err != nil {
+			t.Fatalf("attempt %d: server failed: %v", attempt, err)
+		}
+		_ = client.Close()
+	}
+}
+
+func TestParseObservedContextBindingWireShape(t *testing.T) {
+	// The binding wire shape (design/20): envValues/envAbsent, decoded
+	// from literal welcome JSON exactly as a conforming bridge sends it.
+	raw := `{"agentId":"g","schemaVersion":"1.0","observed":{"argv":["bin","-x"],"cwd":"/data","envValues":{"CONTENT_SET":"combat"},"envAbsent":["DEBUG_OVERLAY"]}}`
+	var result map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		t.Fatal(err)
+	}
+	obs := parseObservedContext(result)
+	if obs == nil {
+		t.Fatal("a conforming observed object must decode")
+	}
+	if len(obs.Argv) != 2 || obs.Cwd != "/data" {
+		t.Fatalf("argv/cwd wrong: %+v", obs)
+	}
+	if obs.EnvValues["CONTENT_SET"] != "combat" {
+		t.Fatalf("envValues must decode from the binding name: %+v", obs)
+	}
+	if len(obs.EnvAbsent) != 1 || obs.EnvAbsent[0] != "DEBUG_OVERLAY" {
+		t.Fatalf("envAbsent must decode from the binding name: %+v", obs)
+	}
+
+	// Non-binding field names decode to nothing: their channels stay
+	// unreported (unknown), never silently accepted.
+	rawWrong := `{"agentId":"g","observed":{"env":{"A":"1"},"absent":["B"]}}`
+	var resultWrong map[string]interface{}
+	if err := json.Unmarshal([]byte(rawWrong), &resultWrong); err != nil {
+		t.Fatal(err)
+	}
+	obsWrong := parseObservedContext(resultWrong)
+	if obsWrong == nil {
+		t.Fatal("the object itself still decodes")
+	}
+	if obsWrong.EnvValues != nil || obsWrong.EnvAbsent != nil {
+		t.Fatalf("non-binding names must not populate the report: %+v", obsWrong)
+	}
+}
+
+// Finding 4 (round 6): if the peer sends welcome and immediately closes,
+// markDisconnected can run BEFORE the welcome is published. The publish must NOT
+// restore the teardown-sensitive fields (authenticated + the raw observed
+// environment values) — they "never outlive the connection" and disconnectOnce
+// would prevent a later Close from re-clearing them.
+func TestPublishWelcomeDoesNotRestoreStateAfterTeardown(t *testing.T) {
+	c := NewClient(util.NewLogger("error"))
+	// Simulate markDisconnected having already torn the client down.
+	c.mu.Lock()
+	c.connected = false
+	c.authenticated = false
+	c.observed = nil
+	c.mu.Unlock()
+
+	result := map[string]interface{}{
+		"observed": map[string]interface{}{
+			"cwd":       "/secret",
+			"envValues": map[string]interface{}{"TOKEN": "leaked"},
+		},
+	}
+	welcome := SessionWelcomeResult{AgentID: "a", Capabilities: Capabilities{Methods: []string{"tools/list"}}}
+	agentID, _, haveReport := c.publishWelcome(welcome, result)
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.authenticated {
+		t.Fatal("authenticated must NOT be restored after teardown")
+	}
+	if c.observed != nil {
+		t.Fatal("raw observed values must NOT be restored after teardown")
+	}
+	if haveReport {
+		t.Fatal("the captured log field must reflect the un-restored (nil) observed")
+	}
+	// agentId/capabilities are not teardown-sensitive and may still publish.
+	if agentID != "a" || len(c.capabilities.Methods) != 1 {
+		t.Fatalf("non-sensitive fields should still publish, got agentId=%q caps=%v", agentID, c.capabilities.Methods)
+	}
+}
+
+// The normal path: a still-connected handshake authenticates and records the
+// observed delivery report.
+func TestPublishWelcomeWhenConnectedAuthenticates(t *testing.T) {
+	c := NewClient(util.NewLogger("error"))
+	c.mu.Lock()
+	c.connected = true
+	c.mu.Unlock()
+
+	result := map[string]interface{}{
+		"observed": map[string]interface{}{"cwd": "/game"},
+	}
+	welcome := SessionWelcomeResult{AgentID: "a", Capabilities: Capabilities{Methods: []string{"tools/list"}}}
+	_, _, haveReport := c.publishWelcome(welcome, result)
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if !c.authenticated {
+		t.Fatal("a connected handshake must authenticate")
+	}
+	if c.observed == nil || !haveReport {
+		t.Fatal("a connected handshake must record the observed report")
 	}
 }

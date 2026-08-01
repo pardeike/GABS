@@ -140,12 +140,13 @@ is enough:
 
 ## Compatibility promises
 
-- Existing configs load, validate, and launch exactly as before; no new
-  warnings for ordinary legacy entries.
-- Existing MCP behavior preserved except three intentional, release-noted
-  changes: unknown arguments are now rejected (previously silently
-  ignored), `timeout` is range-checked, and config files containing
-  duplicate JSON members are rejected (previously last-value-wins).
+- Ordinary existing configs load, validate, and launch exactly as before. The
+  only newly rejected legacy config shapes are release-noted below.
+- Existing MCP/config behavior is preserved except four intentional,
+  release-noted changes: unknown MCP arguments are rejected (previously
+  silently ignored), `timeout` is range-checked, duplicate JSON members are
+  rejected (previously last-value-wins), and game IDs must be canonical,
+  runtime-addressable, and unique after portable case/Unicode normalization.
 - `stopProcessName` remains a supported fallback; GABS warns when multiple
   configured games share a process name.
 - Upgrading GABS while a pre-upgrade launch is still running is supported

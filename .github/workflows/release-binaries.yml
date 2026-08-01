@@ -166,6 +166,15 @@ jobs:
             exit 0
           fi
 
+          # A version-specific, reviewed note is the compatibility preamble.
+          # Generated notes remain useful for the commit/PR inventory, but a
+          # generic PR title cannot communicate upgrade hazards on its own.
+          NOTES_FILE="docs/releases/${RELEASE_TAG}.md"
+          RELEASE_NOTES=""
+          if [ -f "$NOTES_FILE" ]; then
+            RELEASE_NOTES="$(cat "$NOTES_FILE")"
+          fi
+
           args=(
             release create "$RELEASE_TAG"
             --verify-tag
@@ -177,9 +186,13 @@ jobs:
             args+=(--prerelease)
           fi
 
+          if [ -n "$RELEASE_NOTES" ]; then
+            args+=(--notes "$RELEASE_NOTES")
+          fi
+
           if [ "$GENERATE_NOTES" = "true" ]; then
             args+=(--generate-notes)
-          else
+          elif [ -z "$RELEASE_NOTES" ]; then
             args+=(--notes "")
           fi
 

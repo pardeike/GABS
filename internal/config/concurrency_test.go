@@ -8,6 +8,7 @@ import (
 
 func TestConcurrentBridgeCreation(t *testing.T) {
 	t.Log("Testing concurrent bridge file creation for different games...")
+	dir := t.TempDir() // isolate from ~/.gabs (round 12 F4)
 
 	var wg sync.WaitGroup
 	results := make([]concurrentResult, 10)
@@ -20,7 +21,7 @@ func TestConcurrentBridgeCreation(t *testing.T) {
 			defer wg.Done()
 
 			start := time.Now()
-			port, token, path, err := WriteBridgeJSON(gameNames[index], "")
+			port, token, path, err := WriteBridgeJSON(gameNames[index], dir)
 			duration := time.Since(start)
 
 			results[index] = concurrentResult{

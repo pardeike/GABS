@@ -184,6 +184,76 @@ func TestGamesConfig(t *testing.T) {
 	})
 }
 
+// AddGame is the mutation boundary used by the CLI. Anything it accepts must
+// remain loadable and must preserve the same injective game-ID→runtime-dir
+// mapping enforced by parseGamesConfig.
+func TestAddGameEnforcesRuntimeIDInvariants(t *testing.T) {
+	newGame := func(id string) GameConfig {
+		return GameConfig{ID: id, Name: id, LaunchMode: "DirectPath", Target: "/path/to/game"}
+	}
+
+	for _, id := range []string{"../bad", "factory/", "factory/../adventure", `factory\old`} {
+		t.Run("rejects "+id, func(t *testing.T) {
+			cfg := &GamesConfig{Version: "1.0", Games: map[string]GameConfig{}}
+			if err := cfg.AddGame(newGame(id)); err == nil {
+				t.Fatalf("AddGame accepted runtime-unsafe ID %q", id)
+			}
+			if len(cfg.Games) != 0 {
+				t.Fatalf("failed AddGame mutated the config: %#v", cfg.Games)
+			}
+		})
+	}
+
+	t.Run("rejects portable case-fold collision", func(t *testing.T) {
+		existing := newGame("adventure")
+		cfg := &GamesConfig{Version: "1.0", Games: map[string]GameConfig{"adventure": existing}}
+		if err := cfg.AddGame(newGame("Adventure")); err == nil {
+			t.Fatal("AddGame accepted IDs that share a runtime directory on case-insensitive filesystems")
+		}
+		got, ok := cfg.Games["adventure"]
+		if len(cfg.Games) != 1 || !ok || got.ID != existing.ID || got.Name != existing.Name {
+			t.Fatalf("collision rejection mutated the existing config: %#v", cfg.Games)
+		}
+	})
+
+	t.Run("rejects portable Unicode-normalization collision", func(t *testing.T) {
+		composed := newGame("caf\u00e9")
+		cfg := &GamesConfig{Version: "1.0", Games: map[string]GameConfig{composed.ID: composed}}
+		if err := cfg.AddGame(newGame("cafe\u0301")); err == nil {
+			t.Fatal("AddGame accepted IDs that normalize to the same runtime directory")
+		}
+		if len(cfg.Games) != 1 || cfg.Games[composed.ID].ID != composed.ID {
+			t.Fatalf("Unicode collision rejection mutated the existing config: %#v", cfg.Games)
+		}
+	})
+
+	t.Run("allows same-ID update", func(t *testing.T) {
+		cfg := &GamesConfig{Version: "1.0", Games: map[string]GameConfig{"adventure": newGame("adventure")}}
+		updated := newGame("adventure")
+		updated.Name = "Updated"
+		if err := cfg.AddGame(updated); err != nil {
+			t.Fatalf("same-ID update was rejected: %v", err)
+		}
+		if got := cfg.Games["adventure"].Name; got != "Updated" {
+			t.Fatalf("same-ID update did not land, name = %q", got)
+		}
+	})
+
+	t.Run("accepted nested ID round-trips through loader", func(t *testing.T) {
+		cfg := &GamesConfig{Version: "1.0", Games: map[string]GameConfig{}}
+		if err := cfg.AddGame(newGame("factory/old")); err != nil {
+			t.Fatalf("canonical nested ID was rejected: %v", err)
+		}
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := SaveGamesConfigToPath(cfg, path); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadGamesConfigFromPath(path); err != nil {
+			t.Fatalf("AddGame accepted a config its loader rejects: %v", err)
+		}
+	})
+}
+
 func TestGamesConfigStartupTimeoutDefaults(t *testing.T) {
 	t.Run("MissingTimeoutConfigUsesDefaults", func(t *testing.T) {
 		cfg := &GamesConfig{}

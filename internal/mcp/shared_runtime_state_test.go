@@ -14,7 +14,7 @@ import (
 )
 
 func TestSharedRuntimeStateHelperProcess(t *testing.T) {
-	if os.Getenv("GABS_HELPER_PROCESS") != "1" {
+	if os.Getenv("GABSTEST_HELPER_PROCESS") != "1" {
 		return
 	}
 
@@ -29,7 +29,7 @@ func TestGamesStartShortCircuitsAcrossServers(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	t.Setenv("GABS_HELPER_PROCESS", "1")
+	t.Setenv("GABSTEST_HELPER_PROCESS", "1")
 
 	game := helperProcessGameConfig(t, "shared-runtime-game")
 	gamesConfig := &config.GamesConfig{
@@ -40,11 +40,11 @@ func TestGamesStartShortCircuitsAcrossServers(t *testing.T) {
 	}
 
 	logger := util.NewLogger("error")
-	serverA := NewServerForTesting(logger)
+	serverA := NewServerForTesting(t, logger)
 	serverA.SetConfigDir(tempDir)
 	serverA.RegisterGameManagementTools(gamesConfig, 0, 0)
 
-	serverB := NewServerForTesting(logger)
+	serverB := NewServerForTesting(t, logger)
 	serverB.SetConfigDir(tempDir)
 	serverB.RegisterGameManagementTools(gamesConfig, 0, 0)
 
@@ -105,7 +105,7 @@ func TestGamesStartRemovesStaleSharedRuntimeState(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	t.Setenv("GABS_HELPER_PROCESS", "1")
+	t.Setenv("GABSTEST_HELPER_PROCESS", "1")
 
 	game := helperProcessGameConfig(t, "stale-runtime-game")
 	gamesConfig := &config.GamesConfig{
@@ -127,7 +127,7 @@ func TestGamesStartRemovesStaleSharedRuntimeState(t *testing.T) {
 	}
 
 	logger := util.NewLogger("error")
-	server := NewServerForTesting(logger)
+	server := NewServerForTesting(t, logger)
 	server.SetConfigDir(tempDir)
 	server.RegisterGameManagementTools(gamesConfig, 0, 0)
 

@@ -83,7 +83,7 @@ Content-Type: application/json
   "id": 1,
   "method": "tools/call",
   "params": {
-    "name": "games.list",
+    "name": "games_list",
     "arguments": {}
   }
 }
@@ -102,12 +102,12 @@ Returns basic server metadata such as `status`, `server`, and `version`.
 # List games
 curl -X POST http://localhost:8080/mcp \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"games.list","arguments":{}}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"games_list","arguments":{}}}'
 
 # Start a game
 curl -X POST http://localhost:8080/mcp \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"games.start","arguments":{"gameId":"factory"}}}'
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"games_start","arguments":{"gameId":"factory"}}}'
 ```
 
 #### Python Integration
@@ -139,13 +139,13 @@ class GABSClient:
         return response.json()
     
     def list_games(self):
-        return self.call_tool("games.list")
+        return self.call_tool("games_list")
     
     def start_game(self, game_id):
-        return self.call_tool("games.start", {"gameId": game_id})
+        return self.call_tool("games_start", {"gameId": game_id})
     
     def stop_game(self, game_id):
-        return self.call_tool("games.stop", {"gameId": game_id})
+        return self.call_tool("games_stop", {"gameId": game_id})
 
 # Usage
 client = GABSClient()
@@ -187,19 +187,19 @@ class GABSClient {
     }
     
     async listGames() {
-        return await this.callTool('games.list');
+        return await this.callTool('games_list');
     }
     
     async startGame(gameId) {
-        return await this.callTool('games.start', { gameId });
+        return await this.callTool('games_start', { gameId });
     }
     
     async stopGame(gameId) {
-        return await this.callTool('games.stop', { gameId });
+        return await this.callTool('games_stop', { gameId });
     }
     
     async getGameStatus(gameId) {
-        return await this.callTool('games.status', { gameId });
+        return await this.callTool('games_status', { gameId });
     }
 }
 
@@ -261,11 +261,12 @@ is useful when you want separate local, test, or CI environments.
 
 ```bash
 # Use a custom config directory
-GABS_CONFIG_DIR=/path/to/custom-gabs gabs server
-
-# Or specify it directly
 gabs server --configDir /path/to/custom-gabs
 gabs games --configDir /path/to/custom-gabs list
+
+# The flag is positional-independent: these are equivalent
+gabs games list --configDir /path/to/custom-gabs
+gabs games start adventure --configDir /path/to/custom-gabs --profile combat-test
 ```
 
 Typical contents include `config.json`, per-game directories, `bridge.json`, and
@@ -353,11 +354,11 @@ sleep 5
 # Start games via API
 curl -X POST http://localhost:8080/mcp \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"games.start","arguments":{"gameId":"factory"}}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"games_start","arguments":{"gameId":"factory"}}}'
 
 curl -X POST http://localhost:8080/mcp \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"games.start","arguments":{"gameId":"adventure"}}}'
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"games_start","arguments":{"gameId":"adventure"}}}'
 
 echo "Game servers started. GABS PID: $GABS_PID"
 ```
@@ -423,9 +424,6 @@ sudo pfctl -s rules | grep 8080
 ### Debug Mode
 ```bash
 # Run with debug logging
-GABS_LOG_LEVEL=debug gabs server
-
-# Or specify it directly
 gabs server --log-level debug
 ```
 
@@ -445,9 +443,14 @@ jobs:
       
       - name: Install GABS
         run: |
-          wget https://github.com/pardeike/GABS/releases/latest/download/gabs-linux-amd64
-          chmod +x gabs-linux-amd64
-          sudo mv gabs-linux-amd64 /usr/local/bin/gabs
+          # Release assets are versioned zip archives (gabs-<version>-<os>-<arch>.zip)
+          TAG=$(curl -fsSL https://api.github.com/repos/pardeike/GABS/releases/latest \
+            | grep -oE '"tag_name":[[:space:]]*"[^"]+"' | head -1 | cut -d'"' -f4)
+          curl -fsSL -o gabs.zip \
+            "https://github.com/pardeike/GABS/releases/download/${TAG}/gabs-${TAG}-linux-amd64.zip"
+          unzip -j gabs.zip '*/gabs' -d .
+          chmod +x gabs
+          sudo mv gabs /usr/local/bin/gabs
       
       - name: Configure test game
         run: |
@@ -464,7 +467,7 @@ jobs:
           # Test API endpoints
           curl -X POST http://localhost:8080/mcp \
             -H "Content-Type: application/json" \
-            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"games.list","arguments":{}}}'
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"games_list","arguments":{}}}'
 ```
 
 This advanced guide covers the more complex features of GABS. For basic usage, start with the main README and other guides first.

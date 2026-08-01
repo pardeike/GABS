@@ -28,8 +28,13 @@ unknown key surfaces in global configWarnings via MCP; duplicate JSON
 members anywhere → config_invalid with path, including duplicates that
 struct decoding would silently collapse; static resolvability errors with
 both JSON path and filesystem path; JSON-path accuracy; Windows
-non-executable hook command rejection; M1 lifecycle feature gate rejects
-`lifecycle` fields until milestone 2.
+non-executable hook command rejection; the M1 lifecycle feature gate is
+removed (M2.14) — `lifecycle` fields now validate and execute rather than
+being rejected as "not yet supported". `AddGame` enforces the same canonical,
+runtime-safe game-ID and portable case-fold/Unicode-normalization collision
+rules as config loading (composed and decomposed forms collide); a rejected add
+does not mutate the map, and every accepted ID round-trips through save plus
+load.
 
 ## T-RES — Resolver
 
@@ -41,7 +46,9 @@ substitution without shell; deep-copy immutability across reload; one
 pinned revision per resolution; hook PATH resolution to absolute;
 `GABS_FORWARD_ENV` equals the actually-injected key set (drift
 assertion); resolved-spec platform-size check (oversized env block/argv →
-structured Stage 2 error naming the part, not E2BIG/spawn failure).
+structured Stage 2 error naming the part, not E2BIG/spawn failure), with
+Darwin-vs-Linux combined/per-string limits, non-4-KiB Linux pages, Darwin's
+valid 200-KiB single argument, and pointer-table/terminator/alignment overhead.
 
 ## T-START — Start pipeline
 
@@ -69,10 +76,28 @@ structured Stage 2 error naming the part, not E2BIG/spawn failure).
 - started_bridge_pending: helper runs, never connects →
   started_bridge_pending, background attach continues, later
   games_connect succeeds against a late-starting fake bridge.
-- Steam advisory: warning present when no steam-named process, absent
-  otherwise; never blocks; SteamManaged with Steam absent proceeds to
-  spawn with the Stage 2 warning (EnsureClientRunning failure never fails
-  the start).
+- Steam readiness: macOS SteamManaged does not spawn until a fresh hidden-child
+  probe proves client-library pipe and global user, then a Steamworks API init,
+  subscribed+installed app state for the configured App ID through that API,
+  and a balanced shutdown in the helper; a connected global user with API init
+  or app state still unavailable must not pass; cold-client flow opens Steam once and
+  eventually succeeds; permanently not-ready flow
+  waits to the caller deadline then returns retryable
+  `store_client_not_ready` with `processStarted=false`; absent/unloadable probe
+  returns the same stable code with non-retryable `probe_unavailable`; helper
+  crash/hang/malformed/oversized output is contained; the explicit App ID is
+  validated while ambient App-ID environment is scrubbed before the helper sets
+  its own process-local identity from that value;
+  failure releases the fresh claim and does not
+  mutate history. Success restamps the fenced deadline and preserves the full
+  Stage 4/GABP budget; post-proof transition overhead crossing the old
+  readiness deadline still restamps the unchanged fencing identity, while a
+  successor identity cannot be overwritten. SteamAppId and non-macOS paths
+  retain their current advisory/assistance behavior. Native macOS library
+  candidate scanning continues after loadable-but-incompatible candidates for
+  both the client and API libraries, returns the first ready/not-ready
+  observation, and retains the furthest unavailable evidence only after all
+  candidates are exhausted.
 - Pre-start probes: no claim + any profile's probe running →
   external_instance_detected (+ external snapshot); probes unknown →
   start proceeds with warning listing unprobeable profiles; with claim +
@@ -119,7 +144,9 @@ scenario documented-only (manual test); hook env excludes GABP secrets;
 stderr tail in failure results; PID-reuse fingerprint mismatch;
 inspection errors (permission-denied process table, fingerprint read
 failure) → unknown, never stopped, distinct from no-match;
-stopProcessName collision warning.
+stopProcessName collision warning; built-in process discovery, every per-PID
+signal, and verification name scans cancel at the persisted operation deadline
+(no later PID signaled after expiry).
 
 ## T-FENCE — Phases, transition lock, fencing
 
@@ -141,6 +168,12 @@ discarded (ABA test across claim delete/recreate); the lock is provably
 not held during hook execution (a blocked hook does not prevent the other
 process from reading state); lock acquisition failure surfaces as a
 bounded `operation_in_progress`, never a hang.
+
+Terminal failed-stop and unobserved-start history writes occur while the exact
+launch/operation is still fenced and before its runtime completion commits. A
+forced history write failure reaches the caller and leaves the operation in
+the claim for retry/recovery; a competing retry/successor cannot create a gap
+that silently drops `lastFailure` or `consecutiveFailures`.
 
 Atomic claim publication: a status read racing initial claim publication
 never observes empty/partial JSON (hammer test: reader loop during
@@ -213,7 +246,13 @@ combination whose workload crashes keeps its outcome-implied class (game)
 with the candidate-input secondary note, bare-set proof intact, and
 editing that declaration resets only its bucket; proof-adjusted
 classification — missing target on proven context → environment, on
-never-proven → config; "workload proven, bridge never connected" renders
+never-proven → config; a post-spawn `exited_during_start` is `game` by the
+evidence-based default across every launch mode (DirectPath, CustomCommand,
+SteamManaged) and however the exit was surfaced (dead PID or status hook
+reporting stopped) — never re-attributed to environment on the basis of
+launch mode or hook result (design/05 §"Why exited_during_start is always
+game"); an OS process-creation failure stays `spawn_failed`/environment;
+"workload proven, bridge never connected" renders
 the game-side hint; every failure result carries causeClass +
 track-record line; no non-config nextActions template mentions config
 editing (template-level assertion); call-class errors (unknown profile,
@@ -224,7 +263,10 @@ history.json survives claim removal and restart, is 0600/atomic, and
 entrySnapshot never appears in MCP results; corrupt history.json degrades
 to "no track record" without affecting lifecycle operations; history
 counter updates from a server callback and a CLI stop interleaved under
-the transition lock lose no increments.
+the transition lock lose no increments. The stress cell runs 40×2 updates
+with at most eight recorder calls contending simultaneously and asserts every
+returned error before inspecting counters, so the test distinguishes a lost
+successful RMW from the lock's intentional bounded-contention error.
 
 ## T-DELIV — Context delivery and conformance
 
@@ -301,7 +343,9 @@ one code (exhaustiveness assertion over the outcome enum).
 (Stages 1–4); CLI start terminates with `started_attachment_deferred` and
 exits without GABP client after Stage 4, and a later server games_connect
 attaches from the claim endpoint; stop/kill from snapshot after server
-exit; repair --forget-runtime.
+exit; repair --forget-runtime. Doctor's broadly-readable findings describe
+the actual contents of config, endpoint/runtime state, logs, history, and lock
+files instead of attributing the per-launch bridge token to all of them.
 
 ## T-ACC — Acceptance (issue scenario, neutral naming)
 
@@ -335,6 +379,12 @@ surfacing exit code + output tail end-to-end.
 - old bridge with no delivery report → overall unknown, zero
   deliveriesVerified; genuinely partial report (one channel mismatched or
   unreported) → overall partial; the two are never conflated.
+- every production server transport return and context-cancellation path calls
+  `Server.Shutdown`; HTTP cancellation waits for its bounded graceful transport
+  shutdown, while stdio cancellation does not wait forever on an
+  uninterruptible stdin read; a `started_bridge_pending` retry with a long GABP
+  timeout is cancelled and joined promptly, and cannot publish a connection
+  after shutdown.
 
 ## Gates
 

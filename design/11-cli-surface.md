@@ -25,6 +25,10 @@ gabs games repair <id> [--forget-runtime]
   `started_bridge_pending`), claim phase `active`, next action
   `games_connect` from a server session. CLI/MCP parity therefore covers
   Stages 1–4; Stage 5 outcomes are server-only.
+- On macOS, a SteamManaged CLI start uses the configured/default GABP timeout
+  as an independent pre-spawn Steam-readiness deadline, then receives the
+  normal Stage 3/4 budget. It adds no CLI flag. A failed proof renders
+  `store_client_not_ready` and never spawns the game.
 - `status`/`stop`/`kill` work from the persisted snapshot after the
   original GABS process exited.
 - `gabs games doctor <id>` (existing) becomes profile-aware: validates

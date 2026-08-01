@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/pardeike/gabs/internal/config"
@@ -11,7 +10,7 @@ import (
 
 func TestGameResourceCleanup(t *testing.T) {
 	log := util.NewLogger("error")
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 
 	gameId := "test-game"
 
@@ -91,12 +90,16 @@ func TestGameResourceCleanup(t *testing.T) {
 
 func TestBridgeConfigCleanup(t *testing.T) {
 	log := util.NewLogger("error")
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
+	// Write to the server's ISOLATED config dir (never ~/.gabs), so cleanup
+	// operates on the same isolated directory (round 12 F4).
+	dir := t.TempDir()
+	server.SetConfigDir(dir)
 
 	gameId := "cleanup-test-game"
 
 	// Create a bridge config file
-	port, token, configPath, err := config.WriteBridgeJSON(gameId, "")
+	port, token, configPath, err := config.WriteBridgeJSON(gameId, dir)
 	if err != nil {
 		t.Fatalf("Failed to create bridge config: %v", err)
 	}
@@ -115,17 +118,12 @@ func TestBridgeConfigCleanup(t *testing.T) {
 	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
 		t.Errorf("Bridge config file still exists after cleanup: %s", configPath)
 	}
-
-	// Clean up the directory too
-	dir := filepath.Dir(configPath)
-	if err := os.RemoveAll(dir); err != nil {
-		t.Logf("Warning: failed to clean up test directory %s: %v", dir, err)
-	}
+	// t.TempDir() cleans the isolated directory automatically.
 }
 
 func TestMixedGameCleanup(t *testing.T) {
 	log := util.NewLogger("error")
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 
 	game1 := "game1"
 	game2 := "game2"
@@ -186,7 +184,7 @@ func TestMixedGameCleanup(t *testing.T) {
 
 func TestRegisterGameToolCleanupWithNormalization(t *testing.T) {
 	log := util.NewLogger("error")
-	server := NewServerForTesting(log)
+	server := NewServerForTesting(t, log)
 
 	gameID := "factory"
 	tool := Tool{
