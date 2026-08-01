@@ -619,7 +619,13 @@ contract, not a scratchpad.
       atomic history.json beside runtime.json, every read-modify-write
       under the per-game transition lock so a server delivery callback
       and a CLI stop lose no increments (proven by a 40×2 concurrent
-      -race test). The context hash is INPUT-FREE by construction —
+      -race test). A 2026-08-01 Windows CI follow-up made that stress cell
+      faithful to the lock contract: all 40×2 updates still run, at most eight
+      recorder calls contend at once, and every returned error is asserted
+      before counters are checked. The former 80-at-once harness discarded
+      intentional five-second `ErrTransitionLockBusy` results and mislabeled
+      the unperformed writes as lost successful increments. The context hash
+      is INPUT-FREE by construction —
       composed from the resolver's own effective base context (a shared
       launch.ResolveBaseContext reusing the real env merge — target, mode,
       base argv, the config-declared env layer with platform folding,

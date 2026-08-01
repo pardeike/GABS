@@ -343,21 +343,38 @@ func TestHistoryConcurrentUpdatesLoseNoIncrements(t *testing.T) {
 
 	// A server delivery callback and a bridge-connect interleaved must not
 	// overwrite each other's counters (design/20: RMW under the lock).
-	const n = 40
+	const (
+		n             = 40
+		maxConcurrent = 8
+	)
 	var wg sync.WaitGroup
+	slots := make(chan struct{}, maxConcurrent)
+	errs := make(chan error, 2*n)
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_ = RecordBridgeConnect("adv", dir, lid, "combat", hash, now)
+			slots <- struct{}{}
+			err := RecordBridgeConnect("adv", dir, lid, "combat", hash, now)
+			<-slots
+			errs <- err
 		}()
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_ = RecordDeliveryVerified("adv", dir, lid, "combat", hash, now)
+			slots <- struct{}{}
+			err := RecordDeliveryVerified("adv", dir, lid, "combat", hash, now)
+			<-slots
+			errs <- err
 		}()
 	}
 	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("history update failed under bounded contention: %v", err)
+		}
+	}
 	h, _ := LoadHistory("adv", dir)
 	e := h.Profiles["combat"]
 	if e.BridgeConnects != n || e.DeliveriesVerified != n {

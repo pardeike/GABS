@@ -240,7 +240,10 @@ history.json survives claim removal and restart, is 0600/atomic, and
 entrySnapshot never appears in MCP results; corrupt history.json degrades
 to "no track record" without affecting lifecycle operations; history
 counter updates from a server callback and a CLI stop interleaved under
-the transition lock lose no increments.
+the transition lock lose no increments. The stress cell runs 40×2 updates
+with at most eight recorder calls contending simultaneously and asserts every
+returned error before inspecting counters, so the test distinguishes a lost
+successful RMW from the lock's intentional bounded-contention error.
 
 ## T-DELIV — Context delivery and conformance
 
