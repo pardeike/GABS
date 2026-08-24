@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -38,6 +39,40 @@ func TestLSPFrameWriterWritesOneCompleteFrame(t *testing.T) {
 	}
 	if decoded.ID != float64(1) {
 		t.Fatalf("unexpected id: %#v", decoded.ID)
+	}
+}
+
+func TestLSPFrameReaderClassifiesMalformedFraming(t *testing.T) {
+	tests := []struct {
+		name    string
+		frame   string
+		message string
+	}{
+		{name: "missing header", frame: "\r\n", message: "missing Content-Length header"},
+		{name: "invalid length", frame: "Content-Length: nope\r\n\r\n", message: "invalid Content-Length value"},
+		{name: "zero length", frame: "Content-Length: 0\r\n\r\n", message: "invalid Content-Length value: 0"},
+		{name: "negative length", frame: "Content-Length: -1\r\n\r\n", message: "invalid Content-Length value: -1"},
+		{name: "duplicate header", frame: "Content-Length: 1\r\nContent-Length: 1\r\n\r\nx", message: "duplicate Content-Length header"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := NewLSPFrameReader(bytes.NewBufferString(test.frame)).ReadMessage()
+			if err == nil {
+				t.Fatal("expected malformed frame to fail")
+			}
+			if !IsFrameProtocolError(err) {
+				t.Fatalf("expected a frame protocol error, got %T: %v", err, err)
+			}
+			if !strings.Contains(err.Error(), test.message) {
+				t.Fatalf("expected %q in error, got %q", test.message, err)
+			}
+		})
+	}
+
+	_, err := NewLSPFrameReader(bytes.NewReader(nil)).ReadMessage()
+	if err == nil || IsFrameProtocolError(err) {
+		t.Fatalf("plain EOF must remain a transport error, got %v", err)
 	}
 }
 

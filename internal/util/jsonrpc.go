@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -115,6 +116,26 @@ type LSPFrameReader struct {
 	reader *bufio.Reader
 }
 
+type frameProtocolError struct {
+	reason string
+}
+
+func (e *frameProtocolError) Error() string {
+	return e.reason
+}
+
+func newFrameProtocolError(format string, args ...interface{}) error {
+	return &frameProtocolError{reason: fmt.Sprintf(format, args...)}
+}
+
+// IsFrameProtocolError reports whether err describes malformed LSP framing.
+// Callers can use it to distinguish a corrupt protocol stream from an ordinary
+// transport close or read failure.
+func IsFrameProtocolError(err error) bool {
+	var protocolErr *frameProtocolError
+	return errors.As(err, &protocolErr)
+}
+
 // NewLSPFrameReader creates a new LSP frame reader
 func NewLSPFrameReader(r io.Reader) *LSPFrameReader {
 	return &LSPFrameReader{
@@ -125,6 +146,7 @@ func NewLSPFrameReader(r io.Reader) *LSPFrameReader {
 // ReadMessage reads one LSP-framed message
 func (r *LSPFrameReader) ReadMessage() ([]byte, error) {
 	var contentLength int
+	haveContentLength := false
 
 	// Read headers until empty line
 	for {
@@ -144,20 +166,27 @@ func (r *LSPFrameReader) ReadMessage() ([]byte, error) {
 
 		// Parse Content-Length header
 		if strings.HasPrefix(line, "Content-Length:") {
+			if haveContentLength {
+				return nil, newFrameProtocolError("duplicate Content-Length header")
+			}
 			parts := strings.SplitN(line, ":", 2)
 			if len(parts) != 2 {
-				return nil, fmt.Errorf("invalid Content-Length header: %s", line)
+				return nil, newFrameProtocolError("invalid Content-Length header: %s", line)
 			}
 			length, err := strconv.Atoi(strings.TrimSpace(parts[1]))
 			if err != nil {
-				return nil, fmt.Errorf("invalid Content-Length value: %s", parts[1])
+				return nil, newFrameProtocolError("invalid Content-Length value: %s", parts[1])
+			}
+			if length <= 0 {
+				return nil, newFrameProtocolError("invalid Content-Length value: %d", length)
 			}
 			contentLength = length
+			haveContentLength = true
 		}
 	}
 
-	if contentLength == 0 {
-		return nil, fmt.Errorf("missing Content-Length header")
+	if !haveContentLength {
+		return nil, newFrameProtocolError("missing Content-Length header")
 	}
 
 	// Read the message body
