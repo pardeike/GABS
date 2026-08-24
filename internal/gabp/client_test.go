@@ -389,6 +389,130 @@ func TestCallToolFailsFastWhenConnectionDrops(t *testing.T) {
 	}
 }
 
+func TestSendRequestFailsFastOnCorruptGABPFrame(t *testing.T) {
+	tests := []struct {
+		name       string
+		writeReply func(net.Conn) error
+		want       string
+	}{
+		{
+			name: "missing content length",
+			writeReply: func(conn net.Conn) error {
+				_, err := conn.Write([]byte("\r\n"))
+				return err
+			},
+			want: "corrupt GABP frame: missing Content-Length header",
+		},
+		{
+			name: "invalid JSON body",
+			writeReply: func(conn net.Conn) error {
+				return util.NewLSPFrameWriter(conn).WriteMessage([]byte("{"))
+			},
+			want: "corrupt GABP frame: invalid JSON",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clientConn, serverConn := net.Pipe()
+			client := NewClient(util.NewLogger("error"))
+			client.conn = clientConn
+			client.writer = util.NewLSPFrameWriter(clientConn)
+			client.reader = util.NewLSPFrameReader(clientConn)
+			client.connected = true
+			go client.messageHandler()
+			defer client.Close()
+
+			serverDone := make(chan error, 1)
+			go func() {
+				defer serverConn.Close()
+				if _, err := util.NewLSPFrameReader(serverConn).ReadMessage(); err != nil {
+					serverDone <- err
+					return
+				}
+				serverDone <- test.writeReply(serverConn)
+			}()
+
+			start := time.Now()
+			_, err := client.sendRequestWithTimeout("tools/call", map[string]interface{}{}, 5*time.Second)
+			if err == nil {
+				t.Fatal("expected the corrupt stream to fail the request")
+			}
+			if elapsed := time.Since(start); elapsed > time.Second {
+				t.Fatalf("expected corrupt stream to fail fast, took %v", elapsed)
+			}
+			if !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("expected %q in error, got %v", test.want, err)
+			}
+			if err := <-serverDone; err != nil {
+				t.Fatalf("server failed: %v", err)
+			}
+		})
+	}
+}
+
+func TestRequestTimeoutLeavesConnectionUsable(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	client := NewClient(util.NewLogger("error"))
+	client.conn = clientConn
+	client.writer = util.NewLSPFrameWriter(clientConn)
+	client.reader = util.NewLSPFrameReader(clientConn)
+	client.connected = true
+	go client.messageHandler()
+	defer client.Close()
+
+	serverDone := make(chan error, 1)
+	go func() {
+		defer serverConn.Close()
+		reader := util.NewLSPFrameReader(serverConn)
+		writer := util.NewLSPFrameWriter(serverConn)
+
+		data, err := reader.ReadMessage()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		var first util.GABPMessage
+		if err := json.Unmarshal(data, &first); err != nil {
+			serverDone <- err
+			return
+		}
+
+		time.Sleep(50 * time.Millisecond)
+		if err := writer.WriteJSON(util.NewGABPResponse(first.ID, "late")); err != nil {
+			serverDone <- err
+			return
+		}
+
+		data, err = reader.ReadMessage()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		var second util.GABPMessage
+		if err := json.Unmarshal(data, &second); err != nil {
+			serverDone <- err
+			return
+		}
+		serverDone <- writer.WriteJSON(util.NewGABPResponse(second.ID, "ok"))
+	}()
+
+	if _, err := client.sendRequestWithTimeout("tools/call", map[string]interface{}{}, 10*time.Millisecond); err == nil || !strings.Contains(err.Error(), "request timeout") {
+		t.Fatalf("expected the first request to time out, got %v", err)
+	}
+
+	result, err := client.sendRequestWithTimeout("tools/call", map[string]interface{}{}, time.Second)
+	if err != nil {
+		t.Fatalf("expected the connection to remain usable, got %v", err)
+	}
+	if result != "ok" {
+		t.Fatalf("unexpected second response: %#v", result)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatalf("server failed: %v", err)
+	}
+}
+
 // waitForDisconnectAfterWriteConn makes the response and disconnect signals
 // ready before sendRequestWithTimeout starts waiting. That deterministically
 // exercises the case where a bridge writes its final response and then closes.

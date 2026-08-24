@@ -298,19 +298,24 @@ func (c *Client) messageHandler() {
 	for c.transportUp() {
 		data, err := c.reader.ReadMessage()
 		if err != nil {
-			if !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.EOF) {
+			if util.IsFrameProtocolError(err) {
+				c.log.Errorw("corrupt GABP frame", "error", err)
+				loopErr = fmt.Errorf("corrupt GABP frame: %w", err)
+			} else if !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.EOF) {
 				c.log.Errorw("failed to read message", "error", err)
+				loopErr = fmt.Errorf("failed to read message: %w", err)
 			} else {
 				c.log.Infow("GABP connection closed", "error", err)
+				loopErr = fmt.Errorf("failed to read message: %w", err)
 			}
-			loopErr = fmt.Errorf("failed to read message: %w", err)
 			break
 		}
 
 		var msg util.GABPMessage
 		if err := json.Unmarshal(data, &msg); err != nil {
-			c.log.Errorw("failed to unmarshal message", "error", err)
-			continue
+			c.log.Errorw("corrupt GABP frame", "error", err)
+			loopErr = fmt.Errorf("corrupt GABP frame: invalid JSON: %w", err)
+			break
 		}
 
 		c.handleMessage(&msg)
