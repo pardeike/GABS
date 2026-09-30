@@ -2064,19 +2064,16 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		return entries[cursor:end], nextCursor
 	}
 
-	buildToolNameItemsWithOptions := func(entries []listedGameTool, brief bool) []map[string]interface{} {
+	buildToolNameItemsWithOptions := func(entries []listedGameTool, brief, includeGameID bool) []map[string]interface{} {
 		items := make([]map[string]interface{}, 0, len(entries))
 		for _, entry := range entries {
 			item := map[string]interface{}{
-				"name":      entry.Tool.Name,
-				"gameId":    entry.GameID,
-				"localName": entry.LocalName,
+				"name": entry.Tool.Name,
 			}
-			if entry.CanonicalName != entry.Tool.Name {
-				item["originalName"] = entry.CanonicalName
-			}
-			if gabpName := toolMetaString(entry.Tool, toolMetaGABPName); gabpName != "" {
-				item["gabpName"] = gabpName
+			// Single-game responses already identify the game at the top level.
+			// Keep aliases in tool detail and internal resolution, not discovery.
+			if includeGameID {
+				item["gameId"] = entry.GameID
 			}
 			if tags := toolMetaStringSlice(entry.Tool, toolMetaTags); len(tags) > 0 {
 				item["tags"] = tags
@@ -2133,7 +2130,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 		structured := map[string]interface{}{
 			"requested":      requested,
 			"availableTotal": len(entries),
-			"candidates":     buildToolNameItemsWithOptions(candidates, true),
+			"candidates":     buildToolNameItemsWithOptions(candidates, true, game == nil),
 			"nextActions": []map[string]interface{}{
 				mcpNextAction("games_tool_names", discoverArgs, "Discover available game tools before retrying."),
 			},
@@ -2274,7 +2271,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 	// games_tool_names tool - Compact game tool discovery for AI clients
 	s.RegisterToolWithConfig(Tool{
 		Name:        "games.tool_names",
-		Description: "List compact game-specific tool names. Use this first for low-token discovery, then call games_tool_detail for one tool.",
+		Description: "List compact game-specific tools: callable name, optional tags and brief summary. Single-game results identify gameId once at the top level; all-game results include it per tool. Use games_tool_detail for aliases and schemas.",
 		InputSchema: map[string]interface{}{
 			"additionalProperties": false,
 			"type":                 "object",
@@ -2369,7 +2366,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 					"total":          total,
 					"returned":       0,
 					"nextCursor":     nextCursor,
-					"tools":          buildToolNameItemsWithOptions(nil, brief),
+					"tools":          buildToolNameItemsWithOptions(nil, brief, game == nil),
 				},
 			}, nil
 		}
@@ -2393,7 +2390,7 @@ func (s *Server) RegisterGameManagementTools(gamesConfig *config.GamesConfig, ba
 			"availableTotal": availableTotal,
 			"total":          total,
 			"returned":       len(page),
-			"tools":          buildToolNameItemsWithOptions(page, brief),
+			"tools":          buildToolNameItemsWithOptions(page, brief, game == nil),
 			"nextCursor":     nextCursor,
 		}
 		if game != nil {

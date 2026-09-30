@@ -60,6 +60,10 @@ Edit GABS config only when **(a)** the failure's `causeClass` is `config`, **(b)
 
 - Use `games_tool_names` before attempting game-specific actions.
 - Pass `brief: true` for compact summaries.
+- Pass each entry's `name` unchanged to `games_tool_detail` or `games_call_tool`.
+  Discovery omits name aliases; inspect tool detail when those are needed.
+  Single-game results carry `gameId` at the top level; results across games
+  include it per entry. Do not infer game IDs by parsing tool names.
 - Pass `query` or `prefix` when looking for a likely capability.
 - Use `games_tool_detail` for the exact schema of one tool before supplying arguments.
 - If `games_tool_detail` or `games_call_tool` says a tool is missing, inspect the structured candidates or call `games_tool_names` again.

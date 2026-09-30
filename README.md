@@ -195,6 +195,12 @@ games_tool_names  {"gameId": "mygame", "brief": true}
 games_tool_detail {"tool": "mygame_inventory_get"}
 games_call_tool   {"tool": "mygame_inventory_get", "arguments": {...}}
 ```
+Discovery entries contain the callable `name`, optional `tags`, and a `summary`
+when `brief: true`. A single-game response carries `gameId` once at the top
+level; discovery across games includes `gameId` per entry. Pass `name` unchanged
+to detail or call. See the [discovery response contract and migration note](docs/DYNAMIC_TOOLS_GUIDE.md#compact-discovery-response-contract)
+if your client previously read name aliases from the list.
+
 `games_tool_names` may be empty right after start while the bridge is still
 connecting (`started_bridge_pending`) — retry rather than assuming a tool is
 missing.

@@ -95,6 +95,43 @@ case where increasing the timeout may help.
 
 **Best Practice**: Use `games_tool_names` for low-token discovery, then call `games_tool_detail` only for the few tools you might actually use. Keep `games_tools` for compatibility or when you intentionally want the richer one-shot listing.
 
+#### Compact discovery response contract
+
+`games_tool_names` returns a compact entry for each tool:
+
+```json
+{
+  "name": "factory_map_summary",
+  "tags": ["read-only"],
+  "summary": "Read a compact map summary."
+}
+```
+
+`name` is the registered callable identifier. Pass it unchanged as `tool` to
+`games_tool_detail` or `games_call_tool`; do not reconstruct names or game IDs
+from it. `tags` is present only when the bridge provides tags. `summary` is
+present only when `brief: true` and a non-empty description is available.
+`brief` continues to mean "include a summary"; discovery entries are compact
+whether it is true or false.
+
+When requesting one `gameId`, that ID appears at the response's top level and
+is omitted from each entry. When listing across games without `gameId`, each
+entry includes its own `gameId`, even if the current page contains only one
+game. The same entry shape is used for missing-tool recovery `candidates`:
+single-game errors carry the game ID at the top level, while errors across
+games include it per candidate.
+
+**Migration note:** compact discovery no longer returns `localName`,
+`originalName`, or `gabpName`, and single-game entries no longer repeat
+`gameId`. This is a breaking response-shape change for clients that parsed
+those fields. Use `name` to inspect or invoke a tool; use the top-level
+`gameId` for a single-game response or the entry's `gameId` across games.
+Use `games_tool_detail` when you need the local/GABP name, original name,
+or schemas. The detailed `games_tools` compatibility listing retains its
+metadata. Previously accepted call aliases, filtering by registered,
+original and local names, ordering, pagination, and count fields remain
+unchanged.
+
 ```javascript
 // AI Discovery Workflow
 async function discoverGameCapabilities() {
